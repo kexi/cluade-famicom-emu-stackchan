@@ -339,9 +339,18 @@ public:
     float sampleBufR[2048] = {};     // right
 #endif
     int sampleCount = 0;
-#ifndef NES_EMBEDDED
     // per-channel raw levels at each sample point (debug scope): p1,p2,tri,noise,dmc
+    //
+    // Kept on the embedded build too so the browser's scope can show the device.
+    // 16KB of internal SRAM is the price; the per-sample cost is avoided instead
+    // by writing only while waveCapture is set, so a device nobody is watching
+    // pays one predictable branch per sample and nothing else.
     uint8_t chanBuf[8][2048] = {};
+#ifdef NES_EMBEDDED
+    // Enabled by the frontend for as long as a debugger is actually asking for
+    // waveforms, then dropped again. Public because the frame loop owns the
+    // policy (how long to stay armed), not the APU.
+    bool waveCapture = false;
 #endif
     // per-channel mute switches (UI): p1,p2,tri,noise,dmc,(expansion x3)
     bool chanEnable[8] = {true, true, true, true, true, true, true, true};
@@ -454,6 +463,19 @@ private:
     void quarterFrame();
     void halfFrame();
     void stepDmc();
+#ifdef NES_EMBEDDED
+    // Record one scope sample. Both downsample sites call this so the two paths
+    // cannot drift apart; the branch is what keeps it free when nobody is
+    // watching. NES_INLINE because it sits in the per-sample path.
+    NES_INLINE void captureChannels(int at) {
+        if (!waveCapture) return;
+        chanBuf[0][at] = (uint8_t)pulse1_.output();
+        chanBuf[1][at] = (uint8_t)pulse2_.output();
+        chanBuf[2][at] = (uint8_t)triangle_.output();
+        chanBuf[3][at] = (uint8_t)noise_.output();
+        chanBuf[4][at] = dmc_.outputLevel;
+    }
+#endif
 };
 
 // ---------------------------------------------------------------- Controller
@@ -540,8 +562,16 @@ public:
     //   [2B PC][48B code window at PC][2048B work RAM]
     // Returns the byte count written. Side-effect free: it must be safe to call
     // between frames without perturbing what it is reporting.
+    // Waveforms are decimated to the width the scope actually draws (280px), so
+    // the wire carries what is displayed rather than a frame of samples the
+    // browser would immediately throw away. 6 rows: P1,P2,TRI,NOI,DMC,MIX.
+    static constexpr int DEBUG_WAVE_WIDTH = 280;
+    static constexpr int DEBUG_WAVE_ROWS = 6;
+    static constexpr size_t DEBUG_WAVE_SIZE = DEBUG_WAVE_WIDTH * DEBUG_WAVE_ROWS;
     static constexpr size_t DEBUG_SNAPSHOT_SIZE = 12 + 0x18 + 2 + 48 + 0x800;
-    size_t buildDebugSnapshot(uint8_t* out) const;
+    static constexpr size_t DEBUG_SNAPSHOT_MAX = DEBUG_SNAPSHOT_SIZE + DEBUG_WAVE_SIZE;
+    // withWaves appends the decimated scope rows after the WRAM block.
+    size_t buildDebugSnapshot(uint8_t* out, bool withWaves = false) const;
     // Side-effect-free read for the snapshot: no PPU/APU register touches, no
     // bus-activity tracking. $2000-$401F reads back as 0 rather than going near
     // the real registers, which would clear vblank and change what we measure.

@@ -45,8 +45,8 @@ CTRL_RESET = 0x01
 CTRL_VOLUME = 0x02
 
 DEBUG_MAGIC = b"ND"
-DEBUG_PARTS = 2
 DEBUG_HEADER = 7
+DEBUG_FLAG_WAVES = 0x01
 # Measured round trip is ~50ms median, ~160ms p90 (the device answers on a frame
 # boundary), so 300ms clears the tail without making a dead device feel hung.
 DEBUG_TIMEOUT_S = 0.3
@@ -117,27 +117,34 @@ class PinRelay:
     def send_volume(self, host: str, volume: int) -> bytes:
         return self._send(host, build_ctrl_packet(self.seq, CTRL_VOLUME, volume))
 
-    def fetch_debug(self, host: str):
-        """Query a debug snapshot and reassemble the two reply datagrams.
+    def fetch_debug(self, host: str, waves: bool = False):
+        """Query a debug snapshot and reassemble the reply datagrams.
 
         Returns the snapshot bytes, or None on timeout / incomplete reply. Uses
         its own socket so a reply cannot be confused with anything else in
         flight, and matches on the echoed seq so a late answer to a previous
         query is discarded rather than served as current state.
+
+        The part count comes from the datagrams themselves rather than a
+        constant, because a wave-bearing snapshot needs more of them.
         """
         seq = self.seq
         self.seq = (self.seq + 1) & 0xFFFF
+        flags = DEBUG_FLAG_WAVES if waves else 0
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sock.settimeout(DEBUG_TIMEOUT_S)
             sock.sendto(
                 struct.pack("<2sBBHBB", PROTOCOL_MAGIC, PROTOCOL_VERSION,
-                            TYPE_DEBUG, seq, 0, 0),
+                            TYPE_DEBUG, seq, flags, 0),
                 (host, self.device_port),
             )
             parts: dict[int, bytes] = {}
+            nparts = None
             deadline = time.monotonic() + DEBUG_TIMEOUT_S
-            while len(parts) < DEBUG_PARTS and time.monotonic() < deadline:
+            while time.monotonic() < deadline:
+                if nparts is not None and len(parts) >= nparts:
+                    break
                 sock.settimeout(max(0.001, deadline - time.monotonic()))
                 try:
                     data, _ = sock.recvfrom(2048)
@@ -149,8 +156,9 @@ class PinRelay:
                     continue
                 if (data[5] | (data[6] << 8)) != seq:
                     continue      # stale answer to an earlier query
+                nparts = data[4]
                 parts[data[3]] = data[DEBUG_HEADER:]
-            if len(parts) != DEBUG_PARTS:
+            if not nparts or len(parts) != nparts:
                 return None
             return b"".join(parts[i] for i in sorted(parts))
         finally:
@@ -206,7 +214,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if route == "/api/debug":
-            snapshot = self.relay.fetch_debug(host)
+            snapshot = self.relay.fetch_debug(host, waves=bool(payload.get("waves")))
             if snapshot is None:
                 # 504, not 502: the request was sent fine, the device just did
                 # not answer in time — which the page retries rather than treats

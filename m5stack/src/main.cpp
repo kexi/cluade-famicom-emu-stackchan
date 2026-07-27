@@ -38,6 +38,10 @@ static std::atomic<bool> g_debugRequested{false};
 static std::atomic<uint32_t> g_debugReplyIp{0};
 static std::atomic<uint16_t> g_debugReplyPort{0};
 static std::atomic<uint16_t> g_debugSeq{0};
+static std::atomic<bool> g_debugWantWaves{false};
+// millis() of the last wave request; the frame loop disarms capture once this
+// goes stale. 0 = never asked.
+static std::atomic<uint32_t> g_debugWaveAskedMs{0};
 // The UDP socket, shared so loop() can answer directly. lwIP's sendto is
 // thread-safe, and replying from the emulation core avoids handing the snapshot
 // buffer across tasks while it is being filled.
@@ -113,6 +117,9 @@ static void udpTask(void*) {
             g_debugReplyPort.store(from.sin_port, std::memory_order_relaxed);
             g_debugSeq.store((uint16_t)(packet[4] | (packet[5] << 8)),
                              std::memory_order_relaxed);
+            const bool wantWaves = packet[6] & UDP_DEBUG_FLAG_WAVES;
+            g_debugWantWaves.store(wantWaves, std::memory_order_relaxed);
+            if (wantWaves) g_debugWaveAskedMs.store(millis(), std::memory_order_relaxed);
             g_debugRequested.store(true, std::memory_order_relaxed);
             continue;
         }
@@ -277,15 +284,33 @@ static void applyResetRequest() {
 // from the UDP task would catch the emulator mid-instruction. The reply is sent
 // from here rather than handed back to that task so the buffer is never shared
 // while it is being filled.
+// Arm or disarm the APU's per-sample scope capture.
+//
+// Evaluated every frame, not only when a request arrives, or it would never turn
+// back off. Split from the reply below because arming must happen *before*
+// runFrame() (so the frame produces samples) while the reply must happen after
+// it (so sampleCount still describes those samples — enqueueAudio zeroes it).
+static void updateWaveCapture() {
+    const uint32_t asked = g_debugWaveAskedMs.load(std::memory_order_relaxed);
+    const bool watching = asked != 0 && (millis() - asked) < DEBUG_WAVE_HOLD_MS;
+    if (g_nes.apu.waveCapture == watching) return;
+    g_nes.apu.waveCapture = watching;
+    Serial.printf("DBG: wave capture %s\n", watching ? "on" : "off");
+}
+
 static void applyDebugRequest() {
     const bool requested = g_debugRequested.exchange(false, std::memory_order_relaxed);
     if (!requested) return;
     if (g_udpSock < 0) return;
 
-    // Static, not stack: 2.1KB would be a large chunk of the Arduino loop task's
+    // Static, not stack: ~3.8KB would be a large chunk of the Arduino loop task's
     // stack, and it is only touched here.
-    static uint8_t snapshot[nes::NES::DEBUG_SNAPSHOT_SIZE];
-    const size_t total = g_nes.buildDebugSnapshot(snapshot);
+    static uint8_t snapshot[nes::NES::DEBUG_SNAPSHOT_MAX];
+    // Only include waves once capture has actually been running: the first reply
+    // after arming would otherwise carry a stale or empty buffer.
+    const bool withWaves = g_debugWantWaves.load(std::memory_order_relaxed) &&
+                           g_nes.apu.waveCapture;
+    const size_t total = g_nes.buildDebugSnapshot(snapshot, withWaves);
 
     sockaddr_in to = {};
     to.sin_family = AF_INET;
@@ -293,8 +318,12 @@ static void applyDebugRequest() {
     to.sin_port = g_debugReplyPort.load(std::memory_order_relaxed);
     const uint16_t seq = g_debugSeq.load(std::memory_order_relaxed);
 
+    // Derived from the payload actually built, so a wave-bearing reply simply
+    // uses more parts; the receiver reads the count out of the header.
+    const uint8_t nparts = (uint8_t)((total + UDP_DEBUG_CHUNK - 1) / UDP_DEBUG_CHUNK);
+
     uint8_t datagram[UDP_DEBUG_HEADER + UDP_DEBUG_CHUNK];
-    for (int part = 0; part < UDP_DEBUG_PARTS; part++) {
+    for (int part = 0; part < nparts; part++) {
         const size_t offset = (size_t)part * UDP_DEBUG_CHUNK;
         if (offset >= total) break;
         size_t len = total - offset;
@@ -303,7 +332,7 @@ static void applyDebugRequest() {
         datagram[1] = 'D';
         datagram[2] = UDP_PROTOCOL_VERSION;
         datagram[3] = (uint8_t)part;
-        datagram[4] = UDP_DEBUG_PARTS;
+        datagram[4] = nparts;
         datagram[5] = seq & 0xFF;
         datagram[6] = seq >> 8;
         memcpy(datagram + UDP_DEBUG_HEADER, snapshot + offset, len);
@@ -461,7 +490,7 @@ void loop() {
     applyPinChanges();
     applyResetRequest();
     applyVolumeRequest();
-    applyDebugRequest();
+    updateWaveCapture();
 
     static uint32_t frameIndex = 0;
     const bool drawThisFrame = (frameIndex++ % g_divisor) == 0;
@@ -486,6 +515,11 @@ void loop() {
     const int64_t joinEndUs = esp_timer_get_time();
     g_nes.runFrame();
     const int64_t emuEndUs = esp_timer_get_time();
+
+    // Answered here, not with the other applyXxx handlers: the scope rows are
+    // decimated from apu.sampleCount, which describes the frame that just ran and
+    // which enqueueAudio() below resets to zero.
+    applyDebugRequest();
 
     enqueueAudio();
     drainAudio(playbackRate);

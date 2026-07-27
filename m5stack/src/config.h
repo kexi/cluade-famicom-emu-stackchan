@@ -89,7 +89,16 @@ constexpr uint8_t UDP_TYPE_CTRL = 2;
 // two datagrams because ~2.1KB exceeds the MTU and relying on IP fragmentation
 // over WiFi is a good way to lose the whole snapshot to one dropped fragment.
 constexpr uint8_t UDP_TYPE_DEBUG = 3;
-constexpr uint8_t UDP_DEBUG_PARTS = 2;
+// byte [6] bit 0: also send the APU scope rows.
+constexpr uint8_t UDP_DEBUG_FLAG_WAVES = 0x01;
+// How long a wave request keeps the APU's per-sample capture armed. Long enough
+// that a 5Hz poller never sees a gap, short enough that closing the browser stops
+// the extra work within a couple of frames' worth of audio.
+constexpr uint32_t DEBUG_WAVE_HOLD_MS = 2000;
+// Ceiling, not a fixed count: the reply is split to fit the MTU and the actual
+// number of parts is carried in the header, so adding the wave rows needs no
+// protocol change.
+constexpr uint8_t UDP_DEBUG_PARTS = 4;
 // 'N','D' | version | part | nparts | seq u16
 constexpr uint8_t UDP_DEBUG_HEADER = 7;
 constexpr int UDP_DEBUG_CHUNK = 1400;   // stays inside a 1500-byte MTU

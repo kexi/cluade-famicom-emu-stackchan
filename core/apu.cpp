@@ -347,6 +347,7 @@ void NES_HOT APU::stepMany(int cycles) {
             sampleTimer_ -= cyclesPerSample_;
             if (sampleCount < (int)(sizeof(sampleBuf) / sizeof(float))) {
                 sampleBuf[sampleCount] = mix();
+                captureChannels(sampleCount);
                 sampleCount++;
             }
         }
@@ -410,6 +411,7 @@ void NES_HOT APU::step() {
                     nes_.mapper ? (uint8_t)nes_.mapper->expansionChannel(c) : 0;
 #else
             sampleBuf[sampleCount] = mix();
+            captureChannels(sampleCount);
 #endif
             sampleCount++;
         }

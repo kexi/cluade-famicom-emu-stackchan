@@ -1627,12 +1627,19 @@
     fetch('/api/debug', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host: deviceIp }),
+      // Ask for waves only while the scope is actually on screen: the flag is
+      // what arms the device's per-sample capture, and it disarms itself once
+      // the requests stop.
+      body: JSON.stringify({ host: deviceIp, waves: debugOn }),
     })
       .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error('HTTP ' + r.status))))
       .then((buf) => {
         const s = parseSnapshot(buf);
-        if (s) { remoteSnap = s; dbgSrcNote.textContent = ''; }
+        if (s) {
+          remoteSnap = s;
+          if (s.waves) waveData = s.waves;
+          dbgSrcNote.textContent = '';
+        }
       })
       .catch((err) => {
         // Fall back to local rather than freeze on a stale snapshot: a panel that
@@ -1665,16 +1672,41 @@
   const SNAP_CODE = SNAP_PC + 2;
   const SNAP_RAM = SNAP_CODE + 48;
 
+  // Scope rows, appended only when the query asked for them: P1,P2,TRI,NOI,DMC,MIX.
+  const SNAP_WAVE = SNAP_RAM + 0x800;
+  const WAVE_W = 280;
+  const WAVE_ROWS = 6;
+
   function parseSnapshot(buf) {
     if (!buf || buf.byteLength < SNAP_SIZE) return null;
     const b = new Uint8Array(buf);
-    return {
+    const s = {
       cpu: b.subarray(0, 12),
       apu: b.subarray(SNAP_APU, SNAP_APU + 0x18),
       pc: b[SNAP_PC] | (b[SNAP_PC + 1] << 8),
       code: b.subarray(SNAP_CODE, SNAP_CODE + 48),
       ram: b.subarray(SNAP_RAM, SNAP_RAM + 0x800),
+      waves: null,
     };
+    if (buf.byteLength >= SNAP_WAVE + WAVE_W * WAVE_ROWS) {
+      // Repack into what drawWaves already consumes, so the scope needs no
+      // separate remote rendering path. The device pre-decimated to the canvas
+      // width using the same nearest-sample pick, so count === WAVE_W here and
+      // drawWaves' own x->i mapping becomes the identity.
+      const chans = [];
+      for (let r = 0; r < 5; r++) {
+        chans.push(b.subarray(SNAP_WAVE + r * WAVE_W, SNAP_WAVE + (r + 1) * WAVE_W));
+      }
+      // Expansion rows 5-7 have no device-side source; zero keeps them flat.
+      for (let r = 5; r < 8; r++) chans.push(new Uint8Array(WAVE_W));
+      // MIX arrived quantised through drawWaves' own min(1, mix*2) scaling, so
+      // undo exactly that to hand back a float the same code can rescale.
+      const mixRow = b.subarray(SNAP_WAVE + 5 * WAVE_W, SNAP_WAVE + 6 * WAVE_W);
+      const mix = new Float32Array(WAVE_W);
+      for (let i = 0; i < WAVE_W; i++) mix[i] = mixRow[i] / 255 / 2;
+      s.waves = { count: WAVE_W, chans, mix };
+    }
+    return s;
   }
   window.__nes = window.__nes || {};
   window.__nes.parseSnapshot = parseSnapshot;
@@ -1848,17 +1880,18 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
     }
     wramPrimed = true;
 
-    // CHR and the waveform scopes need data a snapshot does not carry (pattern
-    // tables, per-sample APU output), so they keep showing the local emulator
-    // and are greyed out while the remote source is selected.
+    // CHR needs the pattern tables, which a snapshot does not carry, so it keeps
+    // showing the local emulator and is greyed out while remote is selected.
     if (dbgSource === localSource) {
       const chrPtr = api.renderChr(chrPal);
       if (chrPtr) {
         chrImage.data.set(Module.HEAPU8.subarray(chrPtr, chrPtr + 128 * 256 * 4));
         chrCtx.putImageData(chrImage, 0, 0);
       }
-      drawWaves();
     }
+    // The scope does have a remote source: waveData is refilled either by the
+    // local capture or from the snapshot's decimated rows.
+    drawWaves();
   }
   window.__nes.updateDebug = (now) => updateDebug(now);
   window.__nes.drawStatic = () => drawStatic();

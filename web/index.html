@@ -729,7 +729,8 @@
   #dbg-source { font-size: 11px; margin-bottom: 4px; display: flex; gap: 10px; align-items: center; }
   #dbg-source label { cursor: pointer; }
   #dbg-src-note { color: #e66; }
-  body.dbg-remote #dbg-waves,
+  /* The scope is fed by the snapshot's decimated rows, so it stays live; only
+     CHR (which needs pattern tables) is dimmed. */
   body.dbg-remote #debug-left { opacity: 0.35; pointer-events: none; }
   body.dbg-remote #dbg-wram .wbyte { cursor: default; }
   canvas#screen {

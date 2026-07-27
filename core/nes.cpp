@@ -278,7 +278,7 @@ uint8_t NES::debugPeek(uint16_t addr) const {
     return mapper ? mapper->cpuRead(addr) : 0;
 }
 
-size_t NES::buildDebugSnapshot(uint8_t* out) const {
+size_t NES::buildDebugSnapshot(uint8_t* out, bool withWaves) const {
     size_t n = 0;
 
     // CPU registers, byte-for-byte the layout the browser already parses for the
@@ -312,6 +312,34 @@ size_t NES::buildDebugSnapshot(uint8_t* out) const {
 
     memcpy(out + n, ram, sizeof(ram));
     n += sizeof(ram);
+
+    if (!withWaves) return n;
+
+    // Decimate to the scope's pixel width using the same nearest-sample pick the
+    // browser's drawWaves does, so the remote trace lines up with the local one
+    // instead of being a differently-filtered view of the same audio.
+    const int count = apu.sampleCount;
+    for (int row = 0; row < DEBUG_WAVE_ROWS; row++) {
+        for (int x = 0; x < DEBUG_WAVE_WIDTH; x++) {
+            uint8_t v = 0;
+            if (count > 0) {
+                int i = (int)((int64_t)x * count / DEBUG_WAVE_WIDTH);
+                if (i >= count) i = count - 1;
+                if (row < 5) {
+                    v = apu.chanBuf[row][i];
+                } else {
+                    // MIX carries a float; quantise through drawWaves' own
+                    // min(1, mix*2) scaling so the row is directly comparable
+                    // with the per-channel rows above it.
+                    float m = apu.sampleBuf[i] * 2.0f;
+                    if (m < 0.0f) m = 0.0f;
+                    if (m > 1.0f) m = 1.0f;
+                    v = (uint8_t)(m * 255.0f + 0.5f);
+                }
+            }
+            out[n++] = v;
+        }
+    }
 
     return n;
 }
