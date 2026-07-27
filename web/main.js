@@ -98,6 +98,8 @@
     set('h-mixer', 'mixer');
     set('h-apuregs', 'apuRegs');
     set('h-wram', 'wramTitle');
+    set('dbg-src-local', 'dbgSrcLocal');
+    set('dbg-src-remote', 'dbgSrcRemote');
     if (typeof romLoaded !== 'undefined' && !romLoaded) statusEl.textContent = t('statusDefault');
     if (typeof refreshPinTitles === 'function') refreshPinTitles();
     if (typeof updateChrTitle === 'function') updateChrTitle();
@@ -1422,6 +1424,10 @@
   dbgWram.addEventListener('dblclick', (e) => {
     const span = e.target.closest('.ram-b');
     if (!span || editingSpan) return;
+    // A snapshot is a read-only view: writing here would edit the local
+    // emulator's RAM while the panel is showing the device's, which is worse
+    // than not offering the edit at all.
+    if (dbgSource !== localSource) return;
     e.preventDefault();
     editingSpan = span;
     const addr = +span.dataset.addr;
@@ -1576,6 +1582,126 @@
     document.body.classList.toggle('debug-on', debugOn);
   });
 
+  // Source switcher, only offered when a device is configured — without one
+  // there is nothing to switch to.
+  const dbgSourceBox = document.getElementById('dbg-source');
+  const dbgSrcNote = document.getElementById('dbg-src-note');
+  // Revealed here rather than where deviceIp is resolved: that runs earlier in
+  // the script, while this element's const is still in its temporal dead zone.
+  if (deviceIp) dbgSourceBox.hidden = false;
+  let dbgRemoteWarned = false;
+  let dbgFetchInFlight = false;
+  let dbgLastFetch = 0;
+
+  function setDbgSource(which) {
+    const remote = which === 'remote';
+    dbgSource = remote ? remoteSource : localSource;
+    // Panels a snapshot cannot feed are marked dead rather than left showing
+    // stale local data that looks like it came from the device.
+    document.body.classList.toggle('dbg-remote', remote);
+    if (!remote) {
+      remoteSnap = null;
+      dbgSrcNote.textContent = '';
+    }
+  }
+
+  function selectLocalRadio() {
+    const r = dbgSourceBox.querySelector('input[value="local"]');
+    if (r) r.checked = true;
+    setDbgSource('local');
+  }
+
+  dbgSourceBox.addEventListener('change', (e) => {
+    if (e.target.name !== 'dbgsrc') return;
+    setDbgSource(e.target.value);
+  });
+
+  // Poll the device while the remote source is showing. 200ms matches the panel's
+  // own refresh; a request in flight is never doubled up, because the device
+  // answers on a frame boundary and a backlog would only add latency.
+  function pollRemoteDebug(now) {
+    if (dbgSource !== remoteSource || !debugOn) return;
+    if (dbgFetchInFlight || now - dbgLastFetch < 200) return;
+    dbgFetchInFlight = true;
+    dbgLastFetch = now;
+    fetch('/api/debug', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: deviceIp }),
+    })
+      .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error('HTTP ' + r.status))))
+      .then((buf) => {
+        const s = parseSnapshot(buf);
+        if (s) { remoteSnap = s; dbgSrcNote.textContent = ''; }
+      })
+      .catch((err) => {
+        // Fall back to local rather than freeze on a stale snapshot: a panel that
+        // silently stops updating is worse than one that says why.
+        if (!dbgRemoteWarned) {
+          dbgRemoteWarned = true;
+          console.warn('debug monitor: cannot reach the device —', err.message);
+        }
+        dbgSrcNote.textContent = '× ' + err.message;
+        selectLocalRadio();
+      })
+      .finally(() => { dbgFetchInFlight = false; });
+  }
+
+  // ---- debug data source: the local emulator, or a Stack-chan snapshot ----
+  //
+  // The DEBUG panel reads CPU registers, APU shadow registers, work RAM and
+  // arbitrary bytes near PC. Routing all four through one object is what lets the
+  // same rendering code show either machine; the remote implementation just
+  // answers from the last snapshot instead of from WASM memory.
+  //
+  // Deliberately read-only and partial: a snapshot carries 48 bytes around PC,
+  // not the whole address space, so peek() reports -1 outside that window and the
+  // disassembler prints `??` rather than inventing bytes. Only the panels that a
+  // snapshot can actually feed are offered remotely — waveforms, CHR and WRAM
+  // editing stay local-only (see setDbgSource).
+  const SNAP_SIZE = 12 + 0x18 + 2 + 48 + 0x800;
+  const SNAP_APU = 12;
+  const SNAP_PC = SNAP_APU + 0x18;
+  const SNAP_CODE = SNAP_PC + 2;
+  const SNAP_RAM = SNAP_CODE + 48;
+
+  function parseSnapshot(buf) {
+    if (!buf || buf.byteLength < SNAP_SIZE) return null;
+    const b = new Uint8Array(buf);
+    return {
+      cpu: b.subarray(0, 12),
+      apu: b.subarray(SNAP_APU, SNAP_APU + 0x18),
+      pc: b[SNAP_PC] | (b[SNAP_PC + 1] << 8),
+      code: b.subarray(SNAP_CODE, SNAP_CODE + 48),
+      ram: b.subarray(SNAP_RAM, SNAP_RAM + 0x800),
+    };
+  }
+  window.__nes = window.__nes || {};
+  window.__nes.parseSnapshot = parseSnapshot;
+
+  const localSource = {
+    cpuRegs: () => Module.HEAPU8.subarray(api.cpuRegs(), api.cpuRegs() + 12),
+    apuRegs: () => Module.HEAPU8.subarray(api.apuRegs(), api.apuRegs() + 0x18),
+    ram: () => Module.HEAPU8.subarray(api.ram(), api.ram() + 0x800),
+    peek: (addr) => api.peek(addr & 0xFFFF),
+  };
+
+  let remoteSnap = null;
+  const remoteSource = {
+    cpuRegs: () => (remoteSnap ? remoteSnap.cpu : new Uint8Array(12)),
+    apuRegs: () => (remoteSnap ? remoteSnap.apu : new Uint8Array(0x18)),
+    ram: () => (remoteSnap ? remoteSnap.ram : new Uint8Array(0x800)),
+    peek: (addr) => {
+      if (!remoteSnap) return -1;
+      const off = (addr - remoteSnap.pc) & 0xFFFF;
+      // Work RAM is carried in full, so honour it wherever it is asked for.
+      if ((addr & 0xFFFF) < 0x2000) return remoteSnap.ram[addr & 0x7FF];
+      return off < remoteSnap.code.length ? remoteSnap.code[off] : -1;
+    },
+  };
+
+  let dbgSource = localSource;
+
   // ---- 6502 disassembler (for the debug panel) ----
   const DIS_TAB = (() => {
     const tab = {};
@@ -1628,12 +1754,16 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
   const h4 = (v) => v.toString(16).toUpperCase().padStart(4, '0');
 
   function disasmLine(addr) {
-    const op = api.peek(addr);
+    const op = dbgSource.peek(addr);
+    // -1 = outside what the source can see (a remote snapshot only carries a
+    // window around PC). Render the line as unknown instead of guessing.
+    if (op < 0) return { len: 1, text: `${h4(addr)}  ??        ???` };
     const ent = DIS_TAB[op] || ['???', 'imp'];
     const [name, mode] = ent;
     const len = DIS_LEN[mode];
-    const b1 = len > 1 ? api.peek(addr + 1) : 0;
-    const b2 = len > 2 ? api.peek(addr + 2) : 0;
+    const b1 = len > 1 ? dbgSource.peek(addr + 1) : 0;
+    const b2 = len > 2 ? dbgSource.peek(addr + 2) : 0;
+    if (b1 < 0 || b2 < 0) return { len, text: `${h4(addr)}  ??        ${name} ?` };
     const w = b1 | (b2 << 8);
     let operand = '';
     switch (mode) {
@@ -1668,8 +1798,9 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
   function updateDebug(now) {
     if (!debugOn || now - lastDebugUpdate < 100) return;
     lastDebugUpdate = now;
+    pollRemoteDebug(now);
     {
-      const c = Module.HEAPU8.subarray(api.cpuRegs(), api.cpuRegs() + 12);
+      const c = dbgSource.cpuRegs();
       const pc = c[0] | (c[1] << 8);
       const p = c[6];
       const flags = ['C','Z','I','D','B','-','V','N']
@@ -1679,7 +1810,7 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
         `PC=${pc.toString(16).toUpperCase().padStart(4, '0')}  A=${hex2(c[2])} X=${hex2(c[3])} Y=${hex2(c[4])}  SP=${hex2(c[5])}  P=${hex2(p)} [${flags}]  FRAME=${frameN}`;
       renderDisasm(pc);
     }
-    const regs = Module.HEAPU8.subarray(api.apuRegs(), api.apuRegs() + 0x18);
+    const regs = dbgSource.apuRegs();
     let apuText = '';
     for (let i = 0; i < 0x18; i++) {
       apuText += '$' + (0x4000 + i).toString(16).toUpperCase() + '  ' + hex2(regs[i])
@@ -1687,7 +1818,7 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
     }
     dbgApu.textContent = apuText;
 
-    const ram = Module.HEAPU8.subarray(api.ram(), api.ram() + 0x800);
+    const ram = dbgSource.ram();
     for (let a = 0; a < 0x800; a++) {
       const s = wramSpans[a];
       if (s === editingSpan) continue;   // don't clobber the byte being edited
@@ -1717,13 +1848,17 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
     }
     wramPrimed = true;
 
-    const chrPtr = api.renderChr(chrPal);
-    if (chrPtr) {
-      chrImage.data.set(Module.HEAPU8.subarray(chrPtr, chrPtr + 128 * 256 * 4));
-      chrCtx.putImageData(chrImage, 0, 0);
+    // CHR and the waveform scopes need data a snapshot does not carry (pattern
+    // tables, per-sample APU output), so they keep showing the local emulator
+    // and are greyed out while the remote source is selected.
+    if (dbgSource === localSource) {
+      const chrPtr = api.renderChr(chrPal);
+      if (chrPtr) {
+        chrImage.data.set(Module.HEAPU8.subarray(chrPtr, chrPtr + 128 * 256 * 4));
+        chrCtx.putImageData(chrImage, 0, 0);
+      }
+      drawWaves();
     }
-
-    drawWaves();
   }
   window.__nes.updateDebug = (now) => updateDebug(now);
   window.__nes.drawStatic = () => drawStatic();

@@ -527,9 +527,28 @@ public:
     uint8_t cartReadFaulty(uint16_t addr);
     void cartWriteFaulty(uint16_t addr, uint8_t v);
 
-#ifndef NES_EMBEDDED
-    uint8_t apuRegShadow[0x18] = {};   // last value written to $4000-$4017 (debug view)
+    // Last value written to $4000-$4017 (debug view). Shared by both builds so
+    // the device can report it to the browser's DEBUG panel: 24 bytes and one
+    // store per APU register write, which is not measurable against the work the
+    // write itself does.
+    uint8_t apuRegShadow[0x18] = {};
 
+#ifdef NES_EMBEDDED
+    // Pack a debug snapshot for the remote monitor. Layout:
+    //   [12B CPU regs (same order as the WASM nes_cpu_regs)]
+    //   [24B apuRegShadow]
+    //   [2B PC][48B code window at PC][2048B work RAM]
+    // Returns the byte count written. Side-effect free: it must be safe to call
+    // between frames without perturbing what it is reporting.
+    static constexpr size_t DEBUG_SNAPSHOT_SIZE = 12 + 0x18 + 2 + 48 + 0x800;
+    size_t buildDebugSnapshot(uint8_t* out) const;
+    // Side-effect-free read for the snapshot: no PPU/APU register touches, no
+    // bus-activity tracking. $2000-$401F reads back as 0 rather than going near
+    // the real registers, which would clear vblank and change what we measure.
+    uint8_t debugPeek(uint16_t addr) const;
+#endif
+
+#ifndef NES_EMBEDDED
     // ---- oscilloscope probe (hover a pin in the UI) ----
     int probePin = 0;               // 1-60, 0 = no probe
     uint8_t probeBuf[2048] = {};    // one sample per CPU cycle (~1.1ms window)

@@ -183,9 +183,7 @@ void NES_HOT NES::cpuWrite(uint16_t addr, uint8_t v) {
         cpu.addStall(513);
         return;
     }
-#ifndef NES_EMBEDDED
     if (addr >= 0x4000 && addr <= 0x4017) apuRegShadow[addr - 0x4000] = v;
-#endif
     if (addr == 0x4016) { pad[0].writeStrobe(v); pad[1].writeStrobe(v); return; }
 #ifdef NES_EMBEDDED
     if (addr < 0x4020) { catchUp(); apu.writeReg(addr, v); return; }
@@ -269,6 +267,55 @@ void NES_HOT NES::runFrame() {
     catchUp();   // do not carry debt across the frame boundary
 #endif
 }
+
+#ifdef NES_EMBEDDED
+uint8_t NES::debugPeek(uint16_t addr) const {
+    if (addr < 0x2000) return ram[addr & 0x7FF];
+    // The register window is reported as zero rather than read: touching $2002
+    // clears vblank and $2007 advances the VRAM pointer, so a debugger that read
+    // them would change the program it is watching.
+    if (addr < 0x4020) return 0;
+    return mapper ? mapper->cpuRead(addr) : 0;
+}
+
+size_t NES::buildDebugSnapshot(uint8_t* out) const {
+    size_t n = 0;
+
+    // CPU registers, byte-for-byte the layout the browser already parses for the
+    // local emulator, so the DEBUG panel needs no second decoder.
+    out[n++] = cpu.pc & 0xFF;
+    out[n++] = cpu.pc >> 8;
+    out[n++] = cpu.a;
+    out[n++] = cpu.x;
+    out[n++] = cpu.y;
+    out[n++] = cpu.sp;
+    out[n++] = (cpu.fN << 7) | (cpu.fV << 6) | 0x20 | (cpu.fD << 3) |
+               (cpu.fI << 2) | (cpu.fZ << 1) | (uint8_t)cpu.fC;
+    out[n++] = 0;   // padding, matching nes_cpu_regs[7]
+    const uint32_t f = ppu.frameCount;
+    out[n++] = f & 0xFF;
+    out[n++] = (f >> 8) & 0xFF;
+    out[n++] = (f >> 16) & 0xFF;
+    out[n++] = (f >> 24) & 0xFF;
+
+    memcpy(out + n, apuRegShadow, sizeof(apuRegShadow));
+    n += sizeof(apuRegShadow);
+
+    // PC repeated explicitly: the code window is only meaningful relative to the
+    // address it was taken from, and keeping them adjacent means the parser
+    // cannot pair a window with the wrong PC.
+    out[n++] = cpu.pc & 0xFF;
+    out[n++] = cpu.pc >> 8;
+    // 48 bytes covers the deepest the disassembler walks (12 instructions, max
+    // 3 bytes each) without a second round trip.
+    for (int i = 0; i < 48; i++) out[n++] = debugPeek((uint16_t)(cpu.pc + i));
+
+    memcpy(out + n, ram, sizeof(ram));
+    n += sizeof(ram);
+
+    return n;
+}
+#endif // NES_EMBEDDED
 
 } // namespace nes
 

@@ -3,12 +3,18 @@
 # requires-python = ">=3.12"
 # dependencies = []
 # ///
-"""Serve web/ and relay cartridge-pin state to a CoreS3 over UDP.
+"""Serve web/ and relay cartridge pins, console control and debug reads to a CoreS3.
 
-The browser cannot send UDP, so the connector UI POSTs its pin mask here and
-this process forwards it as the same type=1 packet the firmware already parses.
-Serving the page from the same origin is what keeps that POST out of CORS
-preflight territory.
+The browser cannot send UDP, so the page POSTs here and this process forwards
+each request as the packet the firmware already parses. Serving the page from the
+same origin is what keeps those POSTs out of CORS preflight territory.
+
+    POST /api/pins    {"host":..., "mask":"<16 hex>"}  -> type 1
+    POST /api/reset   {"host":...}                     -> type 2, RESET
+    POST /api/volume  {"host":..., "volume":0-255}     -> type 2, volume
+    POST /api/debug   {"host":...}                     -> type 3, and returns the
+                      reassembled snapshot as application/octet-stream (504 if
+                      the device does not answer)
 
 Usage:
     uv run tools/serve_web.py [--port 8000] [--device-port 5555]
@@ -25,6 +31,7 @@ import re
 import socket
 import struct
 import sys
+import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -33,8 +40,16 @@ PROTOCOL_MAGIC = b"NP"
 PROTOCOL_VERSION = 1
 TYPE_PINS = 1
 TYPE_CTRL = 2
+TYPE_DEBUG = 3
 CTRL_RESET = 0x01
 CTRL_VOLUME = 0x02
+
+DEBUG_MAGIC = b"ND"
+DEBUG_PARTS = 2
+DEBUG_HEADER = 7
+# Measured round trip is ~50ms median, ~160ms p90 (the device answers on a frame
+# boundary), so 300ms clears the tail without making a dead device feel hung.
+DEBUG_TIMEOUT_S = 0.3
 
 # Keep the relay from being turned into a general-purpose packet cannon.
 HOST_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
@@ -102,6 +117,45 @@ class PinRelay:
     def send_volume(self, host: str, volume: int) -> bytes:
         return self._send(host, build_ctrl_packet(self.seq, CTRL_VOLUME, volume))
 
+    def fetch_debug(self, host: str):
+        """Query a debug snapshot and reassemble the two reply datagrams.
+
+        Returns the snapshot bytes, or None on timeout / incomplete reply. Uses
+        its own socket so a reply cannot be confused with anything else in
+        flight, and matches on the echoed seq so a late answer to a previous
+        query is discarded rather than served as current state.
+        """
+        seq = self.seq
+        self.seq = (self.seq + 1) & 0xFFFF
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.settimeout(DEBUG_TIMEOUT_S)
+            sock.sendto(
+                struct.pack("<2sBBHBB", PROTOCOL_MAGIC, PROTOCOL_VERSION,
+                            TYPE_DEBUG, seq, 0, 0),
+                (host, self.device_port),
+            )
+            parts: dict[int, bytes] = {}
+            deadline = time.monotonic() + DEBUG_TIMEOUT_S
+            while len(parts) < DEBUG_PARTS and time.monotonic() < deadline:
+                sock.settimeout(max(0.001, deadline - time.monotonic()))
+                try:
+                    data, _ = sock.recvfrom(2048)
+                except socket.timeout:
+                    break
+                if len(data) < DEBUG_HEADER or data[0:2] != DEBUG_MAGIC:
+                    continue
+                if data[2] != PROTOCOL_VERSION:
+                    continue
+                if (data[5] | (data[6] << 8)) != seq:
+                    continue      # stale answer to an earlier query
+                parts[data[3]] = data[DEBUG_HEADER:]
+            if len(parts) != DEBUG_PARTS:
+                return None
+            return b"".join(parts[i] for i in sorted(parts))
+        finally:
+            sock.close()
+
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, relay: PinRelay, **kwargs):
@@ -118,7 +172,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         route = self.path.split("?")[0]
-        if route not in ("/api/pins", "/api/reset", "/api/volume"):
+        if route not in ("/api/pins", "/api/reset", "/api/volume", "/api/debug"):
             self._reply(404, {"error": "not found"})
             return
 
@@ -149,6 +203,21 @@ class Handler(SimpleHTTPRequestHandler):
                 self._reply(502, {"error": f"send failed: {exc}"})
                 return
             self._reply(200, {"sent": len(packet), "host": host, "reset": True})
+            return
+
+        if route == "/api/debug":
+            snapshot = self.relay.fetch_debug(host)
+            if snapshot is None:
+                # 504, not 502: the request was sent fine, the device just did
+                # not answer in time — which the page retries rather than treats
+                # as a configuration error.
+                self._reply(504, {"error": "device did not answer"})
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(snapshot)))
+            self.end_headers()
+            self.wfile.write(snapshot)
             return
 
         if route == "/api/volume":

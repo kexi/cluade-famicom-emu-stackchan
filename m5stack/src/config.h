@@ -85,6 +85,14 @@ constexpr uint8_t UDP_TYPE_PINS = 1;
 // program, and reseating the cart alone does not recover it — on real hardware
 // you press RESET afterwards, so the browser has to be able to say that too.
 constexpr uint8_t UDP_TYPE_CTRL = 2;
+// Debug snapshot request. The reply goes back to whoever asked, split across
+// two datagrams because ~2.1KB exceeds the MTU and relying on IP fragmentation
+// over WiFi is a good way to lose the whole snapshot to one dropped fragment.
+constexpr uint8_t UDP_TYPE_DEBUG = 3;
+constexpr uint8_t UDP_DEBUG_PARTS = 2;
+// 'N','D' | version | part | nparts | seq u16
+constexpr uint8_t UDP_DEBUG_HEADER = 7;
+constexpr int UDP_DEBUG_CHUNK = 1400;   // stays inside a 1500-byte MTU
 constexpr uint8_t UDP_CTRL_RESET = 0x01;    // byte [6] bit 0
 constexpr uint8_t UDP_CTRL_VOLUME = 0x02;   // byte [6] bit 1, level in byte [7]
 // 'N','P' | version | type | seq u16 LE | mask u64 LE

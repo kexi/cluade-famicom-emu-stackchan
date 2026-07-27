@@ -723,6 +723,15 @@
     cursor: pointer;
   }
   body.debug-on #debug-left { display: block; }
+  /* Remote (Stack-chan) source: a snapshot carries CPU/APU/WRAM but not pattern
+     tables or per-sample audio, so the panels that need those are dimmed and
+     made inert rather than left showing stale local data. */
+  #dbg-source { font-size: 11px; margin-bottom: 4px; display: flex; gap: 10px; align-items: center; }
+  #dbg-source label { cursor: pointer; }
+  #dbg-src-note { color: #e66; }
+  body.dbg-remote #dbg-waves,
+  body.dbg-remote #debug-left { opacity: 0.35; pointer-events: none; }
+  body.dbg-remote #dbg-wram .wbyte { cursor: default; }
   canvas#screen {
     image-rendering: pixelated;
     image-rendering: crisp-edges;
@@ -896,6 +905,11 @@
     </div>
     <canvas id="screen" width="256" height="240"></canvas>
     <div id="debug">
+      <div id="dbg-source" hidden>
+        <label><input type="radio" name="dbgsrc" value="local" checked> <span id="dbg-src-local">Local</span></label>
+        <label><input type="radio" name="dbgsrc" value="remote"> <span id="dbg-src-remote">Stack-chan</span></label>
+        <span id="dbg-src-note"></span>
+      </div>
       <h3 id="h-cpu">CPU レジスタ</h3>
       <div id="dbg-cpu"></div>
       <div id="dbg-disasm"></div>

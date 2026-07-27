@@ -31,6 +31,17 @@ static std::atomic<uint32_t> g_lastRxMs{0};
 static std::atomic<uint64_t> g_pinMask{PIN_MASK_ALL_OK};
 // Set by the UDP task, consumed once at a frame boundary by the emulation loop.
 static std::atomic<bool> g_resetRequested{false};
+// Debug snapshot request: the flag plus where to send the answer. Latched the
+// same way as the other controls so the snapshot is taken between frames, when
+// the CPU state is coherent, rather than mid-instruction from the UDP task.
+static std::atomic<bool> g_debugRequested{false};
+static std::atomic<uint32_t> g_debugReplyIp{0};
+static std::atomic<uint16_t> g_debugReplyPort{0};
+static std::atomic<uint16_t> g_debugSeq{0};
+// The UDP socket, shared so loop() can answer directly. lwIP's sendto is
+// thread-safe, and replying from the emulation core avoids handing the snapshot
+// buffer across tasks while it is being filled.
+static int g_udpSock = -1;
 // Master volume the browser asked for, or -1 while it has never said anything —
 // in which case the compile-time SPEAKER_VOLUME stands and is left untouched.
 static std::atomic<int> g_volume{-1};
@@ -67,9 +78,16 @@ static void udpTask(void*) {
         return;
     }
 
+    g_udpSock = sock;
+
     uint8_t packet[64];
     for (;;) {
-        const int received = ::recvfrom(sock, packet, sizeof(packet), 0, nullptr, nullptr);
+        // The sender address is captured so a debug query can be answered; the
+        // other packet types ignore it.
+        sockaddr_in from = {};
+        socklen_t fromLen = sizeof(from);
+        const int received = ::recvfrom(sock, packet, sizeof(packet), 0,
+                                        (sockaddr*)&from, &fromLen);
         const bool tooShort = received < UDP_PACKET_SIZE;
         if (tooShort) continue;
 
@@ -89,6 +107,14 @@ static void udpTask(void*) {
             // works regardless of what the sender left in the unused top bits.
             g_pinMask.store(mask & PIN_MASK_VALID, std::memory_order_relaxed);
             continue;   // not controller input: leave g_lastRxMs alone
+        }
+        if (type == UDP_TYPE_DEBUG) {
+            g_debugReplyIp.store(from.sin_addr.s_addr, std::memory_order_relaxed);
+            g_debugReplyPort.store(from.sin_port, std::memory_order_relaxed);
+            g_debugSeq.store((uint16_t)(packet[4] | (packet[5] << 8)),
+                             std::memory_order_relaxed);
+            g_debugRequested.store(true, std::memory_order_relaxed);
+            continue;
         }
         if (type == UDP_TYPE_CTRL) {
             const uint8_t cmd = packet[6];
@@ -245,6 +271,56 @@ static void applyResetRequest() {
     Serial.println("RESET: console reset");
 }
 
+// Answer a debug snapshot request, if one is pending.
+//
+// Runs at a frame boundary so the CPU state it reports is coherent — sampling
+// from the UDP task would catch the emulator mid-instruction. The reply is sent
+// from here rather than handed back to that task so the buffer is never shared
+// while it is being filled.
+static void applyDebugRequest() {
+    const bool requested = g_debugRequested.exchange(false, std::memory_order_relaxed);
+    if (!requested) return;
+    if (g_udpSock < 0) return;
+
+    // Static, not stack: 2.1KB would be a large chunk of the Arduino loop task's
+    // stack, and it is only touched here.
+    static uint8_t snapshot[nes::NES::DEBUG_SNAPSHOT_SIZE];
+    const size_t total = g_nes.buildDebugSnapshot(snapshot);
+
+    sockaddr_in to = {};
+    to.sin_family = AF_INET;
+    to.sin_addr.s_addr = g_debugReplyIp.load(std::memory_order_relaxed);
+    to.sin_port = g_debugReplyPort.load(std::memory_order_relaxed);
+    const uint16_t seq = g_debugSeq.load(std::memory_order_relaxed);
+
+    uint8_t datagram[UDP_DEBUG_HEADER + UDP_DEBUG_CHUNK];
+    for (int part = 0; part < UDP_DEBUG_PARTS; part++) {
+        const size_t offset = (size_t)part * UDP_DEBUG_CHUNK;
+        if (offset >= total) break;
+        size_t len = total - offset;
+        if (len > UDP_DEBUG_CHUNK) len = UDP_DEBUG_CHUNK;
+        datagram[0] = 'N';
+        datagram[1] = 'D';
+        datagram[2] = UDP_PROTOCOL_VERSION;
+        datagram[3] = (uint8_t)part;
+        datagram[4] = UDP_DEBUG_PARTS;
+        datagram[5] = seq & 0xFF;
+        datagram[6] = seq >> 8;
+        memcpy(datagram + UDP_DEBUG_HEADER, snapshot + offset, len);
+        ::sendto(g_udpSock, datagram, UDP_DEBUG_HEADER + len, 0,
+                 (sockaddr*)&to, sizeof(to));
+    }
+
+    // Once only: at 5Hz this would otherwise bury every other serial line.
+    static bool announced = false;
+    if (!announced) {
+        announced = true;
+        Serial.printf("DBG: snapshot to %s (%u bytes)\n",
+                      IPAddress(to.sin_addr.s_addr).toString().c_str(),
+                      (unsigned)total);
+    }
+}
+
 // Mirror the browser's master volume onto the speaker. M5Unified recomputes its
 // gain from _master_volume on every DMA block in the output task, so this takes
 // effect on audio that has already been queued — no need to drain or restart.
@@ -385,6 +461,7 @@ void loop() {
     applyPinChanges();
     applyResetRequest();
     applyVolumeRequest();
+    applyDebugRequest();
 
     static uint32_t frameIndex = 0;
     const bool drawThisFrame = (frameIndex++ % g_divisor) == 0;
