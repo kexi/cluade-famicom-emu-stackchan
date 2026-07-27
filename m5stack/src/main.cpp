@@ -299,11 +299,28 @@ static int ringAvailable() {
     return (g_ringWrite - g_ringRead + AUDIO_RING_SAMPLES) % AUDIO_RING_SAMPLES;
 }
 
-// Submit whole chunks while the speaker still accepts them. playRaw keeps
-// referencing the buffer it was given, so a chunk slot is only reused once it
-// has cycled all the way around the rotation.
+// Submit whole chunks, but never more than the speaker can accept without
+// blocking. playRaw keeps referencing the buffer it was given, so a chunk slot
+// is only reused once it has cycled all the way around the rotation.
+//
+// M5Unified gives each channel two wav slots, and playRaw() (via _set_next_wav)
+// *busy-waits* on a 1-tick semaphore until one frees up. Because the queue only
+// drains in real time, handing it a third chunk parks the emulation loop for the
+// remainder of a chunk — measured at 5.0ms average, 29ms worst case, i.e. ~200ms
+// of stall per second. Worse, it self-amplifies: a lower frame rate retimes
+// playbackRate down, which makes each queued chunk last *longer* in wall-clock
+// time, which makes the next playRaw block for longer still. Pinning the rate to
+// 44.1kHz breaks the loop (measured 27.4 -> 32.4fps) but then consumes ~44k
+// samples/s against ~24k produced, so the ring runs dry and the audio gaps.
+//
+// Checking isPlaying() first keeps both properties: the rate stays matched to
+// what the emulator actually produces, and the loop never blocks. Samples that
+// do not fit simply stay in the ring, which is what the ring is for.
 static void drainAudio(uint32_t rate) {
     while (ringAvailable() >= AUDIO_CHUNK_SAMPLES) {
+        // Both slots busy: submitting now would block until one drains.
+        const bool queueFull = M5.Speaker.isPlaying(SPEAKER_CHANNEL) >= 2;
+        if (queueFull) return;
         int16_t* chunk = g_chunk[g_chunkIndex];
         for (int i = 0; i < AUDIO_CHUNK_SAMPLES; i++) {
             chunk[i] = g_ring[g_ringRead];
