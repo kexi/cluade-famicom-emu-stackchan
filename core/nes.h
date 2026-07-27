@@ -297,6 +297,9 @@ private:
 
     uint8_t vramRead(uint16_t addr);
     void vramWrite(uint16_t addr, uint8_t v);
+    // Connector-fault variants, shared by both builds (see ppu.cpp).
+    uint8_t vramReadFaulty(uint16_t addr);
+    void vramWriteFaulty(uint16_t addr, uint8_t v);
     uint16_t ntMirror(uint16_t addr);
     void incHoriz();
     void incVert();
@@ -476,9 +479,7 @@ private:
 class NES {
 public:
     NES() : cpu(*this), ppu(*this), apu(*this) {
-#ifndef NES_EMBEDDED
         for (int i = 0; i < 61; i++) pinOk[i] = true;
-#endif
     }
 
     bool loadRom(const uint8_t* data, size_t size);
@@ -496,10 +497,11 @@ public:
     Controller pad[2];
     std::unique_ptr<Mapper> mapper;
     uint8_t ram[0x800] = {};
-#ifndef NES_EMBEDDED
-    uint8_t apuRegShadow[0x18] = {};   // last value written to $4000-$4017 (debug view)
-
     // ---- cartridge connector fault emulation (60-pin, 1-based) ----
+    //
+    // Shared by both builds: the embedded frontend drives these from the browser's
+    // connector UI over UDP. Everything here is cold (touched only when a pin
+    // changes), so it costs the hot paths nothing but the pinsFaulty_ test.
     bool pinOk[61];
     // derived signal masks/flags, recomputed by updatePins()
     uint16_t prgAddrAnd = 0x7FFF;   // CPU A0-A14 to cart
@@ -509,8 +511,24 @@ public:
     bool romselOk = true, m2Ok = true, rwOk = true, irqOk = true;
     bool ppuRdOk = true, ppuWrOk = true, ciramCeOk = true, ciramA10Ok = true;
     bool soundOk = true, powerOk = true;
+    // True when any of pins 1-60 is open. The single gate every hot path tests to
+    // decide whether it can take the fast direct-to-mapper route.
+    bool pinsFaulty_ = false;
     void updatePins();
     uint8_t cartOpenBus(uint16_t addr) const { return addr >> 8; }
+    // bit(n-1) set = pin n making contact. The one entry point for external pin
+    // sources (browser UI today, an on-device IMU later), so callers never have
+    // to know about updatePins()/refreshChrWindow() ordering.
+    void applyPinMask(uint64_t mask);
+
+    // Cartridge-connector fault paths, shared by both builds so the embedded and
+    // reference cores mask identically. Out of line and never called while the
+    // connector is clean.
+    uint8_t cartReadFaulty(uint16_t addr);
+    void cartWriteFaulty(uint16_t addr, uint8_t v);
+
+#ifndef NES_EMBEDDED
+    uint8_t apuRegShadow[0x18] = {};   // last value written to $4000-$4017 (debug view)
 
     // ---- oscilloscope probe (hover a pin in the UI) ----
     int probePin = 0;               // 1-60, 0 = no probe
@@ -531,14 +549,20 @@ public:
     // have neither an IRQ source nor a cycle-driven counter.
     bool mapperWantsCpuCycle_ = false;
     bool mapperHasIrq_ = false;
+    // mapperHasIrq_ AND the /IRQ pin actually being connected. Folding the pin
+    // state in here (rather than testing irqOk on the hot path) is what makes a
+    // broken /IRQ line free: the per-instruction sample reads one bool either way.
+    // Kept current by both refreshMapperCaps() and updatePins().
+    bool mapperIrqUsable_ = false;
     void refreshMapperCaps() {
         mapperWantsCpuCycle_ = mapper && mapper->wantsCpuCycle();
         mapperHasIrq_ = mapper && mapper->hasIrq();
+        mapperIrqUsable_ = mapperHasIrq_ && irqOk;
     }
     // The IRQ line as the CPU sees it. Inlined and short-circuited so the common
     // no-IRQ-mapper case costs two predictable branches instead of a virtual call.
     bool irqLineLevel() {
-        return apu.irqPending() || (mapperHasIrq_ && mapper->irqPending());
+        return apu.irqPending() || (mapperIrqUsable_ && mapper->irqPending());
     }
 
 #ifdef NES_EMBEDDED

@@ -2,7 +2,6 @@
 
 namespace nes {
 
-#ifndef NES_EMBEDDED
 // Famicom 60-pin cartridge connector: recompute signal masks from pin states.
 // Pinout (nesdev wiki): front 1-30 = GND, CPU A11..A0, R/W, /IRQ, GND, PPU /RD,
 // CIRAM A10, PPU A6..A0, PPU D0..D3, +5V / back 31-60 = +5V, M2, CPU A12-A14,
@@ -35,8 +34,54 @@ void NES::updatePins() {
     ppuWrOk = pinOk[47];
     ciramA10Ok = pinOk[18];
     ciramCeOk = pinOk[48] && pinOk[49];   // most carts drive CIRAM /CE from PPU /A13
+
+    // Single gate for the hot paths. Derived from the raw pins rather than the
+    // masks above so that a pin whose only effect is cosmetic still counts.
+    pinsFaulty_ = false;
+    for (int i = 1; i <= 60; i++) {
+        if (!pinOk[i]) { pinsFaulty_ = true; break; }
+    }
+    // /IRQ reachability folded in here so irqLineLevel() stays a single bool test.
+    mapperIrqUsable_ = mapperHasIrq_ && irqOk;
 }
-#endif // !NES_EMBEDDED
+
+// bit(n-1) set = pin n making contact.
+void NES::applyPinMask(uint64_t mask) {
+    bool changed = false;
+    for (int pin = 1; pin <= 60; pin++) {
+        const bool connected = (mask >> (pin - 1)) & 1;
+        if (pinOk[pin] == connected) continue;
+        pinOk[pin] = connected;
+        changed = true;
+    }
+    if (!changed) return;
+    updatePins();
+    // A broken CHR address/data line has to be seen by pattern fetches, so the
+    // PPU's direct-CHR shortcut must be re-evaluated (refreshChrWindow drops it
+    // to null while the connector is faulty).
+    ppu.refreshChrWindow();
+}
+
+// ---- shared cartridge-connector fault paths ----
+//
+// Both builds route through these while pinsFaulty_ is set, so the embedded core
+// masks bit-for-bit identically to the reference. Deliberately out of line: they
+// are cold, and keeping them out of the callers stops the fault handling from
+// bloating the hot instruction fetch/store paths.
+uint8_t NES::cartReadFaulty(uint16_t addr) {
+    if (!powerOk || !m2Ok) return cartOpenBus(addr);
+    if (addr >= 0x8000 && !romselOk) return cartOpenBus(addr);
+    const uint16_t maskedAddr = (addr & 0x8000) | (addr & prgAddrAnd);
+    const uint8_t v = mapper->cpuRead(maskedAddr);
+    return (v & prgDataAnd) | (cartOpenBus(addr) & ~prgDataAnd);
+}
+
+void NES::cartWriteFaulty(uint16_t addr, uint8_t v) {
+    if (!powerOk || !m2Ok || !rwOk) return;
+    if (addr >= 0x8000 && !romselOk) return;
+    const uint16_t maskedAddr = (addr & 0x8000) | (addr & prgAddrAnd);
+    mapper->cpuWrite(maskedAddr, (v & prgDataAnd) | (cartOpenBus(addr) & ~prgDataAnd));
+}
 
 bool NES::loadRom(const uint8_t* data, size_t size) {
     mapper = nes::loadRom(data, size);
@@ -108,16 +153,10 @@ uint8_t NES_HOT NES::cpuReadBus(uint16_t addr) {
     if (addr == 0x4017) return pad[1].read();
     if (addr < 0x4020) return 0;
     if (!mapper) return 0;
-#ifndef NES_EMBEDDED
-    // cartridge access through the (possibly faulty) connector
-    if (!powerOk || !m2Ok) return cartOpenBus(addr);
-    if (addr >= 0x8000 && !romselOk) return cartOpenBus(addr);
-    uint16_t maskedAddr = (addr & 0x8000) | (addr & prgAddrAnd);
-    uint8_t v = mapper->cpuRead(maskedAddr);
-    return (v & prgDataAnd) | (cartOpenBus(addr) & ~prgDataAnd);
-#else
+    // Clean connector: straight to the mapper, exactly as before pin emulation
+    // existed. Only a broken pin diverts through the masking helper.
+    if (pinsFaulty_) return cartReadFaulty(addr);
     return mapper->cpuRead(addr);
-#endif
 }
 
 void NES_HOT NES::cpuWrite(uint16_t addr, uint8_t v) {
@@ -154,13 +193,14 @@ void NES_HOT NES::cpuWrite(uint16_t addr, uint8_t v) {
     if (addr < 0x4020) { apu.writeReg(addr, v); return; }
 #endif
     if (!mapper) return;
-#ifndef NES_EMBEDDED
-    if (!powerOk || !m2Ok || !rwOk) return;
-    if (addr >= 0x8000 && !romselOk) return;
-    uint16_t maskedAddr = (addr & 0x8000) | (addr & prgAddrAnd);
-    mapper->cpuWrite(maskedAddr, (v & prgDataAnd) | (cartOpenBus(addr) & ~prgDataAnd));
-#else
-    mapper->cpuWrite(addr, v);
+    if (pinsFaulty_) {
+        cartWriteFaulty(addr, v);
+    } else {
+        mapper->cpuWrite(addr, v);
+    }
+#ifdef NES_EMBEDDED
+    // Bank switches can move the CHR window; re-cache it. Harmless while faulty
+    // (refreshChrWindow yields null then), so it stays outside the branch.
     ppu.refreshChrWindow();
 #endif
 }

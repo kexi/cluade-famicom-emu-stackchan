@@ -58,12 +58,11 @@ void PPU::reset() {
 
 uint16_t PPU::ntMirror(uint16_t addr) {
     // CIRAM A10 is derived by the cart from PPU A10/A11 — apply connector faults
-    // to the table-select bits only (CIRAM A0-A9 run directly on the motherboard)
-#ifndef NES_EMBEDDED
-    int table = ((addr & nes_.chrAddrAnd) & 0x0FFF) / 0x400;
-#else
-    int table = (addr & 0x0FFF) / 0x400;
-#endif
+    // to the table-select bits only (CIRAM A0-A9 run directly on the motherboard).
+    // The mask is only consulted while a pin is open so a clean cart keeps the
+    // plain shift it always had.
+    int table = nes_.pinsFaulty_ ? (((addr & nes_.chrAddrAnd) & 0x0FFF) / 0x400)
+                                 : ((addr & 0x0FFF) / 0x400);
     int off = addr & 0x3FF;
     uint16_t r;
     switch (nes_.mapper->mirroring()) {
@@ -73,8 +72,8 @@ uint16_t PPU::ntMirror(uint16_t addr) {
     case Mirroring::SingleHigh: r = 0x400 + off; break;
     default:                    r = ((table & 1) * 0x400) + off; break; // 4-screen fallback
     }
+    if (nes_.pinsFaulty_ && !nes_.ciramA10Ok) r &= ~0x400;   // CIRAM A10 broken: bit floats low
 #ifndef NES_EMBEDDED
-    if (!nes_.ciramA10Ok) r &= ~0x400;   // CIRAM A10 pin broken: bit floats low
     nes_.lastCiramA10 = (r & 0x400) != 0;
 #endif
     return r;
@@ -82,34 +81,58 @@ uint16_t PPU::ntMirror(uint16_t addr) {
 
 void PPU::refreshChrWindow() {
 #ifdef NES_EMBEDDED
-    chrWindow_ = nes_.mapper ? nes_.mapper->chrWindow() : nullptr;
+    // The window is a raw pointer straight into CHR, which bypasses the address
+    // and data masking entirely — so it must be given up while the connector is
+    // faulty, or pattern fetches would silently ignore a broken CHR line.
+    const bool canUseWindow = nes_.mapper && !nes_.pinsFaulty_;
+    chrWindow_ = canUseWindow ? nes_.mapper->chrWindow() : nullptr;
 #endif
+}
+
+// CHR/nametable access with connector faults applied. Shared by both builds and
+// kept out of line: cold while the cart is seated properly.
+uint8_t PPU::vramReadFaulty(uint16_t addr) {
+    if (addr < 0x2000) {
+        if (!nes_.powerOk || !nes_.ppuRdOk) return addr & 0xFF;   // bus floats
+        uint8_t v = nes_.mapper->ppuRead(addr & nes_.chrAddrAnd & 0x1FFF);
+        v = (v & nes_.chrDataAnd) | ((addr & 0xFF) & ~nes_.chrDataAnd);
+#ifndef NES_EMBEDDED
+        nes_.lastPpuData = v;
+#endif
+        return v;
+    }
+    if (!nes_.ciramCeOk) return addr & 0xFF;   // nametable RAM not selected
+    uint8_t v = vram_[ntMirror(addr)];
+#ifndef NES_EMBEDDED
+    nes_.lastPpuData = v;
+#endif
+    return v;
+}
+
+void PPU::vramWriteFaulty(uint16_t addr, uint8_t v) {
+    if (addr < 0x2000) {
+        if (!nes_.powerOk || !nes_.ppuWrOk) return;
+        nes_.mapper->ppuWrite(addr & nes_.chrAddrAnd & 0x1FFF,
+                              (v & nes_.chrDataAnd) | ((addr & 0xFF) & ~nes_.chrDataAnd));
+        return;
+    }
+    if (!nes_.ciramCeOk) return;
+    vram_[ntMirror(addr)] = v;
 }
 
 uint8_t PPU::vramRead(uint16_t addr) {
     addr &= 0x3FFF;
 #ifndef NES_EMBEDDED
     if (addr < 0x3F00) { nes_.lastPpuAddr = addr; nes_.ppuRdPulse = true; }
-    if (addr < 0x2000) {
-        if (!nes_.powerOk || !nes_.ppuRdOk) return addr & 0xFF;   // bus floats
-        uint8_t v = nes_.mapper->ppuRead(addr & nes_.chrAddrAnd & 0x1FFF);
-        v = (v & nes_.chrDataAnd) | ((addr & 0xFF) & ~nes_.chrDataAnd);
-        nes_.lastPpuData = v;
-        return v;
-    }
-    if (addr < 0x3F00) {
-        if (!nes_.ciramCeOk) return addr & 0xFF;   // nametable RAM not selected
-        uint8_t v = vram_[ntMirror(addr)];
-        nes_.lastPpuData = v;
-        return v;
-    }
-#else
-    if (addr < 0x2000) {
-        if (chrWindow_) return chrWindow_[addr & 0x1FFF];
-        return nes_.mapper->ppuRead(addr & 0x1FFF);
-    }
-    if (addr < 0x3F00) return vram_[ntMirror(addr)];
 #endif
+    if (addr < 0x3F00) {
+        if (nes_.pinsFaulty_) return vramReadFaulty(addr);
+        if (addr < 0x2000) {
+            if (chrWindow_) return chrWindow_[addr & 0x1FFF];
+            return nes_.mapper->ppuRead(addr & 0x1FFF);
+        }
+        return vram_[ntMirror(addr)];
+    }
     addr &= 0x1F;
     if (addr >= 0x10 && (addr & 3) == 0) addr &= 0x0F;
     return palette_[addr];
@@ -119,21 +142,13 @@ void PPU::vramWrite(uint16_t addr, uint8_t v) {
     addr &= 0x3FFF;
 #ifndef NES_EMBEDDED
     if (addr < 0x3F00) { nes_.lastPpuAddr = addr; nes_.lastPpuData = v; nes_.ppuWrPulse = true; }
-    if (addr < 0x2000) {
-        if (!nes_.powerOk || !nes_.ppuWrOk) return;
-        nes_.mapper->ppuWrite(addr & nes_.chrAddrAnd & 0x1FFF,
-                              (v & nes_.chrDataAnd) | ((addr & 0xFF) & ~nes_.chrDataAnd));
-        return;
-    }
+#endif
     if (addr < 0x3F00) {
-        if (!nes_.ciramCeOk) return;
+        if (nes_.pinsFaulty_) { vramWriteFaulty(addr, v); return; }
+        if (addr < 0x2000) { nes_.mapper->ppuWrite(addr & 0x1FFF, v); return; }
         vram_[ntMirror(addr)] = v;
         return;
     }
-#else
-    if (addr < 0x2000) { nes_.mapper->ppuWrite(addr & 0x1FFF, v); return; }
-    if (addr < 0x3F00) { vram_[ntMirror(addr)] = v; return; }
-#endif
     addr &= 0x1F;
     if (addr >= 0x10 && (addr & 3) == 0) addr &= 0x0F;
     palette_[addr] = v;
