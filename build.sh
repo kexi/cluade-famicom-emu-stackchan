@@ -23,7 +23,8 @@ emcc -O3 -std=c++17 \
   --no-entry
 
 # stamp a fresh version into index.html so browsers never serve stale JS/WASM
+# GNU sed 前提 (nix develop で供給)。BSD sed では -i の書式が異なり動かない
 VER=$(date +%s)
-sed -i '' -E "s/(\\?v=|NES_VER=')[0-9a-zA-Z]+/\\1${VER}/g" web/index.html
+sed -i -E "s/(\\?v=|NES_VER=')[0-9a-zA-Z]+/\\1${VER}/g" web/index.html
 
 echo "Build OK: web/nes.js web/nes.wasm (v=${VER})"

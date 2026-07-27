@@ -1,4 +1,23 @@
+# 依存・ビルド生成物 (web/nes.{js,wasm} はビルド環境なしで配信するため意図的にコミット)
 node_modules/
 dist/
+m5stack/.pio/
+m5stack/compile_commands.json
+
+# nix / direnv
+.direnv/
+result
+
+# ROM・TASムービー (ローカル取得物。再配布しない)
 *.nes
 *.fm2
+
+# 秘密情報 (雛形は secrets.h.example)
+m5stack/src/secrets.h
+
+# Python
+__pycache__/
+.venv/
+
+# macOS
+.DS_Store
