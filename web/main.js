@@ -1000,44 +1000,6 @@
     }, MIRROR_MIN_INTERVAL_MS - sinceLast);
   }
 
-  // Mirror controller input, turning the browser into the device's controller.
-  //
-  // Unlike the pin mask this is not throttled on a timer: a dropped edge is felt
-  // immediately as a missed jump, so every change goes out at once. What is
-  // rate-limited is the *steady* state — while buttons are held (or all
-  // released) a heartbeat repeats the last value, because the firmware releases
-  // both pads after INPUT_TIMEOUT_MS with no packet. The interval is half that
-  // timeout, so a single lost datagram cannot cause a spurious release while
-  // still letting a genuinely dead sender time out as designed.
-  //
-  // TAS playback feeds through here too, so a movie plays out on the real
-  // device. That is deliberate — watching a TAS run on the hardware is half the
-  // fun — and costs nothing, since it is the same byte the emulator is using.
-  const PAD_HEARTBEAT_MS = 250;
-  let padLastBits = -1;      // -1 = nothing sent yet, so the first call always sends
-  let padLastSent = 0;
-
-  function padPost(bits) {
-    padLastBits = bits;
-    padLastSent = performance.now();
-    fetch('/api/pad', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host: deviceIp, pad1: bits, pad2: 0 }),
-    }).catch(() => {
-      if (mirrorWarned) return;
-      mirrorWarned = true;
-      console.warn('pin mirror: cannot reach the relay at /api/pad — is `just serve` running?');
-    });
-  }
-
-  function mirrorPad(bits) {
-    if (!deviceIp) return;
-    const changed = bits !== padLastBits;
-    const stale = performance.now() - padLastSent >= PAD_HEARTBEAT_MS;
-    if (changed || stale) padPost(bits & 0xFF);
-  }
-
   // Press RESET on the device.
   //
   // Only for resets the *user* performs (the RESET button, blowing on the cart,
@@ -1797,7 +1759,6 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
         if (f.cmd & 2) api.powerOn();
         else if (f.cmd & 1) api.reset();
         api.setButtons(0, f.bits);
-        mirrorPad(f.bits);   // the movie drives the real device too (see mirrorPad)
         api.frame();
         window.__nes.frames++;
         ranFrame = true;
@@ -1821,9 +1782,7 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
     if (wantCycles >= 1) {
       acc -= wantCycles * 1000 / clockHz;
       if (tilt !== 0) applyContacts();   // flaky contacts re-roll each burst
-      const padBits = buttons | pollGamepad();
-      api.setButtons(0, padBits);
-      mirrorPad(padBits);
+      api.setButtons(0, buttons | pollGamepad());
       api.runCycles(wantCycles);
       window.__nes.frames++;
       ranFrame = true;

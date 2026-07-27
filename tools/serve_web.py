@@ -3,25 +3,20 @@
 # requires-python = ">=3.12"
 # dependencies = []
 # ///
-"""Serve web/ and relay cartridge pins, console control and pad input to a CoreS3.
+"""Serve web/ and relay cartridge-pin state to a CoreS3 over UDP.
 
-The browser cannot send UDP, so the page POSTs here and this process forwards
-each request as the packet the firmware already parses. Serving the page from the
-same origin is what keeps those POSTs out of CORS preflight territory.
-
-    POST /api/pins    {"host":..., "mask":"<16 hex>"}     -> type 1
-    POST /api/reset   {"host":...}                        -> type 2, RESET
-    POST /api/volume  {"host":..., "volume":0-255}        -> type 2, volume
-    POST /api/pad     {"host":..., "pad1":0-255, "pad2":} -> type 0 (as procon)
+The browser cannot send UDP, so the connector UI POSTs its pin mask here and
+this process forwards it as the same type=1 packet the firmware already parses.
+Serving the page from the same origin is what keeps that POST out of CORS
+preflight territory.
 
 Usage:
-    uv run tools/serve_web.py [--port 8000] [--device-port 5555] [--bind ADDR]
+    uv run tools/serve_web.py [--port 8000] [--device-port 5555]
 
 Then open http://localhost:8000/?device=<CoreS3 IP>.
 
-Binds to 127.0.0.1 by default: this relays to arbitrary hosts, so it should not
-be reachable from off-machine unless you deliberately want a phone to drive it
-(--bind 0.0.0.0), on a network you trust.
+Binds to 127.0.0.1 only: this relays to arbitrary hosts on the LAN, so it must
+not be reachable from off-machine.
 """
 
 import argparse
@@ -36,7 +31,6 @@ from pathlib import Path
 
 PROTOCOL_MAGIC = b"NP"
 PROTOCOL_VERSION = 1
-TYPE_PAD = 0
 TYPE_PINS = 1
 TYPE_CTRL = 2
 CTRL_RESET = 0x01
@@ -46,15 +40,6 @@ CTRL_VOLUME = 0x02
 HOST_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 MASK_RE = re.compile(r"^[0-9a-fA-F]{1,16}$")
 MAX_BODY_BYTES = 4096
-
-
-def _is_byte(v) -> bool:
-    """True for a plain int in 0-255.
-
-    bool is an int subclass, so it is rejected explicitly — otherwise True would
-    silently pass as the value 1.
-    """
-    return isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 255
 
 
 def build_pin_packet(seq: int, mask: int) -> bytes:
@@ -71,26 +56,6 @@ def build_pin_packet(seq: int, mask: int) -> bytes:
         TYPE_PINS,
         seq & 0xFFFF,
         mask & 0xFFFFFFFFFFFFFFFF,
-    )
-
-
-def build_pad_packet(seq: int, pad1: int, pad2: int = 0) -> bytes:
-    """Pack one 8-byte controller frame.
-
-    Byte-for-byte the packet tools/procon_udp.py sends, so the browser and a real
-    Pro Controller are indistinguishable to the firmware. Byte [3] stays 0, which
-    the firmware reads as type 0.
-
-    Buttons: bit0:A 1:B 2:Select 3:Start 4:Up 5:Down 6:Left 7:Right.
-    """
-    return struct.pack(
-        "<2sBBHBB",
-        PROTOCOL_MAGIC,
-        PROTOCOL_VERSION,
-        TYPE_PAD,
-        seq & 0xFFFF,
-        pad1 & 0xFF,
-        pad2 & 0xFF,
     )
 
 
@@ -137,9 +102,6 @@ class PinRelay:
     def send_volume(self, host: str, volume: int) -> bytes:
         return self._send(host, build_ctrl_packet(self.seq, CTRL_VOLUME, volume))
 
-    def send_pad(self, host: str, pad1: int, pad2: int) -> bytes:
-        return self._send(host, build_pad_packet(self.seq, pad1, pad2))
-
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, relay: PinRelay, **kwargs):
@@ -156,7 +118,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         route = self.path.split("?")[0]
-        if route not in ("/api/pins", "/api/reset", "/api/volume", "/api/pad"):
+        if route not in ("/api/pins", "/api/reset", "/api/volume"):
             self._reply(404, {"error": "not found"})
             return
 
@@ -189,26 +151,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._reply(200, {"sent": len(packet), "host": host, "reset": True})
             return
 
-        if route == "/api/pad":
-            pad1 = payload.get("pad1")
-            pad2 = payload.get("pad2", 0)
-            if not _is_byte(pad1):
-                self._reply(400, {"error": "bad pad1"})
-                return
-            if not _is_byte(pad2):
-                self._reply(400, {"error": "bad pad2"})
-                return
-            try:
-                packet = self.relay.send_pad(host, pad1, pad2)
-            except OSError as exc:
-                self._reply(502, {"error": f"send failed: {exc}"})
-                return
-            self._reply(200, {"sent": len(packet), "host": host, "pad1": pad1, "pad2": pad2})
-            return
-
         if route == "/api/volume":
             raw = payload.get("volume")
-            if not _is_byte(raw):
+            # bool is an int subclass, so reject it explicitly rather than
+            # silently accepting True as volume 1.
+            valid = isinstance(raw, int) and not isinstance(raw, bool) and 0 <= raw <= 255
+            if not valid:
                 self._reply(400, {"error": "bad volume"})
                 return
             try:
@@ -243,12 +191,6 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8000, help="HTTP port")
     parser.add_argument("--device-port", type=int, default=5555, help="CoreS3 UDP port")
     parser.add_argument("--dir", default=None, help="directory to serve (default: web/)")
-    parser.add_argument(
-        "--bind",
-        default="127.0.0.1",
-        help="address to bind (default: 127.0.0.1). Use 0.0.0.0 to reach it from "
-             "a phone on the same LAN — see the README warning first.",
-    )
     args = parser.parse_args()
 
     root = Path(args.dir) if args.dir else Path(__file__).resolve().parent.parent / "web"
@@ -258,12 +200,9 @@ def main() -> int:
 
     relay = PinRelay(args.device_port)
     handler = partial(Handler, relay=relay, directory=str(root))
-    server = ThreadingHTTPServer((args.bind, args.port), handler)
-    print(f"serving {root} at http://{args.bind}:{args.port}")
-    print(f"relay -> UDP :{args.device_port}  (open /?device=<CoreS3 IP>)")
-    if args.bind != "127.0.0.1":
-        print(f"WARNING: bound to {args.bind} — anyone on this network can drive "
-              "the device and reach any host it can. Use only on a network you trust.")
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
+    print(f"serving {root} at http://localhost:{args.port}")
+    print(f"pin relay -> UDP :{args.device_port}  (open /?device=<CoreS3 IP>)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
