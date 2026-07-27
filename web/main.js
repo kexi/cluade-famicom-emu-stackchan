@@ -117,6 +117,9 @@
   let audioNode = null;
   let masterGain = null;
   let muted = false;
+  // Set once the device-mirror block below has been evaluated. Until then the
+  // volume mirror must not be called: it reads state declared further down.
+  let mirrorReady = false;
   let masterVolume = parseFloat(localStorage.getItem('masterVolume'));
   if (!(masterVolume >= 0 && masterVolume <= 1.5)) masterVolume = 1;
 
@@ -133,6 +136,13 @@
   }
   function applyMasterVolume() {
     if (masterGain) masterGain.gain.value = muted ? 0 : masterVolume;
+    // Keep the device's speaker in step with the page's slider.
+    //
+    // refreshMaster() calls this during setup, before the mirror block further
+    // down has been evaluated, so route through a flag the mirror sets once it
+    // is actually ready. Calling mirrorVolume directly would touch `deviceIp`
+    // in its temporal dead zone and throw.
+    if (mirrorReady) mirrorVolume(muted ? 0 : masterVolume);
   }
 
   async function initAudio() {
@@ -417,7 +427,8 @@
     if (held === resetHeld) return;
     resetHeld = held;
     btnReset.classList.toggle('held', held);
-    if (!held && running) api.reset();   // オフトリガーでリセットベクタから起動
+    // オフトリガーでリセットベクタから起動
+    if (!held && running) { api.reset(); mirrorResetNow(); }
   }
   btnReset.addEventListener('pointerdown', (e) => {
     setResetHold(true);
@@ -881,8 +892,159 @@
     if (lift >= 0.6) return 0;
     return 1 - (lift - 0.15) / 0.45;
   }
+  // --- device mirror: forward the connector state to a CoreS3 over UDP ---
+  //
+  // The dice are rolled here in the browser and the result is mirrored, rather
+  // than letting the device roll its own: that way the picture on the panel and
+  // the picture in the page are showing the same cartridge, not two independent
+  // simulations that happen to share a tilt angle.
+  //
+  // The browser cannot speak UDP, so this POSTs to the local server (see
+  // tools/serve_web.py), which relays it as a type=1 packet.
+  const MIRROR_MIN_INTERVAL_MS = 66;
+  const deviceIp = (() => {
+    // Query string wins over the stored value so a link can always retarget.
+    const fromQuery = new URLSearchParams(location.search).get('device');
+    if (fromQuery) {
+      try { localStorage.setItem('nesDeviceIp', fromQuery); } catch (e) { /* private mode */ }
+      return fromQuery;
+    }
+    try { return localStorage.getItem('nesDeviceIp') || ''; } catch (e) { return ''; }
+  })();
+
+  let mirrorLastSent = 0;
+  let mirrorPending = null;    // newest mask held back by the throttle
+  let mirrorTimer = 0;
+  let mirrorWarned = false;
+
+  function mirrorPost(mask) {
+    mirrorLastSent = performance.now();
+    fetch('/api/pins', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: deviceIp, mask: mask.toString(16).padStart(16, '0') }),
+    }).catch(() => {
+      // One warning only: a disconnected device would otherwise flood the
+      // console at frame rate while the cart is tilted.
+      if (mirrorWarned) return;
+      mirrorWarned = true;
+      console.warn('pin mirror: cannot reach the relay at /api/pins — is `just serve` running?');
+    });
+  }
+
+  // Throttled so a tilted cart re-rolling every frame cannot swamp the link,
+  // but the *last* state always goes out — otherwise the device could be left
+  // showing a stale mask after the user stops moving the slider.
+  function mirrorPins(mask) {
+    if (!deviceIp) return;
+    const now = performance.now();
+    const sinceLast = now - mirrorLastSent;
+    if (sinceLast >= MIRROR_MIN_INTERVAL_MS) {
+      mirrorPending = null;
+      mirrorPost(mask);
+      return;
+    }
+    mirrorPending = mask;
+    if (mirrorTimer) return;
+    mirrorTimer = setTimeout(() => {
+      mirrorTimer = 0;
+      if (mirrorPending === null) return;
+      const pending = mirrorPending;
+      mirrorPending = null;
+      mirrorPost(pending);
+    }, MIRROR_MIN_INTERVAL_MS - sinceLast);
+  }
+
+  // Mirror the master volume onto the device's speaker.
+  //
+  // 1.0 on the page maps to the firmware's SPEAKER_VOLUME (128), so "normal" is
+  // the same loudness in both places; the slider's 0..1.5 range therefore spans
+  // 0..192. Throttled like the pin mask — dragging the slider fires continuously
+  // — but the final value is always delivered so the two cannot end up disagreeing.
+  const DEVICE_VOLUME_BASE = 128;
+  let volLastSent = 0;
+  let volPending = null;
+  let volTimer = 0;
+
+  function volPost(level) {
+    volLastSent = performance.now();
+    fetch('/api/volume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: deviceIp, volume: level }),
+    }).catch(() => {
+      if (mirrorWarned) return;
+      mirrorWarned = true;
+      console.warn('pin mirror: cannot reach the relay at /api/volume — is `just serve` running?');
+    });
+  }
+
+  function mirrorVolume(gain) {
+    if (!deviceIp) return;
+    const level = Math.max(0, Math.min(255, Math.round(DEVICE_VOLUME_BASE * gain)));
+    const now = performance.now();
+    const sinceLast = now - volLastSent;
+    if (sinceLast >= MIRROR_MIN_INTERVAL_MS) {
+      volPending = null;
+      volPost(level);
+      return;
+    }
+    volPending = level;
+    if (volTimer) return;
+    volTimer = setTimeout(() => {
+      volTimer = 0;
+      if (volPending === null) return;
+      const pending = volPending;
+      volPending = null;
+      volPost(pending);
+    }, MIRROR_MIN_INTERVAL_MS - sinceLast);
+  }
+
+  // Press RESET on the device.
+  //
+  // Only for resets the *user* performs (the RESET button, blowing on the cart,
+  // reseating it). Internal resets — TAS start, ROM load — must not reach the
+  // device, which is running its own built-in ROM and has no idea about them.
+  //
+  // This exists because pulling a CPU-bus pin can wedge the emulated program,
+  // and restoring the contacts alone does not un-wedge it: the console has to
+  // re-fetch the reset vector, same as pressing RESET on real hardware.
+  function mirrorResetNow() {
+    if (!deviceIp) return;
+    fetch('/api/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: deviceIp }),
+    }).catch(() => {
+      if (mirrorWarned) return;
+      mirrorWarned = true;
+      console.warn('pin mirror: cannot reach the relay at /api/reset — is `just serve` running?');
+    });
+  }
+
+  // Bypasses the throttle. For user actions that must land immediately.
+  function mirrorPinsNow(mask) {
+    if (!deviceIp) return;
+    mirrorPending = null;
+    if (mirrorTimer) { clearTimeout(mirrorTimer); mirrorTimer = 0; }
+    mirrorPost(mask);
+  }
+
+  // Everything the mirror needs is now initialised; volume changes may flow.
+  // Push the current setting once so a device that booted at SPEAKER_VOLUME
+  // picks up a slider the user had already moved in a previous session.
+  mirrorReady = true;
+  if (deviceIp) {
+    console.info(`pin mirror: forwarding connector state to ${deviceIp}`);
+    mirrorVolume(muted ? 0 : masterVolume);
+  }
+
   // roll the dice for flaky pins — called every frame while tilted
   function applyContacts() {
+    // Build the device mirror's mask from the same decisions the local core
+    // gets, so the CoreS3 sees exactly the contacts shown in the UI — including
+    // the per-frame re-roll of a flaky (partially seated) pin.
+    let mask = 0n;
     for (let pin = 1; pin <= 60; pin++) {
       let on = 0;
       if (!manualOff.has(pin)) {
@@ -890,7 +1052,9 @@
         on = (q >= 1 || Math.random() < q) ? 1 : 0;
       }
       api.setPin(pin, on);
+      if (on) mask |= 1n << BigInt(pin - 1);
     }
+    mirrorPins(mask);
   }
 
   let lastBusUi = 0;
@@ -997,6 +1161,7 @@
     applyContacts();
     updateBusUI(true);
     api.reset();   // フーフーしたらリセットを押すのがお作法
+    mirrorResetNow();   // applyContacts() above already mirrored the new pin state
     // 💨 演出
     const stage = document.getElementById('cart-stage');
     const puff = document.createElement('div');
@@ -1015,7 +1180,15 @@
     manualOff.clear();
     setTilt(0);
     api.resetPins();
+    // Reseating must reach the device even if the throttle is mid-interval:
+    // this is the one action the user expects to take effect instantly, and
+    // leaving a fault latched on the panel would look like a hang.
+    // Pins first, then reset — the same order as on a real console, and the
+    // order the device must see them in: contacts restored before the reset
+    // vector is fetched, or it would boot straight back into a broken bus.
+    mirrorPinsNow((1n << 60n) - 1n);
     api.reset();   // 挿し直したらリセットボタンを押すのがお作法
+    mirrorResetNow();
     updateBusUI(true);
   });
 

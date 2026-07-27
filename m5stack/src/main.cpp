@@ -24,6 +24,17 @@ extern const uint8_t rom_end[] asm("_binary_data_game_nes_end");
 static std::atomic<uint8_t> g_padBits[2] = {};
 static std::atomic<uint32_t> g_lastRxMs{0};
 
+// Cartridge connector state from the browser's pin UI. Deliberately NOT subject
+// to INPUT_TIMEOUT_MS: a pulled pin is a physical condition that persists until
+// the user reseats the cart, unlike a held button which must be released if the
+// sender dies. Recovery is an explicit all-ones mask.
+static std::atomic<uint64_t> g_pinMask{PIN_MASK_ALL_OK};
+// Set by the UDP task, consumed once at a frame boundary by the emulation loop.
+static std::atomic<bool> g_resetRequested{false};
+// Master volume the browser asked for, or -1 while it has never said anything —
+// in which case the compile-time SPEAKER_VOLUME stands and is left untouched.
+static std::atomic<int> g_volume{-1};
+
 // Audio staging: APU output lands in the ring, and fixed-size chunks are handed
 // to the speaker from there. Both live in internal SRAM.
 static int16_t g_ring[AUDIO_RING_SAMPLES];
@@ -66,6 +77,29 @@ static void udpTask(void*) {
         const bool versionOk = packet[2] == UDP_PROTOCOL_VERSION;
         if (!magicOk || !versionOk) continue;
 
+        const uint8_t type = packet[3];
+        if (type == UDP_TYPE_PINS) {
+            // A pin packet is longer than the pad packet, so re-check the length
+            // rather than reading past what actually arrived.
+            const bool pinPacketShort = received < UDP_PIN_PACKET_SIZE;
+            if (pinPacketShort) continue;
+            uint64_t mask = 0;
+            for (int i = 0; i < 8; i++) mask |= (uint64_t)packet[6 + i] << (i * 8);
+            // Normalise here so every later comparison against PIN_MASK_ALL_OK
+            // works regardless of what the sender left in the unused top bits.
+            g_pinMask.store(mask & PIN_MASK_VALID, std::memory_order_relaxed);
+            continue;   // not controller input: leave g_lastRxMs alone
+        }
+        if (type == UDP_TYPE_CTRL) {
+            const uint8_t cmd = packet[6];
+            // Latch rather than act here: this runs on core 0 while the emulator
+            // is mid-frame on core 1, so the work happens at a frame boundary.
+            if (cmd & UDP_CTRL_RESET) g_resetRequested.store(true, std::memory_order_relaxed);
+            if (cmd & UDP_CTRL_VOLUME) g_volume.store(packet[7], std::memory_order_relaxed);
+            continue;
+        }
+
+        // type 0 (or a legacy sender's zero "reserved" byte): controller state.
         g_padBits[0].store(packet[6], std::memory_order_relaxed);
         g_padBits[1].store(packet[7], std::memory_order_relaxed);
         g_lastRxMs.store(millis(), std::memory_order_relaxed);
@@ -187,6 +221,43 @@ static void applyInput() {
     g_nes.pad[1].setButtons(g_padBits[1].load(std::memory_order_relaxed));
 }
 
+// Push connector state into the core, but only on an actual change: applyPinMask
+// recomputes the derived masks and drops the PPU's CHR shortcut, so calling it
+// every frame would throw away the fast path for nothing.
+static void applyPinChanges() {
+    static uint64_t applied = PIN_MASK_ALL_OK;
+    const uint64_t wanted = g_pinMask.load(std::memory_order_relaxed);
+    const bool unchanged = wanted == applied;
+    if (unchanged) return;
+    applied = wanted;
+    g_nes.applyPinMask(wanted);
+    Serial.printf("PINS: %016llx\n", (unsigned long long)wanted);
+}
+
+// The RESET button, as the browser's connector UI presses it. Runs after the pin
+// state is applied so a "reseat and reset" arrives in the same order it happens
+// on a real console: contacts restored first, then the reset vector fetched.
+// NES::reset() keeps work RAM, which is what the physical button does.
+static void applyResetRequest() {
+    const bool requested = g_resetRequested.exchange(false, std::memory_order_relaxed);
+    if (!requested) return;
+    g_nes.reset();
+    Serial.println("RESET: console reset");
+}
+
+// Mirror the browser's master volume onto the speaker. M5Unified recomputes its
+// gain from _master_volume on every DMA block in the output task, so this takes
+// effect on audio that has already been queued — no need to drain or restart.
+static void applyVolumeRequest() {
+    static int applied = -1;
+    const int wanted = g_volume.load(std::memory_order_relaxed);
+    const bool unset = wanted < 0;
+    if (unset || wanted == applied) return;
+    applied = wanted;
+    M5.Speaker.setVolume((uint8_t)wanted);
+    Serial.printf("VOL: %d\n", wanted);
+}
+
 // Decouple APU production from Speaker consumption.
 //
 // The speaker's per-channel queue holds only two entries, so submitting one
@@ -196,12 +267,17 @@ static void applyInput() {
 static void enqueueAudio() {
     const int produced = g_nes.apu.sampleCount;
     g_nes.apu.sampleCount = 0;
+    // Famicom audio loops out through the cartridge (pins 45/46), so a bad
+    // contact there silences the console — same semantics as the web build's
+    // muteIfCartAudioBroken. Zero-fill rather than skip so the ring keeps being
+    // fed and playback stays continuous instead of underrunning into clicks.
+    const bool cartAudioBroken = !g_nes.soundOk;
     // APU::mix() swings 0..~0.45, i.e. entirely positive with a large standing DC
     // component. Feeding that to the speaker wastes half the headroom and turns
     // every queue start/stop into an audible step, so block DC first.
     static float dcX1 = 0.0f, dcY1 = 0.0f;
     for (int i = 0; i < produced; i++) {
-        const float x = g_nes.apu.sampleBuf[i];
+        const float x = cartAudioBroken ? 0.0f : g_nes.apu.sampleBuf[i];
         const float y = x - dcX1 + AUDIO_DC_POLE * dcY1;
         dcX1 = x;
         dcY1 = y;
@@ -289,6 +365,9 @@ void loop() {
 
     M5.update();
     applyInput();
+    applyPinChanges();
+    applyResetRequest();
+    applyVolumeRequest();
 
     static uint32_t frameIndex = 0;
     const bool drawThisFrame = (frameIndex++ % g_divisor) == 0;
@@ -365,6 +444,11 @@ void loop() {
                       perfRingMin, perfRingMax,
                       (unsigned long)g_ringDropped,
                       (unsigned long)playbackRate);
+        // Only when something is actually unplugged, so the normal log stays as
+        // it was and a fault is impossible to miss in a capture.
+        const uint64_t pins = g_pinMask.load(std::memory_order_relaxed);
+        const bool cartSeated = pins == PIN_MASK_ALL_OK;
+        if (!cartSeated) Serial.printf("  pins=%016llx\n", (unsigned long long)pins);
         playbackRate = (uint32_t)(AUDIO_SAMPLES_PER_FRAME * fps);
         perfWindowUs = pushEndUs;
         perfFrames = 0;

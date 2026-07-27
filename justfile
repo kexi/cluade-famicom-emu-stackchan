@@ -38,9 +38,10 @@ procon host:
 build-web:
     ./build.sh
 
-# Web 版をローカル配信 (http://localhost:8000)
+# Web 版をローカル配信 + 端子状態を実機へ UDP 中継 (http://localhost:8000)
+# 実機に反映するには http://localhost:8000/?device=<CoreS3 の IP> を開く
 serve port='8000':
-    uv run python -m http.server {{port}} -d web
+    uv run tools/serve_web.py --port {{port}}
 
 # -------------------------------------------------------------------- 検証
 

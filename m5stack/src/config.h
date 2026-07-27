@@ -43,6 +43,9 @@ constexpr int DIVISOR_LATE_NARROW = 1;         // at or below this -> try narrow
 // ------------------------------------------------------------------- audio
 constexpr uint32_t AUDIO_SAMPLE_RATE = 44100;
 constexpr uint8_t SPEAKER_VOLUME = 128;      // 0-255, M5.Speaker master volume
+// The device level the browser's 1.0 master volume maps to, so the two agree on
+// what "normal" sounds like. The web slider spans 0..1.5, i.e. up to 192 here.
+constexpr uint8_t SPEAKER_VOLUME_BASE = SPEAKER_VOLUME;
 constexpr uint8_t SPEAKER_CHANNEL = 1;       // virtual channel used for playRaw
 constexpr int AUDIO_BUF_SAMPLES = 2048;      // matches APU::sampleBuf capacity
 
@@ -72,6 +75,28 @@ constexpr uint8_t UDP_PROTOCOL_VERSION = 1;
 // Controller state is released when packets stop arriving, so a dead sender
 // cannot leave a button stuck down.
 constexpr uint32_t INPUT_TIMEOUT_MS = 500;
+
+// Packet kind, read from byte [3]. The original controller packet left that byte
+// as a zero "reserved" field (see tools/procon_udp.py build_packet), so type 0
+// keeps every existing sender working untouched.
+constexpr uint8_t UDP_TYPE_PAD = 0;
+constexpr uint8_t UDP_TYPE_PINS = 1;
+// Console control. Needed because pulling a CPU-bus pin can crash the emulated
+// program, and reseating the cart alone does not recover it — on real hardware
+// you press RESET afterwards, so the browser has to be able to say that too.
+constexpr uint8_t UDP_TYPE_CTRL = 2;
+constexpr uint8_t UDP_CTRL_RESET = 0x01;    // byte [6] bit 0
+constexpr uint8_t UDP_CTRL_VOLUME = 0x02;   // byte [6] bit 1, level in byte [7]
+// 'N','P' | version | type | seq u16 LE | mask u64 LE
+constexpr uint8_t UDP_PIN_PACKET_SIZE = 14;
+// Only bits 0..59 are meaningful (pins 1..60); applyPinMask ignores the rest.
+// Senders differ on what they put in the top four bits — the browser builds the
+// mask from the 60 pins it draws and leaves them clear, while a hand-written
+// "all ok" is naturally ~0 — so every comparison masks down to this first.
+// Getting that wrong silently pins the core on its slow fault path.
+constexpr uint64_t PIN_MASK_VALID = (1ULL << 60) - 1;
+// All 60 connector pins making contact — a properly seated cartridge.
+constexpr uint64_t PIN_MASK_ALL_OK = PIN_MASK_VALID;
 
 // -------------------------------------------------------------------- timing
 // NTSC NES frame period: 1/60.0988 s.
