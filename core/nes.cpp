@@ -2,6 +2,7 @@
 
 namespace nes {
 
+#ifndef NES_EMBEDDED
 // Famicom 60-pin cartridge connector: recompute signal masks from pin states.
 // Pinout (nesdev wiki): front 1-30 = GND, CPU A11..A0, R/W, /IRQ, GND, PPU /RD,
 // CIRAM A10, PPU A6..A0, PPU D0..D3, +5V / back 31-60 = +5V, M2, CPU A12-A14,
@@ -35,11 +36,14 @@ void NES::updatePins() {
     ciramA10Ok = pinOk[18];
     ciramCeOk = pinOk[48] && pinOk[49];   // most carts drive CIRAM /CE from PPU /A13
 }
+#endif // !NES_EMBEDDED
 
 bool NES::loadRom(const uint8_t* data, size_t size) {
     mapper = nes::loadRom(data, size);
     if (!mapper) return false;
+    refreshMapperCaps();
     powerOn();
+    ppu.refreshChrWindow();
     return true;
 }
 
@@ -57,7 +61,11 @@ void NES::powerOn() {
 
 void NES::runCycles(int n) {
     while (n > 0) {
+#ifndef NES_EMBEDDED
         cpu.irq(apu.irqPending() || (mapper && irqOk && mapper->irqPending()));
+#else
+        cpu.irq(irqLineLevel());
+#endif
         int cycles = cpu.step();
         for (int i = 0; i < cycles; i++) {
             apu.step();
@@ -66,44 +74,69 @@ void NES::runCycles(int n) {
             ppu.step();
             cycleCount++;
             if (mapper) mapper->cpuCycle();
+#ifndef NES_EMBEDDED
             if (probePin) probeSample();
+#endif
         }
         n -= cycles;
     }
 }
 
-uint8_t NES::cpuRead(uint16_t addr) {
+uint8_t NES_HOT NES::cpuRead(uint16_t addr) {
+#ifndef NES_EMBEDDED
     lastCpuAddr = addr;
     lastCpuWrite = false;
     uint8_t v = cpuReadBus(addr);
     lastCpuData = v;
     return v;
+#else
+    return cpuReadBus(addr);
+#endif
 }
 
-uint8_t NES::cpuReadBus(uint16_t addr) {
+uint8_t NES_HOT NES::cpuReadBus(uint16_t addr) {
     if (addr < 0x2000) return ram[addr & 0x7FF];
+#ifdef NES_EMBEDDED
+    // These observe PPU/APU state, so the deferred cycles must land first.
+    if (addr < 0x4000) { catchUp(); return ppu.readReg(addr); }
+    if (addr == 0x4015) { catchUp(); return apu.readStatus(); }
+#else
     if (addr < 0x4000) return ppu.readReg(addr);
     if (addr == 0x4015) return apu.readStatus();
+#endif
     if (addr == 0x4016) return pad[0].read();
     if (addr == 0x4017) return pad[1].read();
     if (addr < 0x4020) return 0;
     if (!mapper) return 0;
+#ifndef NES_EMBEDDED
     // cartridge access through the (possibly faulty) connector
     if (!powerOk || !m2Ok) return cartOpenBus(addr);
     if (addr >= 0x8000 && !romselOk) return cartOpenBus(addr);
     uint16_t maskedAddr = (addr & 0x8000) | (addr & prgAddrAnd);
     uint8_t v = mapper->cpuRead(maskedAddr);
     return (v & prgDataAnd) | (cartOpenBus(addr) & ~prgDataAnd);
+#else
+    return mapper->cpuRead(addr);
+#endif
 }
 
-void NES::cpuWrite(uint16_t addr, uint8_t v) {
+void NES_HOT NES::cpuWrite(uint16_t addr, uint8_t v) {
+#ifndef NES_EMBEDDED
     lastCpuAddr = addr;
     lastCpuData = v;
     lastCpuWrite = true;
+#endif
     if (addr < 0x2000) { ram[addr & 0x7FF] = v; return; }
+#ifdef NES_EMBEDDED
+    if (addr < 0x4000) { catchUp(); ppu.writeReg(addr, v); return; }
+#else
     if (addr < 0x4000) { ppu.writeReg(addr, v); return; }
+#endif
     if (addr == 0x4014) {
         // OAM DMA
+#ifdef NES_EMBEDDED
+        catchUp();
+#endif
         uint8_t page[256];
         uint16_t base = v << 8;
         for (int i = 0; i < 256; i++) page[i] = cpuRead(base + i);
@@ -111,22 +144,76 @@ void NES::cpuWrite(uint16_t addr, uint8_t v) {
         cpu.addStall(513);
         return;
     }
+#ifndef NES_EMBEDDED
     if (addr >= 0x4000 && addr <= 0x4017) apuRegShadow[addr - 0x4000] = v;
+#endif
     if (addr == 0x4016) { pad[0].writeStrobe(v); pad[1].writeStrobe(v); return; }
+#ifdef NES_EMBEDDED
+    if (addr < 0x4020) { catchUp(); apu.writeReg(addr, v); return; }
+#else
     if (addr < 0x4020) { apu.writeReg(addr, v); return; }
+#endif
     if (!mapper) return;
+#ifndef NES_EMBEDDED
     if (!powerOk || !m2Ok || !rwOk) return;
     if (addr >= 0x8000 && !romselOk) return;
     uint16_t maskedAddr = (addr & 0x8000) | (addr & prgAddrAnd);
     mapper->cpuWrite(maskedAddr, (v & prgDataAnd) | (cartOpenBus(addr) & ~prgDataAnd));
+#else
+    mapper->cpuWrite(addr, v);
+    ppu.refreshChrWindow();
+#endif
 }
 
-void NES::runFrame() {
+#ifdef NES_EMBEDDED
+// Settle the PPU/APU debt accumulated while the CPU ran ahead.
+void NES_HOT NES::catchUp() {
+    const int cycles = pendingCpuCycles_;
+    if (cycles <= 0) return;
+    pendingCpuCycles_ = 0;
+    apu.stepMany(cycles);
+    // PPU: stepMany's dot-skipping proved unsafe (it desynchronises mid-frame
+    // register timing on synth.nes), so the PPU is still stepped per dot here.
+    // The win from batching is in the APU and in not re-entering runFrame's loop.
+    ppu.stepMany(cycles * 3);
+    // Only VRC-style carts drive anything off the CPU clock; for everything else
+    // this loop was ~29,780 calls a frame into an empty virtual.
+    if (mapperWantsCpuCycle_) {
+        for (int i = 0; i < cycles; i++) mapper->cpuCycle();
+    }
+    cycleCount += cycles;
+}
+
+// Defer the work; flushed by catchUp() at a register access or a frame boundary.
+void NES_HOT NES::runCyclesBatched(int cycles) {
+    pendingCpuCycles_ += cycles;
+    // Bound the debt so a long stretch without register access still renders in
+    // order (and so the frame-end check below stays responsive).
+    //
+    // Kept at 64: raising it to 128 halves the flush count but measured no
+    // faster on hardware (emuS 21.6ms either way), so the staler IRQ line it
+    // buys is not worth it. The flush itself is not where the time goes.
+    if (pendingCpuCycles_ >= 64) catchUp();
+}
+#endif
+
+void NES_HOT NES::runFrame() {
     ppu.frameReady = false;
     while (!ppu.frameReady) {
         // IRQ line: APU frame/DMC + mapper (MMC3)
+#ifndef NES_EMBEDDED
         cpu.irq(apu.irqPending() || (mapper && irqOk && mapper->irqPending()));
+#else
+        // The IRQ line reflects APU frame/DMC and mapper counters. Settling on
+        // every instruction would defeat the batching, so the debt cap in
+        // runCyclesBatched() bounds how stale this can get instead: an IRQ is
+        // seen at most a few dozen CPU cycles late, which no NES title depends on.
+        cpu.irq(irqLineLevel());
+#endif
         int cycles = cpu.step();
+#ifdef NES_EMBEDDED
+        runCyclesBatched(cycles);
+#else
         for (int i = 0; i < cycles; i++) {
             apu.step();
             ppu.step();
@@ -136,11 +223,16 @@ void NES::runFrame() {
             if (mapper) mapper->cpuCycle();
             if (probePin) probeSample();
         }
+#endif
     }
+#ifdef NES_EMBEDDED
+    catchUp();   // do not carry debt across the frame boundary
+#endif
 }
 
 } // namespace nes
 
+#ifndef NES_EMBEDDED
 // Sample the probed pin's logic level once per CPU cycle.
 // Digital levels use 30/220 so the trace reads like a real scope.
 uint8_t nes::NES::probeLevelFor(int p) {
@@ -221,6 +313,7 @@ API int nes_swap_rom(int size) {
     auto m = nes::loadRom(g_romBuf, (size_t)size);
     if (!m) return 0;
     g_nes->mapper = std::move(m);
+    g_nes->refreshMapperCaps();
     return 1;
 }
 
@@ -378,3 +471,4 @@ API int nes_has_battery() {
 }
 
 } // extern "C"
+#endif // !NES_EMBEDDED

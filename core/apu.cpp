@@ -34,6 +34,20 @@ void APU::Pulse::stepTimer() {
         dutyPos = (dutyPos + 1) & 7;
     }
 }
+#ifdef NES_EMBEDDED
+// Batched equivalent of calling stepTimer() n times. The divider reloads with
+// `timer`, so it wraps floor((n - counter - 1) / (timer + 1)) + 1 times once the
+// first wrap is reached; the duty position is periodic mod 8.
+void APU::Pulse::advance(int n) {
+    if (n <= 0) return;
+    if (timerCounter >= n) { timerCounter -= n; return; }
+    n -= timerCounter + 1;
+    const int period = timer + 1;
+    const int wraps = 1 + n / period;
+    timerCounter = timer - (n % period);
+    dutyPos = (dutyPos + wraps) & 7;
+}
+#endif
 void APU::Pulse::stepEnvelope() {
     if (envStart) {
         envStart = false;
@@ -80,6 +94,18 @@ void APU::Triangle::stepTimer() {
             seqPos = (seqPos + 1) & 31;
     }
 }
+#ifdef NES_EMBEDDED
+void APU::Triangle::advance(int n) {
+    if (n <= 0) return;
+    if (timerCounter >= n) { timerCounter -= n; return; }
+    n -= timerCounter + 1;
+    const int period = timer + 1;
+    const int wraps = 1 + n / period;
+    timerCounter = timer - (n % period);
+    const bool gated = lengthCounter > 0 && linearCounter > 0 && timer >= 2;
+    if (gated) seqPos = (seqPos + wraps) & 31;
+}
+#endif
 int APU::Triangle::output() const {
     if (!enabled || lengthCounter == 0 || linearCounter == 0) return TRIANGLE_SEQ[seqPos];
     return TRIANGLE_SEQ[seqPos];
@@ -93,6 +119,22 @@ void APU::Noise::stepTimer() {
         shiftReg = (shiftReg >> 1) | (fb << 14);
     }
 }
+#ifdef NES_EMBEDDED
+// The LFSR has no closed form here, so only the divider is batched; the shift
+// register is clocked once per wrap instead of once per cycle.
+void APU::Noise::advance(int n) {
+    if (n <= 0) return;
+    if (timerCounter >= n) { timerCounter -= n; return; }
+    n -= timerCounter + 1;
+    const int period = timerPeriod + 1;
+    const int wraps = 1 + n / period;
+    timerCounter = timerPeriod - (n % period);
+    for (int i = 0; i < wraps; i++) {
+        const int fb = (shiftReg & 1) ^ ((shiftReg >> (mode ? 6 : 1)) & 1);
+        shiftReg = (shiftReg >> 1) | (fb << 14);
+    }
+}
+#endif
 void APU::Noise::stepEnvelope() {
     if (envStart) {
         envStart = false;
@@ -145,7 +187,7 @@ void APU::halfFrame() {
     pulse2_.stepSweep();
 }
 
-void APU::stepDmc() {
+void NES_HOT APU::stepDmc() {
     // fetch sample byte when needed
     if (!dmc_.bufferFilled && dmc_.bytesRemaining > 0) {
         dmc_.buffer = nes_.cpuRead(dmc_.currentAddr);
@@ -228,7 +270,91 @@ void APU::mixStereo(float& l, float& r) const {
     }
 }
 
-void APU::step() {
+#ifdef NES_EMBEDDED
+// Advance `cycles` CPU cycles worth of APU state.
+//
+// step() is dominated by per-call overhead rather than by its own work, so this
+// runs the channel timers in a tight loop and evaluates the frame-counter and
+// downsample checks only at the boundaries where they can actually fire. The
+// timers still clock every cycle (their divider positions shape the waveform),
+// and quarter/half-frame clocks land on exactly the same cycles as before.
+//
+// Deliberate compromise: DMC sample fetches are still driven from stepDmc() on
+// the same cycles, but a DMC fetch does not steal CPU cycles here (it did not
+// before either). ROMs that rely on precise DMC DMA stalling are unaffected in
+// this build only because that behaviour was already absent.
+void NES_HOT APU::stepMany(int cycles) {
+    while (cycles > 0) {
+        // Cycles until the next frame-counter event.
+        static const int STEP4[4] = {7457, 14913, 22371, 29829};
+        static const int STEP5[5] = {7457, 14913, 22371, 29829, 37281};
+        int nextEvent;
+        if (!fiveStep_) {
+            nextEvent = frameStep_ < 4 ? STEP4[frameStep_] - frameCounterCycles_ : cycles;
+        } else {
+            nextEvent = frameStep_ < 5 ? STEP5[frameStep_] - frameCounterCycles_ : cycles;
+        }
+        if (nextEvent < 1) nextEvent = 1;
+
+        // Cycles until the next output sample is due.
+        SampleTimer remain = cyclesPerSample_ - sampleTimer_;
+        int nextSample = (int)(remain / SampleTimer(1));
+        if (nextSample < 1) nextSample = 1;
+
+        int run = cycles;
+        if (nextEvent < run) run = nextEvent;
+        if (nextSample < run) run = nextSample;
+
+        // Timers are dividers: instead of decrementing once per cycle, work out
+        // how many times each one wraps over `run` cycles and advance its
+        // sequencer that many times. Channels whose period exceeds the batch
+        // reduce to a single subtraction.
+        const int apuTicks = (run + (oddCycle_ ? 1 : 0)) / 2;   // cycles where the /2 channels clock
+        triangle_.advance(run);
+        pulse1_.advance(apuTicks);
+        pulse2_.advance(apuTicks);
+        noise_.advance(apuTicks);
+        for (int i = 0; i < apuTicks; i++) stepDmc();
+        if (run & 1) oddCycle_ = !oddCycle_;
+        frameCounterCycles_ += run;
+        sampleTimer_ += SampleTimer(run);
+        cycles -= run;
+
+        // Frame counter, evaluated exactly where step() would have fired it.
+        if (!fiveStep_) {
+            if (frameStep_ < 4 && frameCounterCycles_ >= STEP4[frameStep_]) {
+                quarterFrame();
+                if (frameStep_ == 1 || frameStep_ == 3) halfFrame();
+                if (frameStep_ == 3) {
+                    if (!irqInhibit_) frameIrq_ = true;
+                    frameCounterCycles_ = 0;
+                }
+                frameStep_ = (frameStep_ + 1) & 3;
+            }
+        } else {
+            if (frameStep_ < 5 && frameCounterCycles_ >= STEP5[frameStep_]) {
+                if (frameStep_ != 3) {
+                    quarterFrame();
+                    if (frameStep_ == 1 || frameStep_ == 4) halfFrame();
+                }
+                if (frameStep_ == 4) frameCounterCycles_ = 0;
+                frameStep_ = frameStep_ == 4 ? 0 : frameStep_ + 1;
+            }
+        }
+
+        // Downsample.
+        if (sampleTimer_ >= cyclesPerSample_) {
+            sampleTimer_ -= cyclesPerSample_;
+            if (sampleCount < (int)(sizeof(sampleBuf) / sizeof(float))) {
+                sampleBuf[sampleCount] = mix();
+                sampleCount++;
+            }
+        }
+    }
+}
+#endif // NES_EMBEDDED
+
+void NES_HOT APU::step() {
     // triangle clocks every CPU cycle; pulse/noise/dmc every other
     triangle_.stepTimer();
     if (oddCycle_) {
@@ -265,10 +391,11 @@ void APU::step() {
     }
 
     // downsample
-    sampleTimer_ += 1.0;
+    sampleTimer_ += SampleTimer(1);
     if (sampleTimer_ >= cyclesPerSample_) {
         sampleTimer_ -= cyclesPerSample_;
         if (sampleCount < (int)(sizeof(sampleBuf) / sizeof(float))) {
+#ifndef NES_EMBEDDED
             float l, r;
             mixStereo(l, r);
             sampleBuf[sampleCount] = l;
@@ -281,12 +408,15 @@ void APU::step() {
             for (int c = 0; c < 3; c++)
                 chanBuf[5 + c][sampleCount] =
                     nes_.mapper ? (uint8_t)nes_.mapper->expansionChannel(c) : 0;
+#else
+            sampleBuf[sampleCount] = mix();
+#endif
             sampleCount++;
         }
     }
 }
 
-uint8_t APU::readStatus() {
+uint8_t NES_HOT APU::readStatus() {
     uint8_t r = 0;
     if (pulse1_.lengthCounter > 0) r |= 0x01;
     if (pulse2_.lengthCounter > 0) r |= 0x02;
@@ -299,7 +429,7 @@ uint8_t APU::readStatus() {
     return r;
 }
 
-void APU::writeReg(uint16_t addr, uint8_t v) {
+void NES_HOT APU::writeReg(uint16_t addr, uint8_t v) {
     switch (addr) {
     case 0x4000: case 0x4004: {
         Pulse& p = (addr == 0x4000) ? pulse1_ : pulse2_;

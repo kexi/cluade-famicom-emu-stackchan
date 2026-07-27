@@ -15,12 +15,13 @@ public:
         if (addr >= 0x6000 && addr < 0x8000) prgRam_[addr - 0x6000] = v;
     }
     uint8_t ppuRead(uint16_t addr) override { return chr_[addr & 0x1FFF]; }
+    const uint8_t* chrWindow() const override { return chr_.data(); }
 };
 
 // ------------------------------------------------------------- Mapper 1: MMC1
 class Mapper1 : public Mapper {
 public:
-    Mapper1(std::vector<uint8_t> prg, std::vector<uint8_t> chr, Mirroring m, bool battery)
+    Mapper1(RomBuffer prg, RomBuffer chr, Mirroring m, bool battery)
         : Mapper(std::move(prg), std::move(chr), m, battery) {
         prgBanks_ = (int)(prg_.size() / 0x4000);
     }
@@ -89,7 +90,7 @@ private:
 // ------------------------------------------------------------ Mapper 2: UxROM
 class Mapper2 : public Mapper {
 public:
-    Mapper2(std::vector<uint8_t> prg, std::vector<uint8_t> chr, Mirroring m, bool battery)
+    Mapper2(RomBuffer prg, RomBuffer chr, Mirroring m, bool battery)
         : Mapper(std::move(prg), std::move(chr), m, battery) {
         prgBanks_ = (int)(prg_.size() / 0x4000);
     }
@@ -106,6 +107,7 @@ public:
         else if (addr >= 0x6000) prgRam_[addr - 0x6000] = v;
     }
     uint8_t ppuRead(uint16_t addr) override { return chr_[addr & 0x1FFF]; }
+    const uint8_t* chrWindow() const override { return chr_.data(); }
 private:
     int bank_ = 0, prgBanks_;
 };
@@ -125,6 +127,7 @@ public:
     uint8_t ppuRead(uint16_t addr) override {
         return chr_[(size_t)bank_ * 0x2000 + (addr & 0x1FFF)];
     }
+    const uint8_t* chrWindow() const override { return chr_.data() + (size_t)bank_ * 0x2000; }
 private:
     int bank_ = 0;
 };
@@ -132,7 +135,7 @@ private:
 // ------------------------------------------------------------- Mapper 4: MMC3
 class Mapper4 : public Mapper {
 public:
-    Mapper4(std::vector<uint8_t> prg, std::vector<uint8_t> chr, Mirroring m, bool battery)
+    Mapper4(RomBuffer prg, RomBuffer chr, Mirroring m, bool battery)
         : Mapper(std::move(prg), std::move(chr), m, battery) {
         prgBanks8k_ = (int)(prg_.size() / 0x2000);
         fourScreen_ = (m == Mirroring::FourScreen);
@@ -178,6 +181,8 @@ public:
         else irqCounter_--;
         if (irqCounter_ == 0 && irqEnabled_) irqPending_ = true;
     }
+    // MMC3 counts scanlines, not CPU cycles, so cpuCycle() stays unimplemented.
+    bool hasIrq() const override { return true; }
     bool irqPending() const override { return irqPending_; }
     void irqClear() override { irqPending_ = false; }
 private:
@@ -204,7 +209,7 @@ private:
 // Adds three expansion sound channels (2 pulse + sawtooth) on the cartridge.
 class Mapper6502VRC6 : public Mapper {
 public:
-    Mapper6502VRC6(std::vector<uint8_t> prg, std::vector<uint8_t> chr, Mirroring m,
+    Mapper6502VRC6(RomBuffer prg, RomBuffer chr, Mirroring m,
                    bool battery, bool swapA0A1)
         : Mapper(std::move(prg), std::move(chr), m, battery), swapA0A1_(swapA0A1) {
         prgBanks16_ = (int)(prg_.size() / 0x4000);
@@ -285,6 +290,10 @@ public:
             }
         }
     }
+    // Unconditionally true: cpuCycle() also clocks the expansion audio, so it is
+    // needed even when the IRQ counter is disabled.
+    bool wantsCpuCycle() const override { return true; }
+    bool hasIrq() const override { return true; }
     bool irqPending() const override { return irqPending_; }
     void irqClear() override { irqPending_ = false; }
 
@@ -430,8 +439,8 @@ std::unique_ptr<Mapper> loadRom(const uint8_t* data, size_t size) {
     size_t chrSize = (size_t)chrBanks * 0x2000;
     if (offset + prgSize + chrSize > size) return nullptr;
 
-    std::vector<uint8_t> prg(data + offset, data + offset + prgSize);
-    std::vector<uint8_t> chr(data + offset + prgSize, data + offset + prgSize + chrSize);
+    RomBuffer prg(data + offset, data + offset + prgSize);
+    RomBuffer chr(data + offset + prgSize, data + offset + prgSize + chrSize);
 
     switch (mapperNum) {
     case 0: return std::make_unique<Mapper0>(std::move(prg), std::move(chr), mirror, battery);

@@ -3,17 +3,70 @@
 #include <cstring>
 #include <vector>
 #include <memory>
+#include <new>
 
 namespace nes {
 
+#ifdef NES_EMBEDDED
+using Pixel = uint16_t;   // RGB565 (LCD直転送用)
+#else
+using Pixel = uint32_t;   // ARGB
+#endif
+
+// IRAM_ATTR is only meaningful on ESP-IDF; keep it off the host builds so the
+// same sources still compile with a plain clang/gcc.
+#if defined(NES_EMBEDDED) && defined(ESP_PLATFORM)
+#include "esp_attr.h"
+#define NES_HOT IRAM_ATTR
+// Xtensa uses the windowed ABI: every call executes entry/retw and periodically
+// traps to spill a register window. PPU::step runs ~89k times per frame and
+// calls three more levels down, so that overhead dominates the frame. Force the
+// chain flat instead of trusting the inliner's size heuristics.
+#define NES_INLINE __attribute__((always_inline)) inline
+#else
+#define NES_HOT
+#define NES_INLINE inline
+#endif
+
 class NES;
+
+// ROM/CHR storage. On ESP32 with PSRAM enabled the default allocator hands out
+// PSRAM for allocations this size, and every opcode/pattern fetch then pays the
+// external-bus latency. Force internal SRAM instead: a 48KB cartridge fits, and
+// falling back to the default allocator keeps oversized ROMs loadable.
+#if defined(NES_EMBEDDED) && defined(ESP_PLATFORM)
+#include "esp_heap_caps.h"
+
+template <typename T>
+struct InternalRamAllocator {
+    using value_type = T;
+    InternalRamAllocator() = default;
+    template <typename U> InternalRamAllocator(const InternalRamAllocator<U>&) {}
+
+    T* allocate(std::size_t n) {
+        const std::size_t bytes = n * sizeof(T);
+        void* p = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!p) p = heap_caps_malloc(bytes, MALLOC_CAP_8BIT);   // PSRAM fallback
+        if (!p) throw std::bad_alloc();
+        return static_cast<T*>(p);
+    }
+    void deallocate(T* p, std::size_t) { heap_caps_free(p); }
+
+    template <typename U> bool operator==(const InternalRamAllocator<U>&) const { return true; }
+    template <typename U> bool operator!=(const InternalRamAllocator<U>&) const { return false; }
+};
+
+using RomBuffer = std::vector<uint8_t, InternalRamAllocator<uint8_t>>;
+#else
+using RomBuffer = std::vector<uint8_t>;
+#endif
 
 // ---------------------------------------------------------------- Cartridge
 enum class Mirroring { Horizontal, Vertical, SingleLow, SingleHigh, FourScreen };
 
 class Mapper {
 public:
-    Mapper(std::vector<uint8_t> prg, std::vector<uint8_t> chr, Mirroring m, bool battery)
+    Mapper(RomBuffer prg, RomBuffer chr, Mirroring m, bool battery)
         : prg_(std::move(prg)), chr_(std::move(chr)), mirroring_(m), battery_(battery) {
         chrRam_ = chr_.empty();
         if (chrRam_) chr_.resize(0x2000, 0);
@@ -27,10 +80,25 @@ public:
     virtual void ppuWrite(uint16_t addr, uint8_t v) {
         if (chrRam_) chr_[addr & 0x1FFF] = v;
     }
+    // Contiguous 8KB CHR window for $0000-$1FFF, or nullptr when the mapper
+    // banks at finer granularity. The PPU reads patterns through this pointer to
+    // skip a virtual call on every background/sprite fetch; mappers that switch
+    // banks must keep it current (see Mapper3::cpuWrite).
+    virtual const uint8_t* chrWindow() const { return nullptr; }
+
     // Called once per scanline at PPU dot ~260 when rendering enabled (MMC3 IRQ)
     virtual void scanline() {}
     // Called once per CPU cycle (VRC-style IRQ counters, expansion audio)
     virtual void cpuCycle() {}
+    // True only for mappers that actually override cpuCycle(). The catch-up path
+    // would otherwise call an empty virtual ~29,780 times a frame, which on the
+    // windowed-ABI Xtensa costs more than the counter it is standing in for.
+    // Overridden (not derived from cpuCycle) because the base method is empty by
+    // design for the majority of mappers.
+    virtual bool wantsCpuCycle() const { return false; }
+    // True for mappers with an IRQ source, so the per-instruction IRQ line sample
+    // can skip the virtual call entirely on carts that can never assert it.
+    virtual bool hasIrq() const { return false; }
     virtual bool irqPending() const { return false; }
     virtual void irqClear() {}
 
@@ -43,10 +111,12 @@ public:
 
     Mirroring mirroring() const { return mirroring_; }
     bool hasBattery() const { return battery_; }
-    std::vector<uint8_t>& prgRam() { return prgRam_; }
+    RomBuffer& prgRam() { return prgRam_; }
+    const uint8_t* prgData() const { return prg_.data(); }
+    const uint8_t* chrData() const { return chr_.data(); }
 
 protected:
-    std::vector<uint8_t> prg_, chr_, prgRam_;
+    RomBuffer prg_, chr_, prgRam_;
     Mirroring mirroring_;
     bool battery_;
     bool chrRam_ = false;
@@ -85,6 +155,59 @@ private:
     void setStatus(uint8_t p);
     void setZN(uint8_t v) { fZ = v == 0; fN = v & 0x80; }
     void branch(bool cond, int& cycles);
+
+    // ---- opcode dispatch ----
+    //
+    // The single 16KB switch this replaces put every opcode's code in one
+    // function body, so the Xtensa I-cache was thrashed by whichever opcodes the
+    // ROM happened to use. Each opcode is now its own small function reached
+    // through a 256-entry table, which keeps the working set to just the opcodes
+    // actually executed and lets the hot ones be placed in IRAM individually.
+    //
+    // `crossed_` is the page-cross flag the addressing helpers set; it lived as a
+    // local in the old switch and is now shared state between the addressing and
+    // execute halves of one opcode. It is written and consumed within a single
+    // dispatch, never across instructions.
+    using OpFn = int (CPU::*)();
+    static const OpFn OPS[256];
+    bool crossed_ = false;
+
+    // addressing modes (identical semantics to the old lambdas)
+    uint16_t amImm() { return pc++; }
+    uint16_t amZp()  { return read(pc++); }
+    uint16_t amZpx() { return (read(pc++) + x) & 0xFF; }
+    uint16_t amZpy() { return (read(pc++) + y) & 0xFF; }
+    uint16_t amAbs() { uint16_t a = read16(pc); pc += 2; return a; }
+    uint16_t amAbx() { uint16_t b = read16(pc); pc += 2; uint16_t a = b + x; crossed_ = (a & 0xFF00) != (b & 0xFF00); return a; }
+    uint16_t amAby() { uint16_t b = read16(pc); pc += 2; uint16_t a = b + y; crossed_ = (a & 0xFF00) != (b & 0xFF00); return a; }
+    uint16_t amIzx() { uint8_t z = read(pc++) + x; return read(z) | (read((uint8_t)(z + 1)) << 8); }
+    uint16_t amIzy() {
+        uint8_t z = read(pc++);
+        uint16_t b = read(z) | (read((uint8_t)(z + 1)) << 8);
+        uint16_t a = b + y; crossed_ = (a & 0xFF00) != (b & 0xFF00); return a;
+    }
+
+    // operations (identical semantics to the old lambdas)
+    void opLda(uint16_t ad) { a = read(ad); setZN(a); }
+    void opLdx(uint16_t ad) { x = read(ad); setZN(x); }
+    void opLdy(uint16_t ad) { y = read(ad); setZN(y); }
+    void opAdcv(uint8_t m) {
+        int r = a + m + (fC ? 1 : 0);
+        fV = (~(a ^ m) & (a ^ r)) & 0x80;
+        fC = r > 0xFF;
+        a = (uint8_t)r; setZN(a);
+    }
+    void opCmpv(uint8_t reg, uint8_t m) { fC = reg >= m; setZN(reg - m); }
+    uint8_t opAslv(uint8_t m) { fC = m & 0x80; m <<= 1; setZN(m); return m; }
+    uint8_t opLsrv(uint8_t m) { fC = m & 0x01; m >>= 1; setZN(m); return m; }
+    uint8_t opRolv(uint8_t m) { bool c = fC; fC = m & 0x80; m = (m << 1) | c; setZN(m); return m; }
+    uint8_t opRorv(uint8_t m) { bool c = fC; fC = m & 0x01; m = (m >> 1) | (c << 7); setZN(m); return m; }
+
+    // Every opcode handler. Named opXX after its opcode byte so the table below
+    // can be read against a 6502 opcode matrix.
+#define NES_CPU_OP(hex) int op##hex();
+#include "cpu_ops.inc"
+#undef NES_CPU_OP
 };
 
 // ---------------------------------------------------------------- PPU
@@ -93,6 +216,9 @@ public:
     explicit PPU(NES& nes) : nes_(nes) {}
     void reset();
     void step();                // one PPU cycle (dot)
+#ifdef NES_EMBEDDED
+    void stepMany(int dots);    // advance N dots, skipping the ones with no work
+#endif
 
     uint8_t readReg(uint16_t addr);       // $2000-$2007
     void writeReg(uint16_t addr, uint8_t v);
@@ -100,8 +226,33 @@ public:
 
     bool frameReady = false;    // set at end of each frame; consumer clears
     uint32_t frameCount = 0;    // frames since reset/power-on
-    uint32_t framebuffer[256 * 240] = {};
+#ifdef NES_EMBEDDED
+    // When false the framebuffer is left untouched for this frame while every
+    // CPU-observable side effect (vblank/NMI, sprite 0 hit, sprite overflow,
+    // mapper IRQ, loopy v/t) still happens. Lets the frontend run emulation at
+    // real-time 60Hz and refresh the panel less often — and, because the DMA
+    // engine reads the framebuffer in place, lets a transfer overlap the frames
+    // that do not write to it.
+    bool renderThisFrame = true;
+#endif
+    Pixel framebuffer[256 * 240] = {};
     const uint8_t* paletteRam() const { return palette_; }
+#ifdef NES_EMBEDDED
+    // Read-only views of everything the CPU can observe, for the host-side test
+    // that checks a render-skipped run stays identical to a fully drawn one.
+    // Const accessors only, so they cannot perturb what they measure.
+    struct DbgState {
+        uint8_t ctrl, mask, status, oamAddr, readBuffer, openBus;
+        uint16_t v, t; uint8_t fineX; bool w;
+        int scanline, dot; bool oddFrame; uint32_t frameCount;
+    };
+    DbgState dbgState() const {
+        return {ctrl_, mask_, status_, oamAddr_, readBuffer_, openBus_,
+                v_, t_, fineX_, w_, scanline_, dot_, oddFrame_, frameCount};
+    }
+    const uint8_t* dbgOam() const { return oam_; }
+    const uint8_t* dbgVram() const { return vram_; }
+#endif
     // level of the PPU→CPU NMI output (true = asserted)
     bool nmiLine() const { return (ctrl_ & 0x80) && (status_ & 0x80); }
 
@@ -123,6 +274,18 @@ private:
     int scanline_ = 261, dot_ = 0;
     bool oddFrame_ = false;
 
+#ifdef NES_EMBEDDED
+    // Cached mapper->chrWindow(); refreshed whenever the cart may have switched
+    // banks, so pattern fetches avoid a virtual call. Null = use the virtual.
+    const uint8_t* chrWindow_ = nullptr;
+#else
+    static constexpr const uint8_t* chrWindow_ = nullptr;
+#endif
+public:
+    // No-op off the embedded build; defined in ppu.cpp (NES is incomplete here).
+    void refreshChrWindow();
+private:
+
     // background shifters
     uint16_t bgPatLo_ = 0, bgPatHi_ = 0, bgAttrLo_ = 0, bgAttrHi_ = 0;
     uint8_t ntByte_ = 0, atByte_ = 0, patLo_ = 0, patHi_ = 0;
@@ -138,8 +301,19 @@ private:
     void incHoriz();
     void incVert();
     void fetchBg();
-    void evalSprites();
+    void evalSprites(int line);
     void renderDot();
+#ifdef NES_EMBEDDED
+    // Batched replacement for the per-dot pipeline. Draw=false keeps the
+    // CPU-visible side effects (sprite 0 hit) but writes no pixels; templated
+    // rather than branched on a member so the drawing path keeps the same
+    // straight-line code it had before the skip mode existed.
+    template <bool Draw> void renderScanline();
+    bool hasSprite0() const {
+        for (int i = 0; i < spriteCount_; i++) if (sprites_[i].sprite0) return true;
+        return false;
+    }
+#endif
     bool renderingEnabled() const { return mask_ & 0x18; }
 };
 
@@ -149,22 +323,50 @@ public:
     explicit APU(NES& nes) : nes_(nes) {}
     void reset();
     void step();                // one CPU cycle
+#ifdef NES_EMBEDDED
+    void stepMany(int cycles);  // advance N CPU cycles, batched to event bounds
+#endif
     uint8_t readStatus();
     void writeReg(uint16_t addr, uint8_t v);
     bool irqPending() const { return frameIrq_ || dmcIrq_; }
 
     // audio output: float samples accumulated per frame (stereo)
     float sampleBuf[2048] = {};      // left
+#ifndef NES_EMBEDDED
     float sampleBufR[2048] = {};     // right
+#endif
     int sampleCount = 0;
+#ifndef NES_EMBEDDED
     // per-channel raw levels at each sample point (debug scope): p1,p2,tri,noise,dmc
     uint8_t chanBuf[8][2048] = {};
+#endif
     // per-channel mute switches (UI): p1,p2,tri,noise,dmc,(expansion x3)
     bool chanEnable[8] = {true, true, true, true, true, true, true, true};
     // mixer: per-channel gain (0..2, 1 = unity) and pan (-1 left .. +1 right)
     float chanVolume[8] = {1, 1, 1, 1, 1, 1, 1, 1};
     float chanPan[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-    void setSampleRate(double rate) { cyclesPerSample_ = 1789773.0 / rate; }
+    // ESP32-S3 has a single-precision FPU only: double would drop the per-CPU-cycle
+    // downsample accumulator into soft-float, so store it as float there.
+#ifdef NES_EMBEDDED
+    using SampleTimer = float;
+#else
+    using SampleTimer = double;
+#endif
+    void setSampleRate(double rate) { cyclesPerSample_ = (SampleTimer)(1789773.0 / rate); }
+#ifdef NES_EMBEDDED
+    // Representative CPU-observable APU state for the render-skip equivalence
+    // test: the $4015 inputs plus the frame sequencer position.
+    struct DbgState {
+        int p1len, p2len, triLen, noiseLen, dmcBytes;
+        int frameStep, frameCycles; bool frameIrq, dmcIrq, oddCycle;
+        int sampleCount;
+    };
+    DbgState dbgState() const {
+        return {pulse1_.lengthCounter, pulse2_.lengthCounter, triangle_.lengthCounter,
+                noise_.lengthCounter, dmc_.bytesRemaining, frameStep_, frameCounterCycles_,
+                frameIrq_, dmcIrq_, oddCycle_, sampleCount};
+    }
+#endif
     float mix() const;   // mono sum; also used by the oscilloscope probe
     void mixStereo(float& l, float& r) const;
     void channelOutputs(float out[8]) const;
@@ -186,6 +388,9 @@ private:
         bool isPulse2 = false;
         int output() const;
         void stepTimer();
+#ifdef NES_EMBEDDED
+        void advance(int n);   // batched equivalent of n stepTimer() calls
+#endif
         void stepEnvelope();
         void stepSweep();
         bool sweepMuted() const;
@@ -199,6 +404,9 @@ private:
         int seqPos = 0;
         int output() const;
         void stepTimer();
+#ifdef NES_EMBEDDED
+        void advance(int n);   // batched equivalent of n stepTimer() calls
+#endif
     } triangle_;
 
     struct Noise {
@@ -211,6 +419,9 @@ private:
         bool envStart = false; int envDivider = 0; int envDecay = 0;
         int output() const;
         void stepTimer();
+#ifdef NES_EMBEDDED
+        void advance(int n);   // batched equivalent of n stepTimer() calls
+#endif
         void stepEnvelope();
     } noise_;
 
@@ -234,8 +445,8 @@ private:
     bool dmcIrq_ = false;
     bool oddCycle_ = false;
 
-    double cyclesPerSample_ = 1789773.0 / 44100.0;
-    double sampleTimer_ = 0;
+    SampleTimer cyclesPerSample_ = (SampleTimer)(1789773.0 / 44100.0);
+    SampleTimer sampleTimer_ = 0;
 
     void quarterFrame();
     void halfFrame();
@@ -265,7 +476,9 @@ private:
 class NES {
 public:
     NES() : cpu(*this), ppu(*this), apu(*this) {
+#ifndef NES_EMBEDDED
         for (int i = 0; i < 61; i++) pinOk[i] = true;
+#endif
     }
 
     bool loadRom(const uint8_t* data, size_t size);
@@ -283,6 +496,7 @@ public:
     Controller pad[2];
     std::unique_ptr<Mapper> mapper;
     uint8_t ram[0x800] = {};
+#ifndef NES_EMBEDDED
     uint8_t apuRegShadow[0x18] = {};   // last value written to $4000-$4017 (debug view)
 
     // ---- cartridge connector fault emulation (60-pin, 1-based) ----
@@ -302,13 +516,45 @@ public:
     int probePin = 0;               // 1-60, 0 = no probe
     uint8_t probeBuf[2048] = {};    // one sample per CPU cycle (~1.1ms window)
     int probePos = 0;
-    uint64_t cycleCount = 0;
     uint16_t lastCpuAddr = 0; uint8_t lastCpuData = 0; bool lastCpuWrite = false;
     uint16_t lastPpuAddr = 0; uint8_t lastPpuData = 0;
     bool ppuRdPulse = false, ppuWrPulse = false, lastCiramA10 = false;
     void probeSample();
     uint8_t probeLevelFor(int pin);
+#endif // !NES_EMBEDDED
+
+    uint64_t cycleCount = 0;
     uint8_t cpuReadBus(uint16_t addr);
+
+    // Cached mapper capabilities, refreshed on load. Both guard per-cycle and
+    // per-instruction virtual calls that are pure overhead on the many carts that
+    // have neither an IRQ source nor a cycle-driven counter.
+    bool mapperWantsCpuCycle_ = false;
+    bool mapperHasIrq_ = false;
+    void refreshMapperCaps() {
+        mapperWantsCpuCycle_ = mapper && mapper->wantsCpuCycle();
+        mapperHasIrq_ = mapper && mapper->hasIrq();
+    }
+    // The IRQ line as the CPU sees it. Inlined and short-circuited so the common
+    // no-IRQ-mapper case costs two predictable branches instead of a virtual call.
+    bool irqLineLevel() {
+        return apu.irqPending() || (mapperHasIrq_ && mapper->irqPending());
+    }
+
+#ifdef NES_EMBEDDED
+    // Catch-up scheduling.
+    //
+    // Stepping the PPU three times and the APU once inside the CPU's cycle loop
+    // costs more in call overhead than the work itself. Instead the CPU runs
+    // ahead and the debt is settled in bulk: at scanline granularity for the
+    // PPU, at sample granularity for the APU. Anything that can observe their
+    // state mid-instruction (a $2002/$2004/$2007 access, a $4015 read, an APU
+    // register write) calls catchUp() first, so the observable behaviour is the
+    // same as stepping in lockstep.
+    int pendingCpuCycles_ = 0;
+    void catchUp();
+    void runCyclesBatched(int cycles);
+#endif
 };
 
 extern const uint32_t NES_PALETTE[64];
