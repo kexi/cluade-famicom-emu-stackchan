@@ -29,9 +29,15 @@ constexpr uint32_t SPI_WRITE_FREQ = 40000000;
 // divisor floats: when the loop falls behind schedule the display refreshes less
 // often (freeing whole frames of framebuffer-write and transfer time), and when
 // there is slack it tightens back up.
-constexpr uint32_t DISPLAY_DIVISOR_MIN = 1;
-constexpr uint32_t DISPLAY_DIVISOR_MAX = 4;
-constexpr uint32_t DISPLAY_DIVISOR_INITIAL = 3;
+// The floor is the band count of the segmented DMA push, not 1: each picture
+// ships as DISPLAY_DMA_SEGMENTS bands, one kicked per frame, and only a divisor
+// at or above that count keeps every kick CPU-free. Below it the draw frame has
+// to flush the leftover bands inline and degenerates back to the old blocking
+// push. At 60fps this floor still yields a 10Hz refresh — above what the
+// blocking push ever achieved.
+constexpr uint32_t DISPLAY_DIVISOR_MIN = 6;
+constexpr uint32_t DISPLAY_DIVISOR_MAX = 6;
+constexpr uint32_t DISPLAY_DIVISOR_INITIAL = 6;
 
 // Hysteresis for the divisor controller, in frames per adjustment window.
 // Widening triggers earlier than narrowing so the loop settles instead of
@@ -39,6 +45,26 @@ constexpr uint32_t DISPLAY_DIVISOR_INITIAL = 3;
 constexpr int DIVISOR_WINDOW_FRAMES = 30;      // ~0.5s at 60Hz
 constexpr int DIVISOR_LATE_WIDEN = 6;          // late frames in a window -> widen
 constexpr int DIVISOR_LATE_NARROW = 1;         // at or below this -> try narrowing
+
+// Rows per DMA segment, and how the number came about.
+//
+// The frame is pushed a horizontal band at a time rather than whole. The SPI
+// peripheral's transaction-length register (SPI_MS_DATA_BITLEN) is 18 bits, so
+// one hardware transaction moves at most 32768 bytes. LGFX hides that by
+// re-arming the peripheral in a loop and spinning on SPI_USR between segments
+// (Bus_SPI.cpp writeBytes, the `if (length -= len)` block) — which is why a
+// 122880-byte push costs most of its ~24.6ms of wire time in CPU spin despite
+// being a "DMA" call. Handing it one sub-32KB band per frame means every push
+// fits a single transaction and returns as soon as the descriptor is armed.
+//
+// 40 rows = 20480 bytes at 256px x RGB565, comfortably inside the 32KB limit and
+// an exact divisor of 240, so all six bands are the same size. The band is not
+// sized to the 32KB ceiling (which would be 64 rows) because the segment count
+// doubles as the display divisor: at six segments the once-per-picture repaint
+// cost is amortised over six frames instead of four, which is worth more than
+// the marginally fewer kicks. Six kicks of ~124us each is still negligible.
+constexpr int DISPLAY_DMA_ROWS = 40;
+constexpr int DISPLAY_DMA_SEGMENTS = (NES_HEIGHT + DISPLAY_DMA_ROWS - 1) / DISPLAY_DMA_ROWS;
 
 // ------------------------------------------------------------------- audio
 constexpr uint32_t AUDIO_SAMPLE_RATE = 44100;
@@ -52,6 +78,12 @@ constexpr int AUDIO_BUF_SAMPLES = 2048;      // matches APU::sampleBuf capacity
 // Staging between the APU and the speaker. The ring gives ~186ms of slack so a
 // late frame cannot starve the hardware; chunks are the unit handed to playRaw.
 constexpr int AUDIO_RING_SAMPLES = 8192;     // ~186ms at 44.1kHz
+// The ring index wraps by masking, not by %, because both the enqueue and the
+// drain loop wrap once per sample and an integer division there is pure cost.
+// That only works while the size is a power of two, hence the assertion.
+static_assert((AUDIO_RING_SAMPLES & (AUDIO_RING_SAMPLES - 1)) == 0,
+              "AUDIO_RING_SAMPLES must be a power of two: the ring wraps by masking");
+constexpr int AUDIO_RING_MASK = AUDIO_RING_SAMPLES - 1;
 constexpr int AUDIO_CHUNK_SAMPLES = 512;     // ~11.6ms per submission
 constexpr int AUDIO_CHUNK_SLOTS = 4;         // rotation depth; playRaw holds the pointer
 
@@ -100,6 +132,11 @@ constexpr float AUDIO_RATE_SLEW_MAX = 0.0025f;
 // wider release threshold is hysteresis so it does not chatter in and out.
 constexpr float AUDIO_RATE_SNAP_ENTER = 0.005f;
 constexpr float AUDIO_RATE_SNAP_EXIT = 0.0075f;
+// Ring-feedback ceiling while snapped, as a fraction of nominal. ±0.15% (~66Hz)
+// is a third of the smallest pitch offset most listeners detect, yet corrects
+// tens of samples per second of clock mismatch — far more than the measured
+// drift between the emulator's 60.10Hz pacing and the real I2S rate.
+constexpr float AUDIO_RATE_SNAP_TRIM_MAX = 0.0015f;
 
 // APU::mix() returns 0..~0.45 — positive only, with a standing DC offset of
 // about +0.24. A one-pole high-pass removes it; the pole sits near 1.0 so the
@@ -261,6 +298,11 @@ constexpr uint8_t NES_BTN_RIGHT = 0x80;
 // -------------------------------------------------------------------- timing
 // NTSC NES frame period: 1/60.0988 s.
 constexpr int64_t FRAME_PERIOD_US = 16639;
+// How far the frame schedule may run behind before it resyncs instead of
+// catching up. Two periods covers the structural overrun of one repaint frame
+// (~3ms) with margin, while keeping a real overload from accumulating unbounded
+// debt that would burst-run the emulator when load finally drops.
+constexpr int64_t FRAME_DEBT_CAP_US = 2 * FRAME_PERIOD_US;
 
 // ------------------------------------------------------------------ logging
 #define PERF_LOG 1
