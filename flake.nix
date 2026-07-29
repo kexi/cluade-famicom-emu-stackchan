@@ -28,6 +28,7 @@
             pkgs.emscripten      # Web/WASM (build.sh)
             pkgs.gnused          # build.sh は GNU sed 前提 (BSD sed 非対応)
             pkgs.uv              # tools/*.py は PEP 723 メタデータ + uv run で実行
+            pkgs.ruff            # just format / lint-py (tools/*.py の PEP 8 準拠を検査。ruff.toml 参照)
             pkgs.just            # タスクランナー (justfile 参照)
             pkgs.lefthook        # git hook 管理 (lefthook.yml 参照)
             pkgs.gitleaks        # pre-commit での秘密情報スキャン

@@ -1,0 +1,15 @@
+# tools/*.py (PEP 723 スクリプト) の整形・リント設定。C++ 側の .clang-format /
+# .clang-tidy と同じ立ち位置で、just format / lint-py と CI から参照される
+
+# PEP 723 の requires-python = ">=3.12" に合わせる
+target-version = "py312"
+
+# PEP 8 の推奨は 79 だが、既存 2 ファイルに 80 桁超の行が 52 本あり、
+# 79 に寄せると本題と無関係な折り返し差分でレビューが埋まる。88 なら違反は
+# 8 本だけで済み、機械的な折り返しで解消できる
+line-length = 88
+
+[lint]
+# E/W = pycodestyle (PEP 8 本体)、F = pyflakes (未使用 import・未定義名)、
+# I = import 整列。それ以外は既存コードの書き味を変えるだけなので入れない
+select = ["E", "W", "F", "I"]
