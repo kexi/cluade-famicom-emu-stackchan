@@ -351,11 +351,15 @@ private:
     // pass the row test cannot change which of the others do, nor their sequence.
     //
     // Rebuilt lazily rather than on each write: OAM DMA rewrites all 256 bytes one
-    // byte at a time, so invalidating is a flag store and the cost is paid once at
-    // the next scanline instead of 256 times during the transfer.
+    // byte at a time, so invalidating is a single store and the cost is paid once
+    // at the next scanline instead of 256 times during the transfer.
+    //
+    // A negative count means stale. An empty list and a missing one are different
+    // states and both occur — every sprite parked off-screen is a legitimate zero
+    // — so the count carries its own validity instead of a second flag beside it.
+    static constexpr int SPRITE_CANDIDATES_STALE = -1;
     uint8_t spriteCandidates_[64] = {};
-    int spriteCandidateCount_ = 0;
-    bool spriteCandidatesValid_ = false;
+    int spriteCandidateCount_ = SPRITE_CANDIDATES_STALE;
     void rebuildSpriteCandidates();
     // Any OAM byte write can move an entry across the parked boundary.
     //
@@ -365,7 +369,7 @@ private:
     // row test in evalSprites() rejects it exactly as it always did — whereas
     // making the list height-dependent would put a rebuild on a register write
     // that games toggle mid-frame.
-    void invalidateSpriteCandidates() { spriteCandidatesValid_ = false; }
+    void invalidateSpriteCandidates() { spriteCandidateCount_ = SPRITE_CANDIDATES_STALE; }
 #endif
 
     uint8_t vramRead(uint16_t addr);
@@ -378,6 +382,12 @@ private:
     void incVert();
     void fetchBg();
     void evalSprites(int line);
+#ifdef NES_EMBEDDED
+    // Body of the evalSprites() scan; false = the 8-sprite limit stopped it.
+    // Embedded-only: see the comment on the definition for why the reference
+    // build keeps the loop written out inline instead.
+    bool evalSprite(int i, int line, int height, bool& overflow);
+#endif
     void renderDot();
 #ifdef NES_EMBEDDED
     // Batched replacement for the per-dot pipeline. Draw=false keeps the

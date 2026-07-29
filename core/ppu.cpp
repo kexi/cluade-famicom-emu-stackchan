@@ -55,7 +55,7 @@ void PPU::reset() {
     frameReady = false;
     frameCount = 0;
 #ifdef NES_EMBEDDED
-    invalidateSpriteCandidates();   // OAM survives reset; the list must not go stale
+    invalidateSpriteCandidates();   // OAM survives reset, so a stale list could not
 #endif
 }
 
@@ -296,31 +296,73 @@ void NES_HOT PPU::fetchBg() {
 // either would have to be rebuilt when they changed, and the whole point is that
 // this survives untouched across all 240 evaluations of a frame.
 void PPU::rebuildSpriteCandidates() {
-    spriteCandidateCount_ = 0;
+    int count = 0;
     for (int i = 0; i < 64; i++) {
         const bool reachable = oam_[i * 4] < 240;
-        if (reachable) spriteCandidates_[spriteCandidateCount_++] = (uint8_t)i;
+        if (reachable) spriteCandidates_[count++] = (uint8_t)i;
     }
-    spriteCandidatesValid_ = true;
+    spriteCandidateCount_ = count;   // clears the stale sentinel
 }
 #endif
 
+#ifdef NES_EMBEDDED
+// One OAM entry, against the line being evaluated. Returns false once the
+// 8-sprite limit is reached, which is where the hardware stops scanning.
+//
+// Embedded-only, and a method rather than a lambda inside evalSprites(): the
+// reference build's object file is byte-compared against the pre-optimisation
+// build, so any reshaping of that function — a lambda wrapper, a shared helper,
+// even ones the compiler fully inlines — perturbs the register allocation and
+// breaks the comparison. Keeping the extraction on this side of the #ifdef lets
+// the embedded loop read cleanly while the reference loop below stays literally
+// the code it has always been.
+bool PPU::evalSprite(int i, int line, int height, bool& overflow) {
+    int sy = oam_[i * 4];
+    int row = line - sy;
+    if (row < 0 || row >= height) return true;
+    if (spriteCount_ == 8) { overflow = true; return false; }
+    uint8_t tile = oam_[i * 4 + 1];
+    uint8_t attr = oam_[i * 4 + 2];
+    int sx = oam_[i * 4 + 3];
+    if (attr & 0x80) row = height - 1 - row;    // vertical flip
+    uint16_t patAddr;
+    if (height == 16) {
+        uint16_t bank = (tile & 1) << 12;
+        uint8_t t = tile & 0xFE;
+        if (row >= 8) { t++; row -= 8; }
+        patAddr = bank + t * 16 + row;
+    } else {
+        patAddr = ((ctrl_ & 0x08) << 9) + tile * 16 + row;
+    }
+    Sprite& s = sprites_[spriteCount_++];
+    s.patLo = vramRead(patAddr);
+    s.patHi = vramRead(patAddr + 8);
+    s.attr = attr;
+    s.x = sx;
+    s.sprite0 = (i == 0);
+    return true;
+}
+
+// Scan the candidate list. Same entries in the same order as the reference loop
+// below, minus the ones parked off-screen, so the priority, the 8-sprite cap and
+// the overflow flag all land where they did.
 void PPU::evalSprites(int line) {
     spriteCount_ = 0;
     int height = (ctrl_ & 0x20) ? 16 : 8;
     bool overflow = false;
-    // The loop source differs between builds so that the reference path keeps the
-    // exact plain scan it always had (its object file is byte-compared against the
-    // pre-optimisation build); only the embedded one walks the narrowed list. The
-    // body below is shared and sees the same entries in the same order either way.
-#ifdef NES_EMBEDDED
-    if (!spriteCandidatesValid_) rebuildSpriteCandidates();
-    const int candidateCount = spriteCandidateCount_;
-    for (int c = 0; c < candidateCount; c++) {
-        const int i = spriteCandidates_[c];
+    const bool stale = spriteCandidateCount_ < 0;
+    if (stale) rebuildSpriteCandidates();
+    for (int c = 0; c < spriteCandidateCount_; c++) {
+        if (!evalSprite(spriteCandidates_[c], line, height, overflow)) break;
+    }
+    if (overflow) status_ |= 0x20;
+}
 #else
+void PPU::evalSprites(int line) {
+    spriteCount_ = 0;
+    int height = (ctrl_ & 0x20) ? 16 : 8;
+    bool overflow = false;
     for (int i = 0; i < 64; i++) {
-#endif
         int sy = oam_[i * 4];
         int row = line - sy;
         if (row < 0 || row >= height) continue;
@@ -347,6 +389,7 @@ void PPU::evalSprites(int line) {
     }
     if (overflow) status_ |= 0x20;
 }
+#endif
 
 void NES_HOT PPU::renderDot() {
     int x = dot_ - 1;

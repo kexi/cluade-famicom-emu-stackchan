@@ -22,30 +22,6 @@ constexpr bool DISPLAY_SWAP_BYTES = false;
 // around frame to frame (observed on hardware as overflow + flicker).
 constexpr uint32_t SPI_WRITE_FREQ = 40000000;
 
-// Adaptive display divisor: push every Nth emulated frame, chosen at runtime.
-//
-// Emulation must hold real-time 60Hz or the game and its music run slow, but a
-// full 256x240 transfer costs ~27ms at 40MHz — more than a frame period. So the
-// divisor floats: when the loop falls behind schedule the display refreshes less
-// often (freeing whole frames of framebuffer-write and transfer time), and when
-// there is slack it tightens back up.
-// The floor is the band count of the segmented DMA push, not 1: each picture
-// ships as DISPLAY_DMA_SEGMENTS bands, one kicked per frame, and only a divisor
-// at or above that count keeps every kick CPU-free. Below it the draw frame has
-// to flush the leftover bands inline and degenerates back to the old blocking
-// push. At 60fps this floor still yields a 10Hz refresh — above what the
-// blocking push ever achieved.
-constexpr uint32_t DISPLAY_DIVISOR_MIN = 6;
-constexpr uint32_t DISPLAY_DIVISOR_MAX = 6;
-constexpr uint32_t DISPLAY_DIVISOR_INITIAL = 6;
-
-// Hysteresis for the divisor controller, in frames per adjustment window.
-// Widening triggers earlier than narrowing so the loop settles instead of
-// oscillating between two divisors that both sit near the threshold.
-constexpr int DIVISOR_WINDOW_FRAMES = 30;      // ~0.5s at 60Hz
-constexpr int DIVISOR_LATE_WIDEN = 6;          // late frames in a window -> widen
-constexpr int DIVISOR_LATE_NARROW = 1;         // at or below this -> try narrowing
-
 // Rows per DMA segment, and how the number came about.
 //
 // The frame is pushed a horizontal band at a time rather than whole. The SPI
@@ -65,6 +41,50 @@ constexpr int DIVISOR_LATE_NARROW = 1;         // at or below this -> try narrow
 // the marginally fewer kicks. Six kicks of ~124us each is still negligible.
 constexpr int DISPLAY_DMA_ROWS = 40;
 constexpr int DISPLAY_DMA_SEGMENTS = (NES_HEIGHT + DISPLAY_DMA_ROWS - 1) / DISPLAY_DMA_ROWS;
+
+// Display divisor: push every Nth emulated frame.
+//
+// Declared after the segment count because it is not independent of it. A
+// picture ships as DISPLAY_DMA_SEGMENTS bands, one kicked per frame, so only a
+// divisor at or above that count gives every band a frame of its own and keeps
+// each kick CPU-free. Below it a draw frame arrives with bands still owed and
+// has to flush them inline, degenerating back to the blocking whole-frame push
+// this scheme exists to avoid.
+//
+// Fixed rather than adaptive: the band scheme made the draw frame cheap enough
+// that there is nothing left for a controller to trade away, and the floor and
+// the ceiling had converged on the same value anyway. At 60fps this yields a
+// 10Hz panel refresh.
+constexpr uint32_t DISPLAY_DIVISOR_MIN = 6;
+constexpr uint32_t DISPLAY_DIVISOR_MAX = 6;
+constexpr uint32_t DISPLAY_DIVISOR_INITIAL = 6;
+static_assert(DISPLAY_DIVISOR_MIN >= (uint32_t)DISPLAY_DMA_SEGMENTS,
+              "divisor floor must cover the band count, or a draw frame flushes bands inline");
+static_assert(DISPLAY_DIVISOR_INITIAL >= DISPLAY_DIVISOR_MIN &&
+              DISPLAY_DIVISOR_INITIAL <= DISPLAY_DIVISOR_MAX,
+              "initial divisor must lie within the configured range");
+
+// Runtime guard on the repaint-versus-last-band race.
+//
+// A draw frame begins repainting while the final band (rows 200-239) may still
+// be on the wire. That is safe only because the writer is slower than the
+// reader: renderScanline paints strictly top-to-bottom, so row 200 is not
+// touched until 200/262 of the way through emulation, while the band's 40 rows
+// clear the wire 4.10ms after the kick. Setting the two equal — allowing ~0.5ms
+// between the kick and the start of the repaint — puts break-even at an emulated
+// frame time of 4.71ms.
+//
+// Measured emuD is ~19ms, so the margin is roughly 4x and the guard never fires.
+// It exists because that ratio is not enforced by anything else: a faster core,
+// a larger DISPLAY_DMA_ROWS or a higher SPI_WRITE_FREQ all erode it silently,
+// and the failure mode is a torn picture rather than anything that would show up
+// in a build. Tripping at 2x break-even leaves room for the EWMA to lag a sudden
+// speed-up without letting an actual race through.
+constexpr float DISPLAY_REPAINT_GUARD_MS = 9.42f;
+// Smoothing for the measured draw-frame emulation time the guard tests. Slower
+// than the audio servo's: this only has to track a lasting change in emulation
+// speed, and a single fast frame must not arm a guard that costs a stall.
+constexpr float DISPLAY_EMU_EWMA_ALPHA = 0.05f;
 
 // ------------------------------------------------------------------- audio
 constexpr uint32_t AUDIO_SAMPLE_RATE = 44100;
