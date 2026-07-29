@@ -12,6 +12,7 @@
 
 #include "../../core/nes.h"
 #include "config.h"
+#include "grove_input.h"
 #include "secrets.h"
 
 // Statically allocated in internal SRAM (not PSRAM): ppu.framebuffer is handed
@@ -200,6 +201,9 @@ void setup() {
     M5.Speaker.begin();
     M5.Speaker.setVolume(SPEAKER_VOLUME);
 
+    // Before WiFi: the Grove controllers work regardless of network state.
+    groveInputInit();
+
     g_wifiConnected = connectWifi();
     if (g_wifiConnected) {
         M5.Display.fillScreen(TFT_BLACK);
@@ -242,16 +246,28 @@ void setup() {
 
 // ------------------------------------------------------------------- loop
 
+// Buttons that live on the CoreS3 itself: the three touch zones below the
+// screen. Start/Select have no home on the Grove units (the joystick's centre
+// press doubles as Start, but Select needs somewhere), and a long-press on the
+// right zone is the RESET button for standalone play.
+static uint8_t touchButtonBits() {
+    uint8_t bits = 0;
+    if (M5.BtnA.isPressed()) bits |= NES_BTN_SELECT;
+    if (M5.BtnB.isPressed()) bits |= NES_BTN_START;
+    if (M5.BtnC.wasHold()) g_resetRequested.store(true, std::memory_order_relaxed);
+    return bits;
+}
+
+// Pad 1 is the OR of every local source (Grove units, touch zones) and the UDP
+// sender. Only the UDP bits are subject to the staleness timeout — a physical
+// button that is held down should stay down.
 static void applyInput() {
     const uint32_t sinceRx = millis() - g_lastRxMs.load(std::memory_order_relaxed);
-    const bool inputStale = sinceRx > INPUT_TIMEOUT_MS;
-    if (inputStale) {
-        g_nes.pad[0].setButtons(0);
-        g_nes.pad[1].setButtons(0);
-        return;
-    }
-    g_nes.pad[0].setButtons(g_padBits[0].load(std::memory_order_relaxed));
-    g_nes.pad[1].setButtons(g_padBits[1].load(std::memory_order_relaxed));
+    const bool udpStale = sinceRx > INPUT_TIMEOUT_MS;
+    const uint8_t udp0 = udpStale ? 0 : g_padBits[0].load(std::memory_order_relaxed);
+    const uint8_t udp1 = udpStale ? 0 : g_padBits[1].load(std::memory_order_relaxed);
+    g_nes.pad[0].setButtons(udp0 | groveInputBits() | touchButtonBits());
+    g_nes.pad[1].setButtons(udp1);
 }
 
 // Push connector state into the core, but only on an actual change: applyPinMask
