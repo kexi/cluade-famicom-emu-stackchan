@@ -54,6 +54,9 @@ void PPU::reset() {
     oddFrame_ = false;
     frameReady = false;
     frameCount = 0;
+#ifdef NES_EMBEDDED
+    invalidateSpriteCandidates();   // OAM survives reset; the list must not go stale
+#endif
 }
 
 uint16_t PPU::ntMirror(uint16_t addr) {
@@ -197,7 +200,12 @@ void NES_HOT PPU::writeReg(uint16_t addr, uint8_t val) {
     }
     case 1: mask_ = val; break;
     case 3: oamAddr_ = val; break;
-    case 4: oam_[oamAddr_++] = val; break;
+    case 4:
+        oam_[oamAddr_++] = val;
+#ifdef NES_EMBEDDED
+        invalidateSpriteCandidates();
+#endif
+        break;
     case 5:
         if (!w_) {
             t_ = (t_ & 0xFFE0) | (val >> 3);
@@ -225,6 +233,9 @@ void NES_HOT PPU::writeReg(uint16_t addr, uint8_t val) {
 
 void PPU::writeOamDma(uint8_t, const uint8_t* page) {
     for (int i = 0; i < 256; i++) oam_[(oamAddr_ + i) & 0xFF] = page[i];
+#ifdef NES_EMBEDDED
+    invalidateSpriteCandidates();
+#endif
 }
 
 void PPU::incHoriz() {
@@ -273,11 +284,43 @@ void NES_HOT PPU::fetchBg() {
 // `line` is the scanline the sprites are *evaluated against*, which is one less
 // than the line they are drawn on (the hardware's OAM Y byte is top-1). The
 // caller supplies it because the two render paths evaluate at different dots.
+#ifdef NES_EMBEDDED
+// Collect the OAM entries whose Y byte can reach a visible line.
+//
+// The bound is on Y alone, so one list serves every scanline and both sprite
+// heights: an entry is kept when some line in 0..239 could satisfy
+// 0 <= line - Y < height. With the largest height (16) that is Y > 239 - 16,
+// i.e. Y >= 240 is unreachable — and Y is a uint8_t, so the test is just a
+// compare against 240 with no dependence on the current line or ctrl_ bit 5.
+// Deliberately not tightened per height or per line: a list that depended on
+// either would have to be rebuilt when they changed, and the whole point is that
+// this survives untouched across all 240 evaluations of a frame.
+void PPU::rebuildSpriteCandidates() {
+    spriteCandidateCount_ = 0;
+    for (int i = 0; i < 64; i++) {
+        const bool reachable = oam_[i * 4] < 240;
+        if (reachable) spriteCandidates_[spriteCandidateCount_++] = (uint8_t)i;
+    }
+    spriteCandidatesValid_ = true;
+}
+#endif
+
 void PPU::evalSprites(int line) {
     spriteCount_ = 0;
     int height = (ctrl_ & 0x20) ? 16 : 8;
     bool overflow = false;
+    // The loop source differs between builds so that the reference path keeps the
+    // exact plain scan it always had (its object file is byte-compared against the
+    // pre-optimisation build); only the embedded one walks the narrowed list. The
+    // body below is shared and sees the same entries in the same order either way.
+#ifdef NES_EMBEDDED
+    if (!spriteCandidatesValid_) rebuildSpriteCandidates();
+    const int candidateCount = spriteCandidateCount_;
+    for (int c = 0; c < candidateCount; c++) {
+        const int i = spriteCandidates_[c];
+#else
     for (int i = 0; i < 64; i++) {
+#endif
         int sy = oam_[i * 4];
         int row = line - sy;
         if (row < 0 || row >= height) continue;
@@ -397,6 +440,26 @@ void NES_HOT PPU::renderScanline() {
     const bool needSprite0 = !Draw && showSp && showBg && !(status_ & 0x40) && hasSprite0();
     if (!Draw && !needSprite0) return;
 
+    // Line-invariant fetch shortcuts, resolved once instead of per tile byte.
+    //
+    // The two nametable pages a line can touch are pinned here rather than
+    // re-derived per fetch: ntMirror() reruns the mirroring switch and the
+    // pinsFaulty_ test on all four of a tile's VRAM reads, and only bit 10 of v
+    // can change within a line (the tile-31 wrap flips it; bit 11 is fixed until
+    // incVert()). Resolved by calling ntMirror() rather than by reimplementing
+    // the mirroring, so the two paths cannot drift apart.
+    //
+    // chrWindow_ is already null on a faulty connector, but a mapper that banks
+    // CHR finer than 8KB leaves it null on a clean one too, so the direct path is
+    // gated on the pointer and not on the fault flag alone.
+    const bool fetchFast = chrWindow_ && !nes_.pinsFaulty_;
+    const uint8_t* ntFast[2] = {nullptr, nullptr};
+    if (fetchFast) {
+        const uint16_t page = v_ & 0x0800;
+        ntFast[0] = vram_ + ntMirror(0x2000 | page);
+        ntFast[1] = vram_ + ntMirror(0x2400 | page);
+    }
+
     // --- background: walk tiles, expanding 8 pixels at a time ---
     uint8_t bgPix[256];      // 2-bit pattern value per pixel (0 = transparent)
     if (showBg) {
@@ -404,42 +467,75 @@ void NES_HOT PPU::renderScanline() {
         uint16_t v = v_;
         const int fineY = (v >> 12) & 7;
         const uint16_t patBase = (ctrl_ & 0x10) << 8;
+        uint8_t bdIdx = palette_[0] & 0x3F;
+        if (greyscale) bdIdx &= 0x30;
+        const Pixel bdColor = palLut[bdIdx];
+
+        // All four background subpalettes in framebuffer format, indexed
+        // [attribute][pattern value]. Entry 0 of each is the backdrop, so the
+        // pixel loop indexes straight through instead of branching on p != 0 and
+        // then selecting among three.
+        //
+        // Resolved per line rather than per tile: the batched renderer draws the
+        // line in one pass, so palette RAM cannot change part-way through it and
+        // the 32 tiles were re-deriving the same four rows. Per frame would be
+        // cheaper still, but $3F00 writes between lines are how games cycle
+        // colours, and a line is already short enough for this to disappear.
+        Pixel bgPalette[4][4];
+        if (Draw) {
+            for (int pi = 0; pi < 4; pi++) {
+                const uint8_t* const p = palette_ + pi * 4;
+                bgPalette[pi][0] = bdColor;
+                for (int ci = 1; ci < 4; ci++) {
+                    uint8_t idx = p[ci] & 0x3F;
+                    if (greyscale) idx &= 0x30;
+                    bgPalette[pi][ci] = palLut[idx];
+                }
+            }
+        }
+
         // Per-tile state the inner loop needs, filled by fetchTile().
         uint16_t pat = 0;        // 8 lanes of 2-bit pattern, lane i = pixel i
-        Pixel c1 = 0, c2 = 0, c3 = 0;   // this tile's subpalette, already RGB565
+        const Pixel* tileColor = bgPalette[0];   // this tile's row of the table
+        const uint8_t* const chr = chrWindow_;
         auto fetchTile = [&]() {
-            const uint8_t nt = vramRead(0x2000 | (v & 0x0FFF));
-            const uint8_t at = vramRead(0x23C0 | (v & 0x0C00) | ((v >> 4) & 0x38) | ((v >> 2) & 0x07));
+            uint8_t nt, at, lo, hi;
+            if (fetchFast) {
+                // ntMirror() passes CIRAM A0-A9 straight through, so the low 10
+                // bits of the address index the resolved page directly.
+                const uint8_t* const page = ntFast[(v >> 10) & 1];
+                nt = page[v & 0x03FF];
+                at = page[0x03C0 | ((v >> 4) & 0x38) | ((v >> 2) & 0x07)];
+                const uint16_t addr = patBase + nt * 16 + fineY;
+                lo = chr[addr & 0x1FFF];
+                hi = chr[(addr + 8) & 0x1FFF];
+            } else {
+                nt = vramRead(0x2000 | (v & 0x0FFF));
+                at = vramRead(0x23C0 | (v & 0x0C00) | ((v >> 4) & 0x38) | ((v >> 2) & 0x07));
+                const uint16_t addr = patBase + nt * 16 + fineY;
+                lo = vramRead(addr);
+                hi = vramRead(addr + 8);
+            }
             const int atShift = ((v >> 4) & 4) | (v & 2);
             const uint8_t pal = (at >> atShift) & 3;
-            const uint16_t addr = patBase + nt * 16 + fineY;
-            const uint8_t lo = vramRead(addr);
-            const uint8_t hi = vramRead(addr + 8);
             // lane i must hold pixel i, i.e. bit 7-i of the pattern bytes, so the
             // spread words are bit-reversed by walking the tile right to left.
             pat = (uint16_t)(bitSpread[lo] | (uint16_t)(bitSpread[hi] << 1));
-            if (Draw) {
-                // Resolve the subpalette once per tile instead of per pixel: the
-                // palette RAM read, the 0x3F mask, the greyscale mask and the LUT
-                // lookup all collapse out of the inner loop.
-                const uint8_t* p = palette_ + pal * 4;
-                uint8_t i1 = p[1] & 0x3F, i2 = p[2] & 0x3F, i3 = p[3] & 0x3F;
-                if (greyscale) { i1 &= 0x30; i2 &= 0x30; i3 &= 0x30; }
-                c1 = palLut[i1]; c2 = palLut[i2]; c3 = palLut[i3];
-            }
+            if (Draw) tileColor = bgPalette[pal];
             // advance to the next tile exactly as incHoriz() would
             if ((v & 0x1F) == 31) { v &= ~0x1F; v ^= 0x0400; }
             else v++;
         };
-        // `pat` lane for the pixel `n` columns into the tile (n counted from the
-        // tile's left edge, which is where the pattern bit 7-n lives).
-        auto lane = [](uint16_t p, int n) -> uint8_t {
-            return (uint8_t)((p >> ((7 - n) * 2)) & 3);
+        // The lanes are consumed left to right, so each pixel is the top of a
+        // running shift register rather than a variable shift by (7-n)*2 — the
+        // Xtensa has no barrel shift by a register operand without setting up
+        // SAR, which this loop was doing 256 times a line.
+        auto emit = [&](uint16_t& lanes, int at) {
+            const uint8_t p = (uint8_t)(lanes >> 14);
+            lanes = (uint16_t)(lanes << 2);
+            bgPix[at] = p;
+            if (Draw) out[at] = tileColor[p];
         };
-
-        uint8_t bdIdx = palette_[0] & 0x3F;
-        if (greyscale) bdIdx &= 0x30;
-        const Pixel bdColor = palLut[bdIdx];
 
         int px = 0;
         const int fx = fineX_;
@@ -447,29 +543,23 @@ void NES_HOT PPU::renderScanline() {
         // columns are on screen. Peeled out so the main loop below needs no
         // per-pixel bounds test.
         fetchTile();
-        for (int n = fx; n < 8; n++, px++) {
-            const uint8_t p = lane(pat, n);
-            bgPix[px] = p;
-            if (Draw) out[px] = p ? (p == 1 ? c1 : (p == 2 ? c2 : c3)) : bdColor;
-        }
+        uint16_t lanes = (uint16_t)(pat << (fx * 2));
+        for (int n = fx; n < 8; n++, px++) emit(lanes, px);
         // Body: whole tiles, entirely on screen.
         while (px + 8 <= 256) {
             fetchTile();
-            for (int n = 0; n < 8; n++) {
-                const uint8_t p = lane(pat, n);
-                bgPix[px + n] = p;
-                if (Draw) out[px + n] = p ? (p == 1 ? c1 : (p == 2 ? c2 : c3)) : bdColor;
-            }
+            lanes = pat;
+            emit(lanes, px + 0); emit(lanes, px + 1);
+            emit(lanes, px + 2); emit(lanes, px + 3);
+            emit(lanes, px + 4); emit(lanes, px + 5);
+            emit(lanes, px + 6); emit(lanes, px + 7);
             px += 8;
         }
         // Tail: the fine-X shift leaves fx columns of one more tile visible.
         if (px < 256) {
             fetchTile();
-            for (int n = 0; px < 256; n++, px++) {
-                const uint8_t p = lane(pat, n);
-                bgPix[px] = p;
-                if (Draw) out[px] = p ? (p == 1 ? c1 : (p == 2 ? c2 : c3)) : bdColor;
-            }
+            lanes = pat;
+            for (; px < 256; px++) emit(lanes, px);
         }
 
         // left-edge clipping
@@ -492,14 +582,24 @@ void NES_HOT PPU::renderScanline() {
     if (!showSp) return;
 
     // --- sprites: front-to-back, so the first writer of a pixel wins ---
-    bool written[256];
-    if (Draw) memset(written, 0, sizeof(written));
+    //
+    // Pixel ownership is a bitmask rather than a bool[256]: clearing it is four
+    // stores instead of a 256-byte memset, and eight sprites can never justify
+    // that much zeroing. Tested and set bit by bit — the spans are 8 pixels at an
+    // arbitrary offset, so a word-at-a-time merge would need shifts and a
+    // carry-in across the boundary for no gain at this width.
+    uint64_t written[4] = {0, 0, 0, 0};
     const int clip = (mask_ & 0x04) ? 0 : 8;
     for (int i = 0; i < spriteCount_; i++) {
         const Sprite& s = sprites_[i];
         // Skipping non-sprite-0 entries outright is only safe when nothing is
         // being drawn — with Draw they still own pixels via `written`.
         if (!Draw && !s.sprite0) continue;
+        // A row with no opaque pixel writes nothing and cannot raise sprite 0
+        // hit (which needs p != 0), so it is skipped whole rather than being
+        // walked eight times to reach the same conclusion.
+        const bool rowTransparent = (s.patLo | s.patHi) == 0;
+        if (rowTransparent) continue;
 
         // Clip the column span once instead of testing every pixel.
         int c0 = clip - s.x; if (c0 < 0) c0 = 0;
@@ -514,8 +614,10 @@ void NES_HOT PPU::renderScanline() {
             if (s.sprite0 && bgPix[px] && px < 255 && showBg) status_ |= 0x40;
             if (!Draw) continue;
 
-            if (written[px]) continue;      // a nearer sprite already claimed it
-            written[px] = true;
+            const uint64_t ownBit = (uint64_t)1 << (px & 63);
+            uint64_t& ownWord = written[px >> 6];
+            if (ownWord & ownBit) continue;      // a nearer sprite already claimed it
+            ownWord |= ownBit;
             const bool behind = s.attr & 0x20;
             if (behind && bgPix[px]) continue;   // background has priority
 

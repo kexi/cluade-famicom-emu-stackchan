@@ -339,6 +339,35 @@ private:
     Sprite sprites_[8];
     int spriteCount_ = 0;
 
+#ifdef NES_EMBEDDED
+    // OAM indices whose Y byte can put them on a visible line, in OAM order.
+    //
+    // evalSprites() scans all 64 entries once per scanline, but a typical frame
+    // parks most of them off-screen (Y >= 240) where they fail the row test on
+    // every one of the 240 lines. This is that scan's constant part, hoisted out.
+    //
+    // Order is preserved, so the front-to-back priority, the 8-sprite limit and
+    // the overflow flag all fall where they did: dropping an entry that can never
+    // pass the row test cannot change which of the others do, nor their sequence.
+    //
+    // Rebuilt lazily rather than on each write: OAM DMA rewrites all 256 bytes one
+    // byte at a time, so invalidating is a flag store and the cost is paid once at
+    // the next scanline instead of 256 times during the transfer.
+    uint8_t spriteCandidates_[64] = {};
+    int spriteCandidateCount_ = 0;
+    bool spriteCandidatesValid_ = false;
+    void rebuildSpriteCandidates();
+    // Any OAM byte write can move an entry across the parked boundary.
+    //
+    // Why not also invalidate on a sprite-height change ($2000 bit 5): the list is
+    // built against the largest height, so it is a superset for the 8-tall case
+    // too. Keeping an entry that the current height can never reach is free — the
+    // row test in evalSprites() rejects it exactly as it always did — whereas
+    // making the list height-dependent would put a rebuild on a register write
+    // that games toggle mid-frame.
+    void invalidateSpriteCandidates() { spriteCandidatesValid_ = false; }
+#endif
+
     uint8_t vramRead(uint16_t addr);
     void vramWrite(uint16_t addr, uint8_t v);
     // Connector-fault variants, shared by both builds (see ppu.cpp).
@@ -507,6 +536,12 @@ private:
     void quarterFrame();
     void halfFrame();
     void stepDmc();
+#ifdef NES_EMBEDDED
+    // Stage totals only, for the mix() path that discards the per-channel split.
+    // Returns false when the mixer tables are unusable (muted/re-gained channel),
+    // leaving the caller on channelOutputs().
+    bool mixDirect(float& sum) const;
+#endif
 #ifdef NES_EMBEDDED
     // Mixer division tables. channelOutputs() ran five-plus float divides per
     // output sample and the APU measured 5.6ms/frame on hardware; every divide
