@@ -526,6 +526,32 @@
     white-space: nowrap;
   }
   #swap-url-btn:active { transform: translateY(2px); box-shadow: none; }
+  /* only shown when a device is configured (?device=<ip>) */
+  #swap-device-row { display: flex; gap: 6px; align-items: center; margin-bottom: 12px; }
+  #swap-device-row[hidden] { display: none; }
+  #swap-device-label {
+    flex: 1 1 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #c8c8c8;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #swap-device-btn {
+    background: var(--fc-red);
+    color: var(--fc-cream);
+    border: none;
+    border-radius: 5px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: bold;
+    cursor: pointer;
+    box-shadow: 0 2px 0 var(--fc-red-dark);
+    white-space: nowrap;
+  }
+  #swap-device-btn:active { transform: translateY(2px); box-shadow: none; }
+  #swap-device-btn:disabled { opacity: 0.55; cursor: default; transform: none; }
   #swap-note {
     font-size: 11px;
     color: #85755a;
@@ -971,6 +997,10 @@
     <input type="text" id="swap-url" placeholder="https://.../game.nes" spellcheck="false">
     <button id="swap-url-btn">URLから読込</button>
   </div>
+  <div id="swap-device-row" hidden>
+    <label id="swap-device-label"><input type="checkbox" id="swap-device-noreset"><span id="lbl-swap-noreset">リセットせず差し替え</span></label>
+    <button id="swap-device-btn">実機に送る</button>
+  </div>
   <div id="swap-note">電源を入れたまま差し替えます(リセットは掛かりません → リセットで起動、RAM保持)。
 PRGとCHRを別のカセットから組み合わせた「ニコイチカセット」も作れます。マッパー/ミラーリングはPRG側のヘッダに従います。</div>
   <button id="swap-close">閉じる</button>
@@ -983,10 +1013,10 @@ PRGとCHRを別のカセットから組み合わせた「ニコイチカセッ�
   </div>
   <button id="check-close">閉じる</button>
 </div>
-<script>window.NES_VER='1785167718';</script>
-<script src="i18n.js?v=1785167718"></script>
-<script src="smb-ram.js?v=1785167718"></script>
-<script src="nes.js?v=1785167718"></script>
-<script src="main.js?v=1785167718"></script>
+<script>window.NES_VER='1785323278';</script>
+<script src="i18n.js?v=1785323278"></script>
+<script src="smb-ram.js?v=1785323278"></script>
+<script src="nes.js?v=1785323278"></script>
+<script src="main.js?v=1785323278"></script>
 </body>
 </html>
