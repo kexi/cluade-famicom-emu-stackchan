@@ -1,0 +1,28 @@
+# 秘密情報の混入を検出する (ローカルの lefthook + gitleaks pre-commit と同じスキャンを
+# CI でも実施し、hook をすり抜けたコミットを捕捉する。lefthook.yml 参照)
+name: gitleaks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # 検出時に PR へコメントするため
+    steps:
+      # 全履歴をスキャンするため fetch-depth: 0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # GITLEAKS_LICENSE は Organization のみ必要 (個人アカウントは不要)
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,36 @@
+# GitHub Actions が commit SHA でピン留めされていることを検証する
+# (タグは後から差し替え可能なため、SHA 固定でサプライチェーン攻撃を防ぐ)
+name: pinact
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".github/actions/**"
+      - "flake.lock"
+      - "flake.nix"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - ".github/actions/**"
+      - "flake.lock"
+      - "flake.nix"
+
+permissions: {}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      # pinact も他のツール同様 flake.lock で固定した nixpkgs から取る。
+      # devshell 丸ごと (emscripten/platformio 込み) は重いので nix run で単体実行する。
+      # --check: 未ピンの action があれば fail (修正はしない)
+      # --verify: ピン済み SHA が注記のタグと本当に一致するかリモートに照合する
+      - run: nix run --inputs-from . nixpkgs#pinact -- run --check --verify
