@@ -422,6 +422,15 @@ void setup() {
     // config は begin 前でないと反映されない
     auto speakerCfg = M5.Speaker.config();
     speakerCfg.sample_rate = AUDIO_SAMPLE_RATE;
+    // M5Unified leaves the speaker task unpinned at priority 2. Unpinned it is
+    // free to land on core 1, where it outranks the Arduino loop task (priority
+    // 1) and preempts emulation mid-frame; raising its priority alone would only
+    // make that worse. Pinning it to core 0 is what actually separates the two,
+    // and priority 4 there sits above the Grove poller (3) so an I2C read cannot
+    // delay the I2S refill, and below the UDP task (5) which blocks on recv and
+    // therefore never holds the core.
+    speakerCfg.task_pinned_core = 0;
+    speakerCfg.task_priority = 4;
     M5.Speaker.config(speakerCfg);
     M5.Speaker.begin();
     M5.Speaker.setVolume(SPEAKER_VOLUME);
@@ -679,7 +688,10 @@ static void applyVolumeRequest() {
 // frame-sized block per loop leaves no slack: a single late frame underruns and
 // clicks. Instead the APU's output is accumulated into a ring and drained in
 // fixed chunks, keeping several chunks queued ahead of the hardware at all times.
-static void enqueueAudio() {
+//
+// Returns how many samples were written, which is what the rate servo in loop()
+// measures the production rate from.
+static int enqueueAudio() {
     const int produced = g_nes.apu.sampleCount;
     g_nes.apu.sampleCount = 0;
     // Famicom audio loops out through the cartridge (pins 45/46), so a bad
@@ -708,6 +720,7 @@ static void enqueueAudio() {
             g_ringDropped++;
         }
     }
+    return produced;
 }
 
 static int ringAvailable() {
@@ -778,8 +791,85 @@ static void adjustDivisor(bool wasLate) {
     lateFrames = 0;
 }
 
+// Servo the playback rate to what the emulator actually produces.
+//
+// Two terms, because neither is sufficient alone. The smoothed production rate
+// (produced samples over real elapsed time) tracks emulation speed but says
+// nothing about the accumulated error, so on its own the ring slowly walks to
+// empty or full. The ring-depth term is that missing integral: the level is the
+// running sum of every past mismatch, so pulling it back to AUDIO_RING_TARGET
+// is what keeps playback continuous across a speed change.
+//
+// Output is slew-limited, so what reaches the ear is a drift rather than the
+// per-second steps the old fps-derived rate produced.
+static uint32_t updatePlaybackRate(uint32_t current, int produced,
+                                   int64_t frameUs, int ringAvail) {
+    // Numerator and denominator are smoothed separately, and the ratio is taken
+    // from the two averages. Smoothing the per-frame ratio produced/frameUs
+    // instead reads high: E[p/t] > E[p]/E[t] whenever t varies (Jensen — the
+    // harmonic-mean bias), and t varies a lot here because the display divisor
+    // makes drawn frames ~34ms and skipped ones ~21ms. Measured on hardware at
+    // 33fps that bias was ~18% (28.6kHz reported against a true ~24.2kHz), which
+    // played the ring empty and kept it there.
+    static float avgProduced = (float)(AUDIO_SAMPLE_RATE * FRAME_PERIOD_US / 1000000.0);
+    static float avgFrameUs = (float)FRAME_PERIOD_US;
+    static bool snapped = true;
+    // Frames still to run before the slew limit engages.
+    static int warmupFrames = AUDIO_RATE_WARMUP_FRAMES;
+
+    const bool frameUsable = frameUs > 0 && produced > 0;
+    if (frameUsable) {
+        avgProduced += AUDIO_RATE_EWMA_ALPHA * ((float)produced - avgProduced);
+        avgFrameUs += AUDIO_RATE_EWMA_ALPHA * ((float)frameUs - avgFrameUs);
+    }
+    const float measuredRate = avgProduced * 1000000.0f / avgFrameUs;
+
+    float correction = (float)(ringAvail - AUDIO_RING_TARGET) * AUDIO_RATE_FEEDBACK_GAIN;
+    const float correctionMax = measuredRate * AUDIO_RATE_FEEDBACK_MAX;
+    if (correction > correctionMax) correction = correctionMax;
+    if (correction < -correctionMax) correction = -correctionMax;
+    float target = measuredRate + correction;
+
+    // 44.1kHz snap. Hysteresis on the release side: without it the rate would
+    // flip between snapped and free every time the servo grazes the threshold,
+    // which is exactly the audible dither the snap exists to remove.
+    const float nominal = (float)AUDIO_SAMPLE_RATE;
+    const float offset = (target - nominal) / nominal;
+    const float deviation = offset < 0 ? -offset : offset;
+    const bool withinSnap = snapped ? deviation <= AUDIO_RATE_SNAP_EXIT
+                                    : deviation <= AUDIO_RATE_SNAP_ENTER;
+    snapped = withinSnap;
+    if (withinSnap) target = nominal;
+
+    // Warm-up: follow the target directly for the first couple of seconds. The
+    // averages start at the 60fps ideal, so on a ROM that only reaches 33fps the
+    // rate has to travel 44.1k -> ~24k; at 0.25% per frame that is ~7s of audible
+    // fast-forward before it arrives. The slew limit exists to hide steady-state
+    // corrections, and there is no steady state yet to hide.
+    const bool warmingUp = warmupFrames > 0;
+    if (warmingUp) {
+        warmupFrames--;
+        return (uint32_t)(target + 0.5f);
+    }
+
+    const float slew = (float)current * AUDIO_RATE_SLEW_MAX;
+    const float low = (float)current - slew;
+    const float high = (float)current + slew;
+    if (target < low) target = low;
+    if (target > high) target = high;
+    return (uint32_t)(target + 0.5f);
+}
+
 void loop() {
     static int64_t nextFrameUs = esp_timer_get_time();
+    // Wall-clock length of the previous loop iteration, measured at the top so
+    // it naturally includes the pacing sleep and the early-return taken when a
+    // frame runs behind schedule — both of which are part of how long the frame
+    // really took, and so part of the production rate.
+    static int64_t lastLoopUs = esp_timer_get_time();
+    const int64_t loopStartUs = esp_timer_get_time();
+    const int64_t frameUs = loopStartUs - lastLoopUs;
+    lastLoopUs = loopStartUs;
 #if PERF_LOG
     static int64_t perfWindowUs = esp_timer_get_time();
     static uint32_t perfFrames = 0, perfDrawn = 0;
@@ -790,9 +880,9 @@ void loop() {
     static int perfRingMin = AUDIO_RING_SAMPLES, perfRingMax = 0;
 #endif
 
-    // Retimed from the measured frame rate: while the emulator runs below 60fps
-    // it also produces samples below 44.1kHz, so playing them at the nominal rate
-    // would drain the ring faster than it fills.
+    // Retimed every frame by updatePlaybackRate(): while the emulator runs below
+    // 60fps it also produces samples below 44.1kHz, so playing them at the
+    // nominal rate would drain the ring faster than it fills.
     static uint32_t playbackRate = AUDIO_SAMPLE_RATE;
 
     M5.update();
@@ -832,7 +922,10 @@ void loop() {
     // which enqueueAudio() below resets to zero.
     applyDebugRequest();
 
-    enqueueAudio();
+    const int produced = enqueueAudio();
+    // Read before draining: the servo wants the level the emulator just left
+    // behind, not what is left after the speaker has taken its chunks.
+    playbackRate = updatePlaybackRate(playbackRate, produced, frameUs, ringAvailable());
     drainAudio(playbackRate);
 
     // Fire and forget. pushImageDMA queues the transfer and returns, but it wraps
@@ -887,8 +980,21 @@ void loop() {
         // it was and a fault is impossible to miss in a capture.
         const uint64_t pins = g_pinMask.load(std::memory_order_relaxed);
         const bool cartSeated = pins == PIN_MASK_ALL_OK;
+#ifdef NES_PROFILE
+        // Per-frame averages, in us. cpu is the remainder rather than its own
+        // counter: instrumenting the CPU core would mean a CCOUNT read per
+        // instruction, which costs more than the thing being measured.
+        const uint64_t apuUs = g_nes.profApuCycles / CPU_CYCLES_PER_US;
+        const uint64_t ppuUs = g_nes.profPpuCycles / CPU_CYCLES_PER_US;
+        const int64_t cpuUs = perfEmuUs - (int64_t)apuUs - (int64_t)ppuUs;
+        Serial.printf("  apu=%lluus ppu=%lluus cpu=%lldus\n",
+                      (unsigned long long)(apuUs / perfFrames),
+                      (unsigned long long)(ppuUs / perfFrames),
+                      (long long)(cpuUs / (int64_t)perfFrames));
+        g_nes.profApuCycles = 0;
+        g_nes.profPpuCycles = 0;
+#endif
         if (!cartSeated) Serial.printf("  pins=%016llx\n", (unsigned long long)pins);
-        playbackRate = (uint32_t)(AUDIO_SAMPLES_PER_FRAME * fps);
         perfWindowUs = pushEndUs;
         perfFrames = 0;
         perfDrawn = 0;
