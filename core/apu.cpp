@@ -251,6 +251,37 @@ const MixTable<PULSE_TABLE_N> g_pulse = makePulseTable();
 const MixTable<TRI_TABLE_N> g_tri = makeDivTable<TRI_TABLE_N>(8227.0f);
 const MixTable<NOISE_TABLE_N> g_noise = makeDivTable<NOISE_TABLE_N>(12241.0f);
 const MixTable<DMC_TABLE_N> g_dmc = makeDivTable<DMC_TABLE_N>(22638.0f);
+
+// The TND stage's non-linear curve. Shared by the two embedded mixer paths so
+// the constants exist once; written to produce the identical instruction
+// sequence they had inline, since both are bit-compared against the reference.
+//
+// Why not share with the float reference path below as well: that path's object
+// file is byte-compared against the pre-optimisation build, so its text is
+// deliberately frozen and cannot be rewritten even into an equivalent form.
+inline float tndOutput(float tsum) {
+    const bool silent = !(tsum > 0.0f);
+    if (silent) return 0.0f;
+    return 159.79f / (1.0f / tsum + 100.0f);
+}
+
+// Cartridge expansion audio, already scaled by the mapper's gain. Returns the
+// three channels separately for the split path and their sum for the direct one;
+// a null mapper reports zero gain, so a positive gain already implies a mapper.
+inline void expansionOutputs(const Mapper* mapper, float out[3]) {
+    const float g = mapper ? mapper->expansionGain() : 0.0f;
+    const bool active = g > 0.0f;
+    for (int c = 0; c < 3; c++) {
+        const float v = active ? (float)mapper->expansionChannel(c) : 0.0f;
+        out[c] = v * g;
+    }
+}
+
+inline float expansionSum(const Mapper* mapper) {
+    float ch[3];
+    expansionOutputs(mapper, ch);
+    return ch[0] + ch[1] + ch[2];
+}
 }  // namespace
 #endif
 
@@ -273,16 +304,12 @@ void APU::channelOutputs(float out[8]) const {
         const float n = g_noise.v[(int)noise_.output()];
         const float d = g_dmc.v[dmc_.outputLevel];
         const float tsum = t + n + d;
-        const float tnd = tsum > 0.0f ? 159.79f / (1.0f / tsum + 100.0f) : 0.0f;
+        const float tnd = tndOutput(tsum);
         out[2] = tsum > 0.0f ? tnd * (t / tsum) : 0.0f;
         out[3] = tsum > 0.0f ? tnd * (n / tsum) : 0.0f;
         out[4] = tsum > 0.0f ? tnd * (d / tsum) : 0.0f;
 
-        const float g = nes_.mapper ? nes_.mapper->expansionGain() : 0.0f;
-        for (int c = 0; c < 3; c++) {
-            const float v = (g > 0.0f && nes_.mapper) ? (float)nes_.mapper->expansionChannel(c) : 0.0f;
-            out[5 + c] = v * g;
-        }
+        expansionOutputs(nes_.mapper.get(), out + 5);
         return;
     }
 #endif
@@ -320,38 +347,38 @@ void APU::channelOutputs(float out[8]) const {
 // in float, and splitting then re-summing rounds differently from the single add.
 // Exhaustively over all 8.4M reachable channel states the two forms disagree on
 // 34% of them, by at most 1.2e-7 absolute against a full-scale of 1.0 — under the
-// 23rd bit, i.e. seven bits below what 16-bit output can represent. That was
-// accepted deliberately: the core's bit-exactness contract covers registers,
-// timing, pixel output and the debug snapshots, none of which read sampleBuf, and
-// the web build reaches the mixer through mixStereo() on a path this never takes.
+// 23rd bit, i.e. seven bits below what 16-bit output can represent.
+//
+// That was accepted deliberately. The core's bit-exactness contract covers
+// registers, timing and pixel output, none of which read sampleBuf, and the web
+// build reaches the mixer through mixStereo() on a path this never takes. The one
+// consumer that does see it is buildDebugSnapshot()'s MIX row, which quantises
+// sampleBuf to 8 bits for the remote scope — so that row, alone among the
+// snapshot's contents, can differ from a split-path build by a step at the very
+// bottom of its range. The per-channel rows above it come from captureChannels(),
+// which reads the channels directly and is unaffected.
 bool APU::mixDirect(float& sum) const {
     if (!mixerTablesUsable()) return false;
 
+    // No psum > 0 guard, unlike the split path: that guard exists there to keep
+    // the 0/0 out of the per-channel division, and entry 0 of the table is 0.0f,
+    // so indexing it unconditionally yields the same value the guard would.
     const int psumI = (int)pulse1_.output() + (int)pulse2_.output();
     const float pulseOut = g_pulse.v[psumI];
 
     const float tsum = g_tri.v[(int)triangle_.output()] + g_noise.v[(int)noise_.output()] +
                        g_dmc.v[dmc_.outputLevel];
-    const float tnd = tsum > 0.0f ? 159.79f / (1.0f / tsum + 100.0f) : 0.0f;
+    const float tnd = tndOutput(tsum);
 
-    // g is 0 without a mapper, so a positive gain already implies one.
-    float exp = 0.0f;
-    const float g = nes_.mapper ? nes_.mapper->expansionGain() : 0.0f;
-    const bool hasExpansion = g > 0.0f;
-    if (hasExpansion) {
-        for (int c = 0; c < 3; c++) exp += (float)nes_.mapper->expansionChannel(c) * g;
-    }
-
-    sum = pulseOut + tnd + exp;
+    sum = pulseOut + tnd + expansionSum(nes_.mapper.get());
     return true;
 }
 #endif
 
 float APU::mix() const {
 #ifdef NES_EMBEDDED
-    // The split is only needed while the scope is being fed per-channel values,
-    // which captureChannels() reads from the channels themselves — so nothing
-    // downstream of the normal playback path wants it.
+    // Only the mono total is wanted here; the scope's per-channel rows come from
+    // captureChannels() reading the channels directly, not from this split.
     float direct;
     if (mixDirect(direct)) return direct;
 #endif
