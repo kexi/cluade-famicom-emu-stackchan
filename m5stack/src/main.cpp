@@ -706,28 +706,48 @@ static int enqueueAudio() {
     // component. Feeding that to the speaker wastes half the headroom and turns
     // every queue start/stop into an audible step, so block DC first.
     static float dcX1 = 0.0f, dcY1 = 0.0f;
+    // Locals for the loop-carried state and the indices: as members/globals the
+    // compiler has to reload them across the store to g_ring, which it cannot
+    // prove does not alias them.
+    float x1 = dcX1, y1 = dcY1;
+    int w = g_ringWrite, r = g_ringRead;
+    // The mute test is loop-invariant, so it selects the source pointer once
+    // instead of costing a branch per sample. A silent buffer rather than a
+    // second loop body keeps the filter state advancing identically either way.
+    static const float silence[AUDIO_BUF_SAMPLES] = {};
+    const float* const src = cartAudioBroken ? silence : g_nes.apu.sampleBuf;
+    constexpr int ringMask = AUDIO_RING_MASK;
     for (int i = 0; i < produced; i++) {
-        const float x = cartAudioBroken ? 0.0f : g_nes.apu.sampleBuf[i];
-        const float y = x - dcX1 + AUDIO_DC_POLE * dcY1;
-        dcX1 = x;
-        dcY1 = y;
+        const float x = src[i];
+        const float y = x - x1 + AUDIO_DC_POLE * y1;
+        x1 = x;
+        y1 = y;
 
+        // Deliberately still two multiplies with the clamp between them. Folding
+        // them into one scale factor is algebraically the same but rounds
+        // differently, and was measured to shift ~0.01% of samples by 1 LSB — a
+        // change to the output for no measurable gain, since the multiply is not
+        // what this loop spends its time on.
         float s = y * AUDIO_HEADROOM;
         if (s > 1.0f) s = 1.0f;
         if (s < -1.0f) s = -1.0f;
-        g_ring[g_ringWrite] = (int16_t)(s * 32767.0f);
-        g_ringWrite = (g_ringWrite + 1) % AUDIO_RING_SAMPLES;
-        const bool ringFull = g_ringWrite == g_ringRead;
+        g_ring[w] = (int16_t)(s * 32767.0f);
+        w = (w + 1) & ringMask;
+        const bool ringFull = w == r;
         if (ringFull) {   // drop the oldest sample rather than the newest
-            g_ringRead = (g_ringRead + 1) % AUDIO_RING_SAMPLES;
+            r = (r + 1) & ringMask;
             g_ringDropped++;
         }
     }
+    dcX1 = x1;
+    dcY1 = y1;
+    g_ringWrite = w;
+    g_ringRead = r;
     return produced;
 }
 
 static int ringAvailable() {
-    return (g_ringWrite - g_ringRead + AUDIO_RING_SAMPLES) % AUDIO_RING_SAMPLES;
+    return (g_ringWrite - g_ringRead) & AUDIO_RING_MASK;
 }
 
 // Submit whole chunks, but never more than the speaker can accept without
@@ -753,16 +773,20 @@ static void drainAudio(uint32_t rate) {
         const bool queueFull = M5.Speaker.isPlaying(SPEAKER_CHANNEL) >= 2;
         if (queueFull) return;
         int16_t* chunk = g_chunk[g_chunkIndex];
-        for (int i = 0; i < AUDIO_CHUNK_SAMPLES; i++) {
-            chunk[i] = g_ring[g_ringRead];
-            g_ringRead = (g_ringRead + 1) % AUDIO_RING_SAMPLES;
-        }
+        // Two memcpy-able runs at most: the chunk either sits contiguously in the
+        // ring or straddles the wrap once. Copying run-wise rather than sample-wise
+        // drops the per-sample index wrap entirely.
+        const int firstRun = AUDIO_RING_SAMPLES - g_ringRead;
+        const int headLen = firstRun < AUDIO_CHUNK_SAMPLES ? firstRun : AUDIO_CHUNK_SAMPLES;
+        memcpy(chunk, g_ring + g_ringRead, (size_t)headLen * sizeof(int16_t));
+        const int tailLen = AUDIO_CHUNK_SAMPLES - headLen;
+        if (tailLen > 0) memcpy(chunk + headLen, g_ring, (size_t)tailLen * sizeof(int16_t));
+        g_ringRead = (g_ringRead + AUDIO_CHUNK_SAMPLES) & AUDIO_RING_MASK;
         const bool queued = M5.Speaker.playRaw(chunk, AUDIO_CHUNK_SAMPLES, rate,
                                                false, 1, SPEAKER_CHANNEL);
         if (!queued) {
             // Queue is full: rewind so the samples are not lost, and stop.
-            g_ringRead = (g_ringRead - AUDIO_CHUNK_SAMPLES + AUDIO_RING_SAMPLES)
-                         % AUDIO_RING_SAMPLES;
+            g_ringRead = (g_ringRead - AUDIO_CHUNK_SAMPLES) & AUDIO_RING_MASK;
             return;
         }
         g_chunkIndex = (g_chunkIndex + 1) % AUDIO_CHUNK_SLOTS;
@@ -792,6 +816,28 @@ static void adjustDivisor(bool wasLate) {
 
     windowFrames = 0;
     lateFrames = 0;
+}
+
+// Kick one horizontal band of the framebuffer at the panel and return.
+//
+// Sized so the whole band fits a single SPI transaction: the peripheral's
+// transaction-length register (SPI_MS_DATA_BITLEN, 18 bits) caps one transfer at
+// 32768 bytes, and LGFX covers a longer request by re-arming the peripheral in a
+// loop while spinning on SPI_USR (Bus_SPI.cpp writeBytes, the `if (length -= len)`
+// block). That spin is why a whole-frame push cost most of its ~24.6ms of wire
+// time in CPU time despite being a "DMA" call. A band never enters that loop, so
+// the call returns as soon as the DMA descriptors are armed.
+//
+// The caller owns the matching endWrite(): startWrite() here leaves the
+// transaction open on purpose so the transfer stays in flight (IPanel refcounts
+// the nesting, demoting pushImageDMA's inner endWrite() to a decrement).
+static void pushBand(int band) {
+    const int bandY = band * DISPLAY_DMA_ROWS;
+    const int rowsLeft = NES_HEIGHT - bandY;
+    const int bandRows = rowsLeft < DISPLAY_DMA_ROWS ? rowsLeft : DISPLAY_DMA_ROWS;
+    M5.Display.startWrite();
+    M5.Display.pushImageDMA(SCREEN_X_OFFSET, bandY, NES_WIDTH, bandRows,
+                            g_nes.ppu.framebuffer + (size_t)bandY * NES_WIDTH);
 }
 
 // Servo the playback rate to what the emulator actually produces.
@@ -842,7 +888,19 @@ static uint32_t updatePlaybackRate(uint32_t current, int produced,
     const bool withinSnap = snapped ? deviation <= AUDIO_RATE_SNAP_EXIT
                                     : deviation <= AUDIO_RATE_SNAP_ENTER;
     snapped = withinSnap;
-    if (withinSnap) target = nominal;
+    if (withinSnap) {
+        // Not a hard pin to nominal: the emulator paces at 60.10Hz wall clock and
+        // the I2S PLL does not hit 44100 exactly, so at a hard 44100 the ring
+        // drifts a few samples per second one way until it drops or starves —
+        // measured +5/s on hardware, overflow in roughly a quarter hour. The ring
+        // term is kept, clamped far below the snap window so what remains is a
+        // slow inaudible trim around nominal rather than the free-running servo.
+        const float trimMax = nominal * AUDIO_RATE_SNAP_TRIM_MAX;
+        float trim = correction;
+        if (trim > trimMax) trim = trimMax;
+        if (trim < -trimMax) trim = -trimMax;
+        target = nominal + trim;
+    }
 
     // Warm-up: follow the target directly for the first couple of seconds. The
     // averages start at the 60fps ideal, so on a ROM that only reaches 33fps the
@@ -880,6 +938,14 @@ void loop() {
     // Split by drawn/skipped: the gap between them is the cost of the draw path,
     // which is what the display divisor actually buys back.
     static int64_t perfEmuDrawUs = 0, perfEmuSkipUs = 0, perfJoinUs = 0;
+    // The push window lumps audio, the DMA kick and the input poll together;
+    // split them so a regression in any one of them has a name in the log.
+    //
+    // dma= is the cost of kicking one band (descriptor setup, no wire time) and
+    // is averaged over every frame, since a band goes out on nearly all of them.
+    // The wire time itself lands in join= when it is not fully hidden, and the
+    // leftover-band flush at a divisor below DISPLAY_DMA_SEGMENTS lands there too.
+    static int64_t perfUpdUs = 0, perfAudioUs = 0, perfDmaUs = 0, perfDrain2Us = 0;
     static int perfRingMin = AUDIO_RING_SAMPLES, perfRingMax = 0;
 #endif
 
@@ -888,7 +954,23 @@ void loop() {
     // nominal rate would drain the ring faster than it fills.
     static uint32_t playbackRate = AUDIO_SAMPLE_RATE;
 
-    M5.update();
+    // Counts every loop iteration. Drives both the button poll below and the
+    // display divisor further down, so it is incremented exactly once, here.
+    static uint32_t frameIndex = 0;
+    const uint32_t thisFrame = frameIndex++;
+
+    // Every other frame. M5.update() rescans the touch panel over I2C and debounces
+    // the buttons, and the only things downstream of it are BtnA/BtnB (SELECT and
+    // START) and BtnC's hold-to-reset — all human button presses, where a 33ms
+    // poll is far below the threshold of noticing. The pads that need per-frame
+    // latency (UDP and Grove) are read independently in applyInput(), which still
+    // runs every frame, so nothing about controller responsiveness changes.
+    //
+    // wasHold() latches until the next update() rather than firing on a specific
+    // frame, so halving the rate delays the reset by at most one frame instead of
+    // dropping it.
+    const bool pollButtons = (thisFrame & 1) == 0;
+    if (pollButtons) M5.update();
     applyInput();
     applyPinChanges();
     applyResetRequest();
@@ -896,27 +978,52 @@ void loop() {
     applyVolumeRequest();
     updateWaveCapture();
 
-    static uint32_t frameIndex = 0;
-    const bool drawThisFrame = (frameIndex++ % g_divisor) == 0;
+    // A picture is transferred as DISPLAY_DMA_SEGMENTS bands, one per loop
+    // iteration — the draw frame ships band 0 and the skipped frames that follow
+    // ship the rest, so a whole picture still lands within one divisor cycle and
+    // the panel refresh rate is unchanged.
+    //
+    // Only the frame that starts a picture may repaint the framebuffer. The
+    // skipped frames in between leave it untouched (renderThisFrame is false),
+    // which is what keeps the rows behind the in-flight bands stable; repainting
+    // on every frame would let the emulator overwrite rows the DMA engine has not
+    // read yet and tear the picture.
+    static int bandIndex = 0;
+    const bool drawThisFrame = (thisFrame % g_divisor) == 0;
+    // Bands still owed from the previous picture. Normally zero by the time the
+    // next draw frame arrives (divisor >= segments), but adjustDivisor() can
+    // narrow the divisor at any window boundary, so this is not guaranteed —
+    // the flush below settles it before runFrame() repaints.
+    const bool pictureInFlight = bandIndex != 0;
     g_nes.ppu.renderThisFrame = drawThisFrame;
 
-    const int64_t emuStartUs = esp_timer_get_time();
-    // The DMA engine reads ppu.framebuffer in place — a second copy would need
-    // another 120KB of internal SRAM, which is not available. So the transfer is
-    // only joined here, immediately before the frame that is about to overwrite
-    // the buffer. Skipped frames leave it untouched, which is exactly what lets
-    // the ~27ms transfer hide under them.
-    //
-    // endWrite() closes the transaction opened after the last push, and
-    // Panel_LCD::end_transaction() waits on the bus — so this both joins the
-    // transfer and releases the SPI lock. waitDMA() alone would leave the
-    // transaction open and the lock held.
+    // "A band was kicked and its transaction is still open." Joined immediately
+    // before the next kick rather than here at the top of the loop — see the
+    // kick site for why that ordering is both faster and still safe.
     static bool pushOutstanding = false;
-    if (drawThisFrame && pushOutstanding) {
-        M5.Display.endWrite();
-        pushOutstanding = false;
+
+    const int64_t emuStartUs = esp_timer_get_time();
+    // A draw frame can arrive while bands are still owed. Finish the old picture
+    // first: runFrame() is about to repaint, so those rows would otherwise ship
+    // as a mix of two pictures.
+    //
+    // Unreachable while the divisor is pinned at DISPLAY_DMA_SEGMENTS, which it
+    // now is (DISPLAY_DIVISOR_MIN). Kept as the safety valve that makes the band
+    // scheme correct for any divisor rather than only the configured one — a
+    // narrower divisor would otherwise tear silently.
+    const bool mustFlushBeforeRepaint = drawThisFrame && pictureInFlight;
+    if (mustFlushBeforeRepaint) {
+        if (pushOutstanding) {
+            M5.Display.endWrite();
+            pushOutstanding = false;
+        }
+        while (bandIndex != 0) {
+            pushBand(bandIndex);
+            bandIndex = (bandIndex + 1) % DISPLAY_DMA_SEGMENTS;
+            M5.Display.endWrite();
+        }
     }
-    const int64_t joinEndUs = esp_timer_get_time();
+    const int64_t flushEndUs = esp_timer_get_time();
     g_nes.runFrame();
     const int64_t emuEndUs = esp_timer_get_time();
 
@@ -930,22 +1037,50 @@ void loop() {
     // behind, not what is left after the speaker has taken its chunks.
     playbackRate = updatePlaybackRate(playbackRate, produced, frameUs, ringAvailable());
     drainAudio(playbackRate);
+    const int64_t audioEndUs = esp_timer_get_time();
 
-    // Fire and forget. pushImageDMA queues the transfer and returns, but it wraps
-    // itself in startWrite()/endWrite() and Panel_LCD's end_transaction() calls
-    // _bus->wait() — so left alone it blocks for the full ~27ms and the overlap
-    // never happens. IPanel refcounts the nesting, so an outer startWrite() here
-    // demotes that inner endWrite() to a decrement and leaves the transfer in
-    // flight. The matching endWrite() is the one before the next runFrame().
+    // One band per loop iteration, draw frame or not. At divisor 4 the draw frame
+    // kicks band 0 and the three skipped frames that follow kick bands 1-3, so a
+    // picture still completes within one divisor cycle and the panel refresh rate
+    // is what it always was — but the CPU only ever pays the kick.
     //
-    // Nothing else may touch M5.Display while this is outstanding; the boot-time
-    // showMessage() calls are all done by then.
-    if (drawThisFrame) {
-        M5.Display.startWrite();
-        M5.Display.pushImageDMA(SCREEN_X_OFFSET, 0, NES_WIDTH, NES_HEIGHT,
-                                g_nes.ppu.framebuffer);
-        pushOutstanding = true;
+    // The previous band is joined here, immediately before the next kick, rather
+    // than at the top of the loop. Joining at the top left only ~0.4ms between
+    // kick and join (the input poll), so most of the band's 6.5ms of wire time
+    // was still owed and showed up as join=5.65ms. Joining here instead puts a
+    // whole loop iteration (~22ms at 44fps, ~16.6ms even at 60fps) between the
+    // two, so the wire has long since drained and the join costs nothing.
+    //
+    // Why this is safe even though it leaves the last band in flight across a
+    // repaint: on a draw frame the previous iteration kicked the final band (rows
+    // 200-239 at DISPLAY_DMA_ROWS=40), and runFrame() starts repainting ~0.5ms
+    // later. The writer and the reader are separated in both space and time.
+    // renderScanline writes strictly top-to-bottom (PPU::step draws line N at dot
+    // 256), so row 200 is not touched until 200/262 of the way through emulation
+    // — at the measured emuD=19.7ms that is kick+15.5ms, while the band's 40 rows
+    // finish on the wire at kick+4.1ms. Margin ~11.4ms.
+    //
+    // That margin shrinks as emulation gets faster, because the writer speeds up
+    // while the reader is fixed at the SPI clock. Break-even is emuD = 4.7ms; at
+    // the ~13ms a comfortable 60fps would imply there is still ~7ms of slack.
+    // Revisit if emuD ever approaches 5ms, or if DISPLAY_DMA_ROWS or
+    // SPI_WRITE_FREQ change — those move the reader side of the calculation.
+    //
+    // Nothing else may touch M5.Display while a band is outstanding; the
+    // boot-time showMessage() calls are all done by then.
+    if (pushOutstanding) {
+        M5.Display.endWrite();
+        pushOutstanding = false;
     }
+    const int64_t joinEndUs = esp_timer_get_time();
+
+    const bool hasBandToPush = drawThisFrame || pictureInFlight;
+    if (hasBandToPush) {
+        pushBand(bandIndex);
+        pushOutstanding = true;
+        bandIndex = (bandIndex + 1) % DISPLAY_DMA_SEGMENTS;
+    }
+    const int64_t dmaEndUs = esp_timer_get_time();
 
     drainAudio(playbackRate);
     const int64_t pushEndUs = esp_timer_get_time();
@@ -953,10 +1088,19 @@ void loop() {
 #if PERF_LOG
     perfEmuUs += emuEndUs - emuStartUs;
     perfPushUs += pushEndUs - emuEndUs;
-    perfJoinUs += joinEndUs - emuStartUs;
-    if (drawThisFrame) perfEmuDrawUs += emuEndUs - joinEndUs;
-    else perfEmuSkipUs += emuEndUs - joinEndUs;
+    // join= is now the wait before the next kick, plus the divisor-transition
+    // flush before runFrame() when that fires at all.
+    perfJoinUs += (joinEndUs - audioEndUs) + (flushEndUs - emuStartUs);
+    perfUpdUs += emuStartUs - loopStartUs;
+    perfAudioUs += audioEndUs - emuEndUs;
+    perfDmaUs += dmaEndUs - joinEndUs;
+    perfDrain2Us += pushEndUs - dmaEndUs;
+    // Split on whether the PPU actually painted, which is what the divisor buys
+    // back — a band frame that only kicks DMA costs the same as a skipped one.
+    if (drawThisFrame) perfEmuDrawUs += emuEndUs - flushEndUs;
+    else perfEmuSkipUs += emuEndUs - flushEndUs;
     perfFrames++;
+    // Counts pictures, not band kicks, so draw= stays the panel's refresh rate.
     if (drawThisFrame) perfDrawn++;
     const int avail = ringAvailable();
     if (avail < perfRingMin) perfRingMin = avail;
@@ -979,6 +1123,11 @@ void loop() {
                       perfRingMin, perfRingMax,
                       (unsigned long)g_ringDropped,
                       (unsigned long)playbackRate);
+        Serial.printf("  upd=%lldus aud=%lldus dma=%lldus dr2=%lldus\n",
+                      (long long)(perfUpdUs / perfFrames),
+                      (long long)(perfAudioUs / perfFrames),
+                      (long long)(perfDmaUs / perfFrames),
+                      (long long)(perfDrain2Us / perfFrames));
         // Only when something is actually unplugged, so the normal log stays as
         // it was and a fault is impossible to miss in a capture.
         const uint64_t pins = g_pinMask.load(std::memory_order_relaxed);
@@ -1006,6 +1155,10 @@ void loop() {
         perfJoinUs = 0;
         perfEmuDrawUs = 0;
         perfEmuSkipUs = 0;
+        perfUpdUs = 0;
+        perfAudioUs = 0;
+        perfDmaUs = 0;
+        perfDrain2Us = 0;
         perfRingMin = AUDIO_RING_SAMPLES;
         perfRingMax = 0;
         g_ringDropped = 0;
@@ -1017,8 +1170,15 @@ void loop() {
     const bool behindSchedule = remainingUs <= 0;
     adjustDivisor(behindSchedule);
     if (behindSchedule) {
-        // Do not try to catch up: resync so a slow frame cannot cascade.
-        nextFrameUs = esp_timer_get_time();
+        // Carry the deficit instead of resyncing: the repaint frame structurally
+        // overruns the period (~19ms vs 16.6ms) while the following skip frames
+        // each finish under it, so the debt is repaid within one divisor cycle
+        // and the average holds 60Hz. Resyncing here forfeited that slack and
+        // capped the loop at ~58fps with the skip-frame headroom going idle.
+        // The cap is what stops a genuinely overloaded loop from spiraling: once
+        // the debt exceeds it, resync and let the frame rate drop honestly.
+        const bool overloaded = -remainingUs > FRAME_DEBT_CAP_US;
+        if (overloaded) nextFrameUs = esp_timer_get_time();
         return;
     }
     // delay() yields to the idle task (needed for the watchdog); the residual

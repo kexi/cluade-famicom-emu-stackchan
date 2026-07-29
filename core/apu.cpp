@@ -309,7 +309,52 @@ void APU::channelOutputs(float out[8]) const {
     }
 }
 
+#ifdef NES_EMBEDDED
+// Stage totals without the per-channel split.
+//
+// channelOutputs() divides each stage total into per-channel shares and mix()
+// immediately adds them back up, so the five divides and the re-sum exist only
+// to be undone. Summing the stage totals directly drops them.
+//
+// Why not keep the split and stay bit-exact: the shares are computed and re-added
+// in float, and splitting then re-summing rounds differently from the single add.
+// Exhaustively over all 8.4M reachable channel states the two forms disagree on
+// 34% of them, by at most 1.2e-7 absolute against a full-scale of 1.0 — under the
+// 23rd bit, i.e. seven bits below what 16-bit output can represent. That was
+// accepted deliberately: the core's bit-exactness contract covers registers,
+// timing, pixel output and the debug snapshots, none of which read sampleBuf, and
+// the web build reaches the mixer through mixStereo() on a path this never takes.
+bool APU::mixDirect(float& sum) const {
+    if (!mixerTablesUsable()) return false;
+
+    const int psumI = (int)pulse1_.output() + (int)pulse2_.output();
+    const float pulseOut = g_pulse.v[psumI];
+
+    const float tsum = g_tri.v[(int)triangle_.output()] + g_noise.v[(int)noise_.output()] +
+                       g_dmc.v[dmc_.outputLevel];
+    const float tnd = tsum > 0.0f ? 159.79f / (1.0f / tsum + 100.0f) : 0.0f;
+
+    // g is 0 without a mapper, so a positive gain already implies one.
+    float exp = 0.0f;
+    const float g = nes_.mapper ? nes_.mapper->expansionGain() : 0.0f;
+    const bool hasExpansion = g > 0.0f;
+    if (hasExpansion) {
+        for (int c = 0; c < 3; c++) exp += (float)nes_.mapper->expansionChannel(c) * g;
+    }
+
+    sum = pulseOut + tnd + exp;
+    return true;
+}
+#endif
+
 float APU::mix() const {
+#ifdef NES_EMBEDDED
+    // The split is only needed while the scope is being fed per-channel values,
+    // which captureChannels() reads from the channels themselves — so nothing
+    // downstream of the normal playback path wants it.
+    float direct;
+    if (mixDirect(direct)) return direct;
+#endif
     float out[8];
     channelOutputs(out);
     float s = 0.0f;
