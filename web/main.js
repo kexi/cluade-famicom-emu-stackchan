@@ -547,13 +547,47 @@
   });
 
   // ---- load ROM from a URL (CORS permitting) ----
+
+  // Read a response body while reporting how much has landed.
+  //
+  // Not res.arrayBuffer(): that resolves only once the whole ROM is down, which
+  // on a slow link is exactly the stretch the user needs to see moving. A
+  // cross-origin fetch often has no Content-Length to work from, so fall back to
+  // showing raw KB rather than a percentage that would be a guess.
+  async function readWithProgress(res) {
+    const declared = parseInt(res.headers.get('Content-Length') || '', 10);
+    const total = Number.isFinite(declared) && declared > 0 ? declared : 0;
+    const reader = res.body.getReader();
+    const parts = [];
+    let received = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+      received += value.length;
+      statusEl.textContent = total
+        ? t('urlFetching') + ' ' + Math.round(received / total * 100) + '%'
+        : t('urlFetching') + ' ' + Math.round(received / 1024) + 'KB';
+    }
+    const buf = new Uint8Array(received);
+    let at = 0;
+    for (const part of parts) { buf.set(part, at); at += part.length; }
+    return buf;
+  }
+
   async function loadRomFromUrl(url) {
+    // GitHub's file-view page is what people actually copy, and it neither
+    // serves the bytes nor allows CORS — rewriting to raw.githubusercontent
+    // beats surfacing that as an opaque fetch failure.
+    url = url.replace(
+      /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:blob|raw)\/(.+)$/,
+      'https://raw.githubusercontent.com/$1/$2/$3');
     statusEl.textContent = t('urlFetching');
     let buf;
     try {
       const res = await fetch(url);
       if (!res.ok) throw new Error(res.status);
-      buf = new Uint8Array(await res.arrayBuffer());
+      buf = await readWithProgress(res);
     } catch (_) {
       statusEl.textContent = t('urlFail');
       return;
@@ -1058,6 +1092,29 @@
     504: 'deviceNoAnswer',
   };
 
+  // Consume the relay's NDJSON stream, handing each complete line to `onLine`.
+  //
+  // Split here rather than accumulating the whole body: the point of asking for
+  // progress is to show it while the transfer is still running.
+  async function readNdjson(res, onLine) {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (line) onLine(JSON.parse(line));
+      }
+    }
+    const tail = buf.trim();
+    if (tail) onLine(JSON.parse(tail));
+  }
+
   async function sendRomToDevice() {
     const hasCart = cartPrg && cartChr;
     if (!hasCart) { statusEl.textContent = t('deviceNoCart'); return; }
@@ -1068,16 +1125,34 @@
     swapDeviceBtn.disabled = true;
     statusEl.textContent = t('deviceSending');
     try {
-      const res = await fetch('/api/rom?host=' + encodeURIComponent(deviceIp) + '&swap=' + (noReset ? 1 : 0), {
+      const res = await fetch('/api/rom?host=' + encodeURIComponent(deviceIp) + '&swap=' + (noReset ? 1 : 0) + '&progress=1', {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: img,
       });
-      if (res.ok) {
+      // A rejection before the stream opens (bad host, oversized body) still
+      // arrives as a plain status code, so keep the original mapping for it.
+      if (!res.ok) {
+        statusEl.textContent = t(DEVICE_ROM_ERRORS[res.status] || 'deviceFail');
+        return;
+      }
+      let verdict = null;
+      await readNdjson(res, (line) => {
+        const isProgress = line.chunks > 0 && line.ok === undefined && !line.error;
+        if (isProgress) {
+          statusEl.textContent = t('deviceSending') + ' ' + Math.round(line.sent / line.chunks * 100) + '%';
+          return;
+        }
+        verdict = line;
+      });
+      if (verdict && verdict.ok) {
         statusEl.textContent = t(noReset ? 'deviceSentSwap' : 'deviceSent');
         return;
       }
-      statusEl.textContent = t(DEVICE_ROM_ERRORS[res.status] || 'deviceFail');
+      // No verdict means the stream died mid-transfer: the relay committed to
+      // 200 in its headers, so there is no status code left to explain it.
+      if (!verdict) { statusEl.textContent = t('deviceFail'); return; }
+      statusEl.textContent = t(DEVICE_ROM_ERRORS[verdict.http] || 'deviceFail');
     } catch (err) {
       // The relay itself is unreachable — a device that merely stayed silent
       // comes back as 504 above, not as a rejected fetch.

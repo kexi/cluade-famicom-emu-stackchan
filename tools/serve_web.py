@@ -15,9 +15,13 @@ same origin is what keeps those POSTs out of CORS preflight territory.
     POST /api/debug   {"host":...}                     -> type 3, and returns the
                       reassembled snapshot as application/octet-stream (504 if
                       the device does not answer)
-    POST /api/rom?host=<ip>&swap=0|1                   -> type 4, body is the raw
+    POST /api/rom?host=<ip>&swap=0|1[&progress=1]      -> type 4, body is the raw
                       .nes image (not JSON, not base64); relayed as a
-                      BEGIN/DATA*/END transfer and answered once it lands
+                      BEGIN/DATA*/END transfer and answered once it lands.
+                      With progress=1 the answer is an NDJSON stream of
+                      {"sent":..,"chunks":..} lines whose last line carries the
+                      verdict; without it the answer is a single JSON object and
+                      an HTTP status code, unchanged, for curl.
 
 Usage:
     uv run tools/serve_web.py [--port 8000] [--device-port 5555]
@@ -68,6 +72,12 @@ ROM_RETRIES = 8
 # One transfer is ~750 chunks; allow a few percent loss before giving up rather
 # than letting a flaky link retry forever.
 ROM_MAX_TOTAL_RETRIES = 64
+# Progress thinning. One line per chunk would be ~750 writes for a large cart,
+# which costs more than the transfer itself on the wire and gives the page
+# nothing a human can read; a step or an interval, whichever comes first, keeps
+# the bar moving smoothly even on a slow link.
+ROM_PROGRESS_STEP = 0.03
+ROM_PROGRESS_INTERVAL_S = 0.05
 
 ACK_MAGIC = b"NR"
 ACK_SIZE = 12
@@ -233,6 +243,32 @@ class RomTransferError(Exception):
         self.status = status
 
 
+def _progress_thinner(on_progress, total: int):
+    """Wrap a progress callback so it fires on a step or an interval, not per chunk.
+
+    Returns `report(sent, force=False)`. `force` is for the first and last line,
+    which must always go out — a bar that never reaches 100% reads as a hang even
+    when the transfer succeeded.
+    """
+    if on_progress is None:
+        return lambda sent, force=False: None
+
+    state = {"sent": -1, "at": 0.0}
+    step = max(1, int(total * ROM_PROGRESS_STEP))
+
+    def report(sent: int, force: bool = False):
+        now = time.monotonic()
+        stepped = sent - state["sent"] >= step
+        waited = now - state["at"] >= ROM_PROGRESS_INTERVAL_S
+        if not force and not stepped and not waited:
+            return
+        state["sent"] = sent
+        state["at"] = now
+        on_progress(sent, total)
+
+    return report
+
+
 class PinRelay:
     """Owns the UDP socket and the packet sequence counter."""
 
@@ -302,7 +338,7 @@ class PinRelay:
         finally:
             sock.close()
 
-    def send_rom(self, host: str, data: bytes, swap: bool) -> dict:
+    def send_rom(self, host: str, data: bytes, swap: bool, on_progress=None) -> dict:
         """Push a whole .nes image to the device and wait for it to land.
 
         Stop-and-wait: every frame is acknowledged before the next goes out. A
@@ -310,6 +346,9 @@ class PinRelay:
         seconds and a window would only buy complexity. Uses its own socket for
         the same reason fetch_debug does — an ACK must not be mistaken for, or
         consumed by, anything else in flight.
+
+        `on_progress(sent, total)` is called as chunks land, already thinned to
+        the rate below — callers that just want the verdict leave it None.
 
         Raises RomTransferError when the device refuses or goes silent, OSError
         when the send itself fails.
@@ -319,12 +358,14 @@ class PinRelay:
         chunks = [data[i:i + ROM_CHUNK] for i in range(0, len(data), ROM_CHUNK)]
         started = time.monotonic()
         retries = 0
+        report = _progress_thinner(on_progress, len(chunks))
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sock.settimeout(ROM_TIMEOUT_S)
             begin = build_rom_begin(session, len(data), crc, swap)
             retries += self._rom_exchange(sock, host, session, ROM_OP_BEGIN, 0, begin)
+            report(0, force=True)
 
             index = 0
             while index < len(chunks):
@@ -347,6 +388,7 @@ class PinRelay:
                 if ack["status"] != ROM_STATUS_OK:
                     raise RomTransferError(ack["status"], ROM_STATUS_NAMES.get(ack["status"], "?"))
                 index += 1
+                report(index, force=index == len(chunks))
                 if retries > ROM_MAX_TOTAL_RETRIES:
                     raise RomTransferError(None, "too many retries")
 
@@ -445,23 +487,72 @@ class Handler(SimpleHTTPRequestHandler):
             self._reply(400, {"error": "short body"})
             return
 
+        wants_progress = (query.get("progress") or ["0"])[0] == "1"
+        if wants_progress:
+            self._stream_rom(host, data, swap)
+            return
+
         try:
             result = self.relay.send_rom(host, data, swap)
         except RomTransferError as exc:
-            if exc.status is None:
-                # 504 rather than 502: the packets went out fine, the device just
-                # never answered — the page offers a retry for that.
-                self._reply(504, {"error": str(exc)})
-                return
-            code = ROM_STATUS_HTTP.get(exc.status, 502)
-            self._reply(code, {"error": ROM_STATUS_NAMES.get(exc.status, "?"),
-                               "status": exc.status})
+            code, payload = self._rom_failure(exc)
+            self._reply(code, payload)
             return
         except OSError as exc:
             self._reply(502, {"error": f"send failed: {exc}"})
             return
 
         self._reply(200, result)
+
+    @staticmethod
+    def _rom_failure(exc: RomTransferError):
+        """Map a transfer verdict onto (HTTP code, payload).
+
+        Shared by both answer shapes so the streaming path reports the same
+        verdict the synchronous one puts in the status line — it just carries the
+        code in the body, having already committed to 200 in the headers.
+        """
+        if exc.status is None:
+            # 504 rather than 502: the packets went out fine, the device just
+            # never answered — the page offers a retry for that.
+            return 504, {"error": str(exc)}
+        return ROM_STATUS_HTTP.get(exc.status, 502), {
+            "error": ROM_STATUS_NAMES.get(exc.status, "?"),
+            "status": exc.status,
+        }
+
+    def _stream_rom(self, host: str, data: bytes, swap: bool):
+        """Answer a transfer as NDJSON: progress lines, then one verdict line.
+
+        Length is unknown when the headers go out, so this closes the connection
+        to delimit the body rather than chunk-encoding it — the page reads with a
+        stream reader either way, and curl -N shows the lines as they land.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+        def emit(payload: dict):
+            self.wfile.write(json.dumps(payload).encode() + b"\n")
+            self.wfile.flush()
+
+        def on_progress(sent: int, chunks: int):
+            emit({"sent": sent, "chunks": chunks})
+
+        try:
+            result = self.relay.send_rom(host, data, swap, on_progress=on_progress)
+        except RomTransferError as exc:
+            code, payload = self._rom_failure(exc)
+            emit({"error": payload["error"], "http": code})
+            return
+        except OSError as exc:
+            emit({"error": f"send failed: {exc}", "http": 502})
+            return
+
+        emit(result)
 
     def do_POST(self):
         route = self.path.split("?")[0]
