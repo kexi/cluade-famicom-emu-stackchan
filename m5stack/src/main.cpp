@@ -81,17 +81,16 @@ static bool g_wifiConnected = false;
 
 // Transfer state, owned entirely by the UDP task. Kept at file scope only so the
 // packet handler can be split out of udpTask's loop for readability.
-static bool g_romActive = false;        // a BEGIN has been accepted and not yet finished
+static bool g_romActive = false;   // a BEGIN has been accepted and not yet finished
 static uint16_t g_romSession = 0;
 static uint32_t g_romExpectedSize = 0;
 static uint32_t g_romExpectedCrc = 0;
 static uint8_t g_romPendingFlags = 0;
-static uint16_t g_romNextChunk = 0;     // the chunk index a DATA packet must carry
-static uint32_t g_romReceived = 0;      // bytes staged so far
-static uint32_t g_romLastRxMs = 0;      // for the stale-session takeover
+static uint16_t g_romNextChunk = 0;   // the chunk index a DATA packet must carry
+static uint32_t g_romReceived = 0;   // bytes staged so far
+static uint32_t g_romLastRxMs = 0;   // for the stale-session takeover
 
-static void sendRomAck(int sock, const sockaddr_in& to, uint8_t op, uint16_t session,
-                       uint16_t chunk, uint8_t status) {
+static void sendRomAck(int sock, const sockaddr_in& to, uint8_t op, uint16_t session, uint16_t chunk, uint8_t status) {
     uint8_t ack[UDP_ROM_ACK_SIZE] = {};
     ack[0] = 'N';
     ack[1] = 'R';
@@ -113,8 +112,7 @@ static void sendRomAck(int sock, const sockaddr_in& to, uint8_t op, uint16_t ses
 // possibly load is rejected while the sender is still listening — rather than
 // failing on core 1 where the only report would be a serial line.
 static uint8_t checkStagedRom() {
-    const bool magicOk = g_romBuf[0] == 'N' && g_romBuf[1] == 'E' &&
-                         g_romBuf[2] == 'S' && g_romBuf[3] == 0x1A;
+    const bool magicOk = g_romBuf[0] == 'N' && g_romBuf[1] == 'E' && g_romBuf[2] == 'S' && g_romBuf[3] == 0x1A;
     if (!magicOk) return UDP_ROM_STATUS_BAD_HEADER;
 
     // Archaic iNES: bytes 12-15 should be zero, and when they are not (e.g.
@@ -123,15 +121,13 @@ static uint8_t checkStagedRom() {
     // here and then fail to load.
     const bool dirtyHeader = g_romBuf[12] || g_romBuf[13] || g_romBuf[14] || g_romBuf[15];
     const int mapperNum = (g_romBuf[6] >> 4) | (dirtyHeader ? 0 : (g_romBuf[7] & 0xF0));
-    const bool mapperSupported = mapperNum == 0 || mapperNum == 1 || mapperNum == 2 ||
-                                 mapperNum == 3 || mapperNum == 4 || mapperNum == 24 ||
-                                 mapperNum == 26;
+    const bool mapperSupported = mapperNum == 0 || mapperNum == 1 || mapperNum == 2 || mapperNum == 3 ||
+                                 mapperNum == 4 || mapperNum == 24 || mapperNum == 26;
     if (!mapperSupported) return UDP_ROM_STATUS_UNSUPPORTED_MAPPER;
     return UDP_ROM_STATUS_OK;
 }
 
-static void handleRomPacket(int sock, const sockaddr_in& from,
-                            const uint8_t* packet, int received) {
+static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* packet, int received) {
     const uint16_t session = (uint16_t)(packet[4] | (packet[5] << 8));
     const uint8_t op = packet[6];
 
@@ -146,8 +142,8 @@ static void handleRomPacket(int sock, const sockaddr_in& from,
     if (op == UDP_ROM_OP_BEGIN) {
         const bool beginShort = received < UDP_ROM_BEGIN_SIZE;
         if (beginShort) return;
-        const uint32_t total = (uint32_t)packet[8] | ((uint32_t)packet[9] << 8) |
-                               ((uint32_t)packet[10] << 16) | ((uint32_t)packet[11] << 24);
+        const uint32_t total = (uint32_t)packet[8] | ((uint32_t)packet[9] << 8) | ((uint32_t)packet[10] << 16) |
+                               ((uint32_t)packet[11] << 24);
 
         // A retransmitted BEGIN (its ACK was lost) must not restart a transfer
         // that is already making progress, so only re-acknowledge it.
@@ -157,8 +153,7 @@ static void handleRomPacket(int sock, const sockaddr_in& from,
             sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_OK);
             return;
         }
-        const bool otherSessionAlive = g_romActive &&
-                                       (millis() - g_romLastRxMs) <= ROM_SESSION_TIMEOUT_MS;
+        const bool otherSessionAlive = g_romActive && (millis() - g_romLastRxMs) <= ROM_SESSION_TIMEOUT_MS;
         if (otherSessionAlive) {
             sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_BUSY);
             return;
@@ -182,8 +177,8 @@ static void handleRomPacket(int sock, const sockaddr_in& from,
         g_romActive = true;
         g_romSession = session;
         g_romExpectedSize = total;
-        g_romExpectedCrc = (uint32_t)packet[12] | ((uint32_t)packet[13] << 8) |
-                           ((uint32_t)packet[14] << 16) | ((uint32_t)packet[15] << 24);
+        g_romExpectedCrc = (uint32_t)packet[12] | ((uint32_t)packet[13] << 8) | ((uint32_t)packet[14] << 16) |
+                           ((uint32_t)packet[15] << 24);
         g_romPendingFlags = packet[7];
         g_romNextChunk = 0;
         g_romReceived = 0;
@@ -312,8 +307,7 @@ static void udpTask(void*) {
         // other packet types ignore it.
         sockaddr_in from = {};
         socklen_t fromLen = sizeof(from);
-        const int received = ::recvfrom(sock, packet, sizeof(packet), 0,
-                                        (sockaddr*)&from, &fromLen);
+        const int received = ::recvfrom(sock, packet, sizeof(packet), 0, (sockaddr*)&from, &fromLen);
         const bool tooShort = received < UDP_PACKET_SIZE;
         if (tooShort) continue;
 
@@ -337,8 +331,7 @@ static void udpTask(void*) {
         if (type == UDP_TYPE_DEBUG) {
             g_debugReplyIp.store(from.sin_addr.s_addr, std::memory_order_relaxed);
             g_debugReplyPort.store(from.sin_port, std::memory_order_relaxed);
-            g_debugSeq.store((uint16_t)(packet[4] | (packet[5] << 8)),
-                             std::memory_order_relaxed);
+            g_debugSeq.store((uint16_t)(packet[4] | (packet[5] << 8)), std::memory_order_relaxed);
             const bool wantWaves = packet[6] & UDP_DEBUG_FLAG_WAVES;
             g_debugWantWaves.store(wantWaves, std::memory_order_relaxed);
             if (wantWaves) g_debugWaveAskedMs.store(millis(), std::memory_order_relaxed);
@@ -390,8 +383,7 @@ static bool connectWifi() {
         }
         delay(200);
     }
-    Serial.printf("WIFI: connected ip=%s rssi=%d\n",
-                  WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+    Serial.printf("WIFI: connected ip=%s rssi=%d\n", WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
     return true;
 }
 
@@ -467,17 +459,15 @@ void setup() {
     // margin instead of racing an already-empty hardware buffer.
     for (int i = 0; i < 2; i++) {
         memset(g_chunk[g_chunkIndex], 0, sizeof(g_chunk[0]));
-        M5.Speaker.playRaw(g_chunk[g_chunkIndex], AUDIO_CHUNK_SAMPLES,
-                           AUDIO_SAMPLE_RATE, false, 1, SPEAKER_CHANNEL);
+        M5.Speaker.playRaw(g_chunk[g_chunkIndex], AUDIO_CHUNK_SAMPLES, AUDIO_SAMPLE_RATE, false, 1, SPEAKER_CHANNEL);
         g_chunkIndex = (g_chunkIndex + 1) % AUDIO_CHUNK_SLOTS;
     }
 
     // NB: no startWrite() here. Holding the bus open across the whole run leaves
     // the panel's address window owned by whatever ran last, so pushes land at
     // the wrong offset; pushImageDMA sets the window itself per call.
-    Serial.printf("DISPLAY: %dx%d rot=%d push=(%d,%d,%d,%d)\n",
-                  M5.Display.width(), M5.Display.height(), M5.Display.getRotation(),
-                  SCREEN_X_OFFSET, 0, NES_WIDTH, NES_HEIGHT);
+    Serial.printf("DISPLAY: %dx%d rot=%d push=(%d,%d,%d,%d)\n", M5.Display.width(), M5.Display.height(),
+                  M5.Display.getRotation(), SCREEN_X_OFFSET, 0, NES_WIDTH, NES_HEIGHT);
 
     M5.Display.fillScreen(TFT_BLACK);
     if (!g_wifiConnected) {
@@ -598,8 +588,7 @@ static void applyRomRequest() {
         if (!restored) haltWithError("ROM load failed");
     }
 
-    if (ok) Serial.printf("ROM: applied %u bytes%s\n", (unsigned)g_romSize,
-                          wantSwap ? " (no reset)" : "");
+    if (ok) Serial.printf("ROM: applied %u bytes%s\n", (unsigned)g_romSize, wantSwap ? " (no reset)" : "");
     else Serial.printf("ROM: failed %u bytes\n", (unsigned)g_romSize);
 
     // Cleared last: until this store the UDP task treats the buffer as ours and
@@ -638,8 +627,7 @@ static void applyDebugRequest() {
     static uint8_t snapshot[nes::NES::DEBUG_SNAPSHOT_MAX];
     // Only include waves once capture has actually been running: the first reply
     // after arming would otherwise carry a stale or empty buffer.
-    const bool withWaves = g_debugWantWaves.load(std::memory_order_relaxed) &&
-                           g_nes.apu.waveCapture;
+    const bool withWaves = g_debugWantWaves.load(std::memory_order_relaxed) && g_nes.apu.waveCapture;
     const size_t total = g_nes.buildDebugSnapshot(snapshot, withWaves);
 
     sockaddr_in to = {};
@@ -666,16 +654,14 @@ static void applyDebugRequest() {
         datagram[5] = seq & 0xFF;
         datagram[6] = seq >> 8;
         memcpy(datagram + UDP_DEBUG_HEADER, snapshot + offset, len);
-        ::sendto(g_udpSock, datagram, UDP_DEBUG_HEADER + len, 0,
-                 (sockaddr*)&to, sizeof(to));
+        ::sendto(g_udpSock, datagram, UDP_DEBUG_HEADER + len, 0, (sockaddr*)&to, sizeof(to));
     }
 
     // Once only: at 5Hz this would otherwise bury every other serial line.
     static bool announced = false;
     if (!announced) {
         announced = true;
-        Serial.printf("DBG: snapshot to %s (%u bytes)\n",
-                      IPAddress(to.sin_addr.s_addr).toString().c_str(),
+        Serial.printf("DBG: snapshot to %s (%u bytes)\n", IPAddress(to.sin_addr.s_addr).toString().c_str(),
                       (unsigned)total);
     }
 }
@@ -712,8 +698,7 @@ static float g_dcX1 = 0.0f, g_dcY1 = 0.0f;
 // so the mute check stays out of the per-sample path while both variants keep a
 // single definition of the filter — the muted one still advances the state, just
 // with x fixed at zero, so a cart fault does not leave a discontinuity behind.
-template <bool Muted>
-static void enqueueSamples(const float* src, int count) {
+template <bool Muted> static void enqueueSamples(const float* src, int count) {
     // Loop-carried state in locals: as globals the compiler has to reload them
     // across the store to g_ring, which it cannot prove does not alias them.
     float x1 = g_dcX1, y1 = g_dcY1;
@@ -761,9 +746,7 @@ static int enqueueAudio() {
     return produced;
 }
 
-static int ringAvailable() {
-    return (g_ringWrite - g_ringRead) & AUDIO_RING_MASK;
-}
+static int ringAvailable() { return (g_ringWrite - g_ringRead) & AUDIO_RING_MASK; }
 
 // Submit whole chunks, but never more than the speaker can accept without
 // blocking. playRaw keeps referencing the buffer it was given, so a chunk slot
@@ -797,8 +780,7 @@ static void drainAudio(uint32_t rate) {
         const int tailLen = AUDIO_CHUNK_SAMPLES - headLen;
         if (tailLen > 0) memcpy(chunk + headLen, g_ring, (size_t)tailLen * sizeof(int16_t));
         g_ringRead = (g_ringRead + AUDIO_CHUNK_SAMPLES) & AUDIO_RING_MASK;
-        const bool queued = M5.Speaker.playRaw(chunk, AUDIO_CHUNK_SAMPLES, rate,
-                                               false, 1, SPEAKER_CHANNEL);
+        const bool queued = M5.Speaker.playRaw(chunk, AUDIO_CHUNK_SAMPLES, rate, false, 1, SPEAKER_CHANNEL);
         if (!queued) {
             // Queue is full: rewind so the samples are not lost, and stop.
             g_ringRead = (g_ringRead - AUDIO_CHUNK_SAMPLES) & AUDIO_RING_MASK;
@@ -869,8 +851,7 @@ static void pushBand(int band) {
 //
 // Output is slew-limited, so what reaches the ear is a drift rather than the
 // per-second steps the old fps-derived rate produced.
-static uint32_t updatePlaybackRate(uint32_t current, int produced,
-                                   int64_t frameUs, int ringAvail) {
+static uint32_t updatePlaybackRate(uint32_t current, int produced, int64_t frameUs, int ringAvail) {
     // Numerator and denominator are smoothed separately, and the ratio is taken
     // from the two averages. Smoothing the per-frame ratio produced/frameUs
     // instead reads high: E[p/t] > E[p]/E[t] whenever t varies (Jensen — the
@@ -903,8 +884,7 @@ static uint32_t updatePlaybackRate(uint32_t current, int produced,
     const float nominal = (float)AUDIO_SAMPLE_RATE;
     const float offset = (target - nominal) / nominal;
     const float deviation = offset < 0 ? -offset : offset;
-    const bool withinSnap = snapped ? deviation <= AUDIO_RATE_SNAP_EXIT
-                                    : deviation <= AUDIO_RATE_SNAP_ENTER;
+    const bool withinSnap = snapped ? deviation <= AUDIO_RATE_SNAP_EXIT : deviation <= AUDIO_RATE_SNAP_ENTER;
     snapped = withinSnap;
     if (withinSnap) {
         // Not a hard pin to nominal: the emulator paces at 60.10Hz wall clock and
@@ -1039,8 +1019,7 @@ void loop() {
     // which a fast build would be running completely unguarded.
     static float emuDrawMs = 0.0f;
     static bool emuDrawSeeded = false;
-    const bool repaintRacesBand =
-        drawThisFrame && emuDrawSeeded && emuDrawMs < DISPLAY_REPAINT_GUARD_MS;
+    const bool repaintRacesBand = drawThisFrame && emuDrawSeeded && emuDrawMs < DISPLAY_REPAINT_GUARD_MS;
     if (repaintRacesBand) joinBand();
     const int64_t flushEndUs = esp_timer_get_time();
     g_nes.runFrame();
@@ -1054,8 +1033,7 @@ void loop() {
         // The first sample is taken whole: there is no prior average to blend it
         // into, and starting at the real value is what keeps the guard live from
         // the second picture onward instead of after a decay.
-        emuDrawMs = emuDrawSeeded ? emuDrawMs + DISPLAY_EMU_EWMA_ALPHA * (drawMs - emuDrawMs)
-                                  : drawMs;
+        emuDrawMs = emuDrawSeeded ? emuDrawMs + DISPLAY_EMU_EWMA_ALPHA * (drawMs - emuDrawMs) : drawMs;
         emuDrawSeeded = true;
     }
 
@@ -1145,18 +1123,12 @@ void loop() {
         Serial.printf("fps=%.1f div=%lu draw=%.1fHz emu=%lldus "
                       "join=%lldus emuD=%lldus emuS=%lldus "
                       "ring=%d..%d drop=%lu rate=%lu\n",
-                      fps, (unsigned long)g_divisor, drawHz,
-                      (long long)(perfEmuUs / perfFrames),
-                      (long long)(perfJoinUs / perfFrames),
-                      (long long)(perfDrawn ? perfEmuDrawUs / perfDrawn : 0),
-                      (long long)(skipped ? perfEmuSkipUs / skipped : 0),
-                      perfRingMin, perfRingMax,
-                      (unsigned long)g_ringDropped,
-                      (unsigned long)playbackRate);
-        Serial.printf("  upd=%lldus aud=%lldus dma=%lldus dr2=%lldus\n",
-                      (long long)(perfUpdUs / perfFrames),
-                      (long long)(perfAudioUs / perfFrames),
-                      (long long)(perfDmaUs / perfFrames),
+                      fps, (unsigned long)g_divisor, drawHz, (long long)(perfEmuUs / perfFrames),
+                      (long long)(perfJoinUs / perfFrames), (long long)(perfDrawn ? perfEmuDrawUs / perfDrawn : 0),
+                      (long long)(skipped ? perfEmuSkipUs / skipped : 0), perfRingMin, perfRingMax,
+                      (unsigned long)g_ringDropped, (unsigned long)playbackRate);
+        Serial.printf("  upd=%lldus aud=%lldus dma=%lldus dr2=%lldus\n", (long long)(perfUpdUs / perfFrames),
+                      (long long)(perfAudioUs / perfFrames), (long long)(perfDmaUs / perfFrames),
                       (long long)(perfDrain2Us / perfFrames));
         // Only when something is actually unplugged, so the normal log stays as
         // it was and a fault is impossible to miss in a capture.
@@ -1169,10 +1141,8 @@ void loop() {
         const uint64_t apuUs = g_nes.profApuCycles / CPU_CYCLES_PER_US;
         const uint64_t ppuUs = g_nes.profPpuCycles / CPU_CYCLES_PER_US;
         const int64_t cpuUs = perfEmuUs - (int64_t)apuUs - (int64_t)ppuUs;
-        Serial.printf("  apu=%lluus ppu=%lluus cpu=%lldus\n",
-                      (unsigned long long)(apuUs / perfFrames),
-                      (unsigned long long)(ppuUs / perfFrames),
-                      (long long)(cpuUs / (int64_t)perfFrames));
+        Serial.printf("  apu=%lluus ppu=%lluus cpu=%lldus\n", (unsigned long long)(apuUs / perfFrames),
+                      (unsigned long long)(ppuUs / perfFrames), (long long)(cpuUs / (int64_t)perfFrames));
         g_nes.profApuCycles = 0;
         g_nes.profPpuCycles = 0;
 #endif
@@ -1213,6 +1183,5 @@ void loop() {
     // sub-millisecond wait is spun out for frame-time accuracy.
     const int64_t delayMs = remainingUs / 1000;
     if (delayMs > 1) delay((uint32_t)(delayMs - 1));
-    while (esp_timer_get_time() < nextFrameUs) {
-    }
+    while (esp_timer_get_time() < nextFrameUs) {}
 }

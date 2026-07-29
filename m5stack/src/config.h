@@ -60,8 +60,7 @@ constexpr uint32_t DISPLAY_DIVISOR_MAX = 6;
 constexpr uint32_t DISPLAY_DIVISOR_INITIAL = 6;
 static_assert(DISPLAY_DIVISOR_MIN >= (uint32_t)DISPLAY_DMA_SEGMENTS,
               "divisor floor must cover the band count, or a draw frame flushes bands inline");
-static_assert(DISPLAY_DIVISOR_INITIAL >= DISPLAY_DIVISOR_MIN &&
-              DISPLAY_DIVISOR_INITIAL <= DISPLAY_DIVISOR_MAX,
+static_assert(DISPLAY_DIVISOR_INITIAL >= DISPLAY_DIVISOR_MIN && DISPLAY_DIVISOR_INITIAL <= DISPLAY_DIVISOR_MAX,
               "initial divisor must lie within the configured range");
 
 // Runtime guard on the repaint-versus-last-band race.
@@ -88,24 +87,24 @@ constexpr float DISPLAY_EMU_EWMA_ALPHA = 0.05f;
 
 // ------------------------------------------------------------------- audio
 constexpr uint32_t AUDIO_SAMPLE_RATE = 44100;
-constexpr uint8_t SPEAKER_VOLUME = 128;      // 0-255, M5.Speaker master volume
+constexpr uint8_t SPEAKER_VOLUME = 128;   // 0-255, M5.Speaker master volume
 // The device level the browser's 1.0 master volume maps to, so the two agree on
 // what "normal" sounds like. The web slider spans 0..1.5, i.e. up to 192 here.
 constexpr uint8_t SPEAKER_VOLUME_BASE = SPEAKER_VOLUME;
-constexpr uint8_t SPEAKER_CHANNEL = 1;       // virtual channel used for playRaw
-constexpr int AUDIO_BUF_SAMPLES = 2048;      // matches APU::sampleBuf capacity
+constexpr uint8_t SPEAKER_CHANNEL = 1;   // virtual channel used for playRaw
+constexpr int AUDIO_BUF_SAMPLES = 2048;   // matches APU::sampleBuf capacity
 
 // Staging between the APU and the speaker. The ring gives ~186ms of slack so a
 // late frame cannot starve the hardware; chunks are the unit handed to playRaw.
-constexpr int AUDIO_RING_SAMPLES = 8192;     // ~186ms at 44.1kHz
+constexpr int AUDIO_RING_SAMPLES = 8192;   // ~186ms at 44.1kHz
 // The ring index wraps by masking, not by %, because both the enqueue and the
 // drain loop wrap once per sample and an integer division there is pure cost.
 // That only works while the size is a power of two, hence the assertion.
 static_assert((AUDIO_RING_SAMPLES & (AUDIO_RING_SAMPLES - 1)) == 0,
               "AUDIO_RING_SAMPLES must be a power of two: the ring wraps by masking");
 constexpr int AUDIO_RING_MASK = AUDIO_RING_SAMPLES - 1;
-constexpr int AUDIO_CHUNK_SAMPLES = 512;     // ~11.6ms per submission
-constexpr int AUDIO_CHUNK_SLOTS = 4;         // rotation depth; playRaw holds the pointer
+constexpr int AUDIO_CHUNK_SAMPLES = 512;   // ~11.6ms per submission
+constexpr int AUDIO_CHUNK_SLOTS = 4;   // rotation depth; playRaw holds the pointer
 
 // ---- playback rate control ----
 // The NES produces 44100/60.0988 = ~733.8 samples per frame. When the emulator
@@ -200,7 +199,7 @@ constexpr uint8_t UDP_DEBUG_PARTS = 4;
 // 'N','D' | version | part | nparts | seq u16
 constexpr uint8_t UDP_DEBUG_HEADER = 7;
 constexpr int UDP_DEBUG_CHUNK = 1400;   // stays inside a 1500-byte MTU
-constexpr uint8_t UDP_CTRL_RESET = 0x01;    // byte [6] bit 0
+constexpr uint8_t UDP_CTRL_RESET = 0x01;   // byte [6] bit 0
 constexpr uint8_t UDP_CTRL_VOLUME = 0x02;   // byte [6] bit 1, level in byte [7]
 
 // Cartridge swap over WiFi. The ROM arrives in chunks because a .nes image is far
@@ -220,7 +219,7 @@ constexpr uint8_t UDP_ROM_DATA_HEADER = 12;
 // END and ABORT carry nothing beyond the session and op, so they are the bare
 // common header — which is also the existing minimum length check.
 constexpr uint8_t UDP_ROM_END_SIZE = 8;
-constexpr int UDP_ROM_CHUNK = 1400;     // stays inside a 1500-byte MTU, as UDP_DEBUG_CHUNK
+constexpr int UDP_ROM_CHUNK = 1400;   // stays inside a 1500-byte MTU, as UDP_DEBUG_CHUNK
 // Every request is acknowledged, so the sender can be a simple stop-and-wait
 // loop: 'N','R' | version | op echo | session u16 LE | chunk echo u16 LE |
 // status | expected chunk u16 LE | 0
@@ -267,8 +266,8 @@ constexpr uint64_t PIN_MASK_ALL_OK = PIN_MASK_VALID;
 // are straight-through, so SDA/SCL land on the same positions as on PORT.A
 // (pin1=SDA, pin2=SCL). Both joystick generations are probed at boot; whichever
 // answers is used.
-constexpr int JOY_I2C_SDA = 9;    // PORT.B pin 1 (PORT.A equivalent: G2)
-constexpr int JOY_I2C_SCL = 8;    // PORT.B pin 2 (PORT.A equivalent: G1)
+constexpr int JOY_I2C_SDA = 9;   // PORT.B pin 1 (PORT.A equivalent: G2)
+constexpr int JOY_I2C_SCL = 8;   // PORT.B pin 2 (PORT.A equivalent: G1)
 constexpr uint8_t JOY2_I2C_ADDR = 0x63;   // Joystick2 (U024-C, STM32G030)
 constexpr uint8_t JOY1_I2C_ADDR = 0x52;   // Joystick (U024, MEGA328P)
 // 100kHz, not 400: PORT.B has no I2C pull-ups of its own (it is a GPIO port),
@@ -302,7 +301,7 @@ constexpr uint32_t JOY_REPROBE_MS = 1000;
 // line to GND when pressed. Grove wiring on the unit: white wire (pin2) = blue
 // button, yellow wire (pin1) = red button — same positions that put blue on G8
 // and red on G9 back when the unit lived on PORT.B.
-constexpr int DUAL_BTN_PIN_BLUE = 18;  // blue button  -> NES B
+constexpr int DUAL_BTN_PIN_BLUE = 18;   // blue button  -> NES B
 constexpr int DUAL_BTN_PIN_RED = 17;   // red button   -> NES A
 
 // NES pad bit layout (matches Pad::setButtons and the UDP protocol).

@@ -37,8 +37,7 @@ class NES;
 #if defined(NES_EMBEDDED) && defined(ESP_PLATFORM)
 #include "esp_heap_caps.h"
 
-template <typename T>
-struct InternalRamAllocator {
+template <typename T> struct InternalRamAllocator {
     using value_type = T;
     InternalRamAllocator() = default;
     template <typename U> InternalRamAllocator(const InternalRamAllocator<U>&) {}
@@ -96,7 +95,10 @@ public:
     // 8KB or coarser, so a slot is always contiguous, but the slots need not be
     // adjacent in the ROM (MMC3 slot 1 and 3 come from unrelated banks) and a
     // 16KB cart mirrors two slots onto the same bytes.
-    virtual bool prgWindows(const uint8_t* win[4]) const { (void)win; return false; }
+    virtual bool prgWindows(const uint8_t* win[4]) const {
+        (void)win;
+        return false;
+    }
 #endif
 
     // Called once per scanline at PPU dot ~260 when rendering enabled (MMC3 IRQ)
@@ -117,10 +119,12 @@ public:
 
     // ---- cartridge expansion audio (VRC6 etc.) ----
     virtual bool hasExpansionAudio() const { return false; }
-    virtual float audioOut() const { return 0.0f; }        // mixed into the APU output
+    virtual float audioOut() const { return 0.0f; }   // mixed into the APU output
     virtual float expansionGain() const { return 0.0f; }   // per-channel scale for the mixer
-    virtual int expansionChannel(int) const { return 0; }  // raw level for the debug scopes
-    void setExpansionMute(int ch, bool on) { if (ch >= 0 && ch < 3) expMute_[ch] = on; }
+    virtual int expansionChannel(int) const { return 0; }   // raw level for the debug scopes
+    void setExpansionMute(int ch, bool on) {
+        if (ch >= 0 && ch < 3) expMute_[ch] = on;
+    }
 
     Mirroring mirroring() const { return mirroring_; }
     bool hasBattery() const { return battery_; }
@@ -174,7 +178,7 @@ class CPU {
 public:
     explicit CPU(NES& nes) : nes_(nes) {}
     void reset();
-    int step();                 // execute one instruction, return cycles
+    int step();   // execute one instruction, return cycles
     void nmi() { nmiPending_ = true; }
     void irq(bool level) { irqLine_ = level; }
     void addStall(int c) { stall_ += c; }
@@ -197,7 +201,10 @@ private:
     uint8_t pop();
     uint8_t status(bool brk) const;
     void setStatus(uint8_t p);
-    void setZN(uint8_t v) { fZ = v == 0; fN = v & 0x80; }
+    void setZN(uint8_t v) {
+        fZ = v == 0;
+        fN = v & 0x80;
+    }
     void branch(bool cond, int& cycles);
 
     // ---- opcode dispatch ----
@@ -218,34 +225,90 @@ private:
 
     // addressing modes (identical semantics to the old lambdas)
     uint16_t amImm() { return pc++; }
-    uint16_t amZp()  { return read(pc++); }
+    uint16_t amZp() { return read(pc++); }
     uint16_t amZpx() { return (read(pc++) + x) & 0xFF; }
     uint16_t amZpy() { return (read(pc++) + y) & 0xFF; }
-    uint16_t amAbs() { uint16_t a = read16(pc); pc += 2; return a; }
-    uint16_t amAbx() { uint16_t b = read16(pc); pc += 2; uint16_t a = b + x; crossed_ = (a & 0xFF00) != (b & 0xFF00); return a; }
-    uint16_t amAby() { uint16_t b = read16(pc); pc += 2; uint16_t a = b + y; crossed_ = (a & 0xFF00) != (b & 0xFF00); return a; }
-    uint16_t amIzx() { uint8_t z = read(pc++) + x; return read(z) | (read((uint8_t)(z + 1)) << 8); }
+    uint16_t amAbs() {
+        uint16_t a = read16(pc);
+        pc += 2;
+        return a;
+    }
+    uint16_t amAbx() {
+        uint16_t b = read16(pc);
+        pc += 2;
+        uint16_t a = b + x;
+        crossed_ = (a & 0xFF00) != (b & 0xFF00);
+        return a;
+    }
+    uint16_t amAby() {
+        uint16_t b = read16(pc);
+        pc += 2;
+        uint16_t a = b + y;
+        crossed_ = (a & 0xFF00) != (b & 0xFF00);
+        return a;
+    }
+    uint16_t amIzx() {
+        uint8_t z = read(pc++) + x;
+        return read(z) | (read((uint8_t)(z + 1)) << 8);
+    }
     uint16_t amIzy() {
         uint8_t z = read(pc++);
         uint16_t b = read(z) | (read((uint8_t)(z + 1)) << 8);
-        uint16_t a = b + y; crossed_ = (a & 0xFF00) != (b & 0xFF00); return a;
+        uint16_t a = b + y;
+        crossed_ = (a & 0xFF00) != (b & 0xFF00);
+        return a;
     }
 
     // operations (identical semantics to the old lambdas)
-    void opLda(uint16_t ad) { a = read(ad); setZN(a); }
-    void opLdx(uint16_t ad) { x = read(ad); setZN(x); }
-    void opLdy(uint16_t ad) { y = read(ad); setZN(y); }
+    void opLda(uint16_t ad) {
+        a = read(ad);
+        setZN(a);
+    }
+    void opLdx(uint16_t ad) {
+        x = read(ad);
+        setZN(x);
+    }
+    void opLdy(uint16_t ad) {
+        y = read(ad);
+        setZN(y);
+    }
     void opAdcv(uint8_t m) {
         int r = a + m + (fC ? 1 : 0);
         fV = (~(a ^ m) & (a ^ r)) & 0x80;
         fC = r > 0xFF;
-        a = (uint8_t)r; setZN(a);
+        a = (uint8_t)r;
+        setZN(a);
     }
-    void opCmpv(uint8_t reg, uint8_t m) { fC = reg >= m; setZN(reg - m); }
-    uint8_t opAslv(uint8_t m) { fC = m & 0x80; m <<= 1; setZN(m); return m; }
-    uint8_t opLsrv(uint8_t m) { fC = m & 0x01; m >>= 1; setZN(m); return m; }
-    uint8_t opRolv(uint8_t m) { bool c = fC; fC = m & 0x80; m = (m << 1) | c; setZN(m); return m; }
-    uint8_t opRorv(uint8_t m) { bool c = fC; fC = m & 0x01; m = (m >> 1) | (c << 7); setZN(m); return m; }
+    void opCmpv(uint8_t reg, uint8_t m) {
+        fC = reg >= m;
+        setZN(reg - m);
+    }
+    uint8_t opAslv(uint8_t m) {
+        fC = m & 0x80;
+        m <<= 1;
+        setZN(m);
+        return m;
+    }
+    uint8_t opLsrv(uint8_t m) {
+        fC = m & 0x01;
+        m >>= 1;
+        setZN(m);
+        return m;
+    }
+    uint8_t opRolv(uint8_t m) {
+        bool c = fC;
+        fC = m & 0x80;
+        m = (m << 1) | c;
+        setZN(m);
+        return m;
+    }
+    uint8_t opRorv(uint8_t m) {
+        bool c = fC;
+        fC = m & 0x01;
+        m = (m >> 1) | (c << 7);
+        setZN(m);
+        return m;
+    }
 
     // Every opcode handler. Named opXX after its opcode byte so the table below
     // can be read against a 6502 opcode matrix.
@@ -259,17 +322,17 @@ class PPU {
 public:
     explicit PPU(NES& nes) : nes_(nes) {}
     void reset();
-    void step();                // one PPU cycle (dot)
+    void step();   // one PPU cycle (dot)
 #ifdef NES_EMBEDDED
-    void stepMany(int dots);    // advance N dots, skipping the ones with no work
+    void stepMany(int dots);   // advance N dots, skipping the ones with no work
 #endif
 
-    uint8_t readReg(uint16_t addr);       // $2000-$2007
+    uint8_t readReg(uint16_t addr);   // $2000-$2007
     void writeReg(uint16_t addr, uint8_t v);
     void writeOamDma(uint8_t v, const uint8_t* page);
 
-    bool frameReady = false;    // set at end of each frame; consumer clears
-    uint32_t frameCount = 0;    // frames since reset/power-on
+    bool frameReady = false;   // set at end of each frame; consumer clears
+    uint32_t frameCount = 0;   // frames since reset/power-on
 #ifdef NES_EMBEDDED
     // When false the framebuffer is left untouched for this frame while every
     // CPU-observable side effect (vblank/NMI, sprite 0 hit, sprite overflow,
@@ -287,12 +350,16 @@ public:
     // Const accessors only, so they cannot perturb what they measure.
     struct DbgState {
         uint8_t ctrl, mask, status, oamAddr, readBuffer, openBus;
-        uint16_t v, t; uint8_t fineX; bool w;
-        int scanline, dot; bool oddFrame; uint32_t frameCount;
+        uint16_t v, t;
+        uint8_t fineX;
+        bool w;
+        int scanline, dot;
+        bool oddFrame;
+        uint32_t frameCount;
     };
     DbgState dbgState() const {
-        return {ctrl_, mask_, status_, oamAddr_, readBuffer_, openBus_,
-                v_, t_, fineX_, w_, scanline_, dot_, oddFrame_, frameCount};
+        return {ctrl_, mask_,  status_, oamAddr_,  readBuffer_, openBus_,  v_,
+                t_,    fineX_, w_,      scanline_, dot_,        oddFrame_, frameCount};
     }
     const uint8_t* dbgOam() const { return oam_; }
     const uint8_t* dbgVram() const { return vram_; }
@@ -305,7 +372,7 @@ private:
 
     // registers
     uint8_t ctrl_ = 0, mask_ = 0, status_ = 0, oamAddr_ = 0;
-    uint16_t v_ = 0, t_ = 0;    // loopy
+    uint16_t v_ = 0, t_ = 0;   // loopy
     uint8_t fineX_ = 0;
     bool w_ = false;
     uint8_t readBuffer_ = 0;
@@ -313,7 +380,7 @@ private:
 
     uint8_t oam_[256] = {};
     uint8_t palette_[32] = {};
-    uint8_t vram_[0x800] = {};  // 2KB nametable RAM
+    uint8_t vram_[0x800] = {};   // 2KB nametable RAM
 
     int scanline_ = 261, dot_ = 0;
     bool oddFrame_ = false;
@@ -328,14 +395,18 @@ private:
 public:
     // No-op off the embedded build; defined in ppu.cpp (NES is incomplete here).
     void refreshChrWindow();
-private:
 
+private:
     // background shifters
     uint16_t bgPatLo_ = 0, bgPatHi_ = 0, bgAttrLo_ = 0, bgAttrHi_ = 0;
     uint8_t ntByte_ = 0, atByte_ = 0, patLo_ = 0, patHi_ = 0;
 
     // sprite evaluation for current scanline
-    struct Sprite { uint8_t patLo, patHi, attr; int x; bool sprite0; };
+    struct Sprite {
+        uint8_t patLo, patHi, attr;
+        int x;
+        bool sprite0;
+    };
     Sprite sprites_[8];
     int spriteCount_ = 0;
 
@@ -396,7 +467,8 @@ private:
     // straight-line code it had before the skip mode existed.
     template <bool Draw> void renderScanline();
     bool hasSprite0() const {
-        for (int i = 0; i < spriteCount_; i++) if (sprites_[i].sprite0) return true;
+        for (int i = 0; i < spriteCount_; i++)
+            if (sprites_[i].sprite0) return true;
         return false;
     }
 #endif
@@ -408,18 +480,18 @@ class APU {
 public:
     explicit APU(NES& nes) : nes_(nes) {}
     void reset();
-    void step();                // one CPU cycle
+    void step();   // one CPU cycle
 #ifdef NES_EMBEDDED
-    void stepMany(int cycles);  // advance N CPU cycles, batched to event bounds
+    void stepMany(int cycles);   // advance N CPU cycles, batched to event bounds
 #endif
     uint8_t readStatus();
     void writeReg(uint16_t addr, uint8_t v);
     bool irqPending() const { return frameIrq_ || dmcIrq_; }
 
     // audio output: float samples accumulated per frame (stereo)
-    float sampleBuf[2048] = {};      // left
+    float sampleBuf[2048] = {};   // left
 #ifndef NES_EMBEDDED
-    float sampleBufR[2048] = {};     // right
+    float sampleBufR[2048] = {};   // right
 #endif
     int sampleCount = 0;
     // per-channel raw levels at each sample point (debug scope): p1,p2,tri,noise,dmc
@@ -453,13 +525,22 @@ public:
     // test: the $4015 inputs plus the frame sequencer position.
     struct DbgState {
         int p1len, p2len, triLen, noiseLen, dmcBytes;
-        int frameStep, frameCycles; bool frameIrq, dmcIrq, oddCycle;
+        int frameStep, frameCycles;
+        bool frameIrq, dmcIrq, oddCycle;
         int sampleCount;
     };
     DbgState dbgState() const {
-        return {pulse1_.lengthCounter, pulse2_.lengthCounter, triangle_.lengthCounter,
-                noise_.lengthCounter, dmc_.bytesRemaining, frameStep_, frameCounterCycles_,
-                frameIrq_, dmcIrq_, oddCycle_, sampleCount};
+        return {pulse1_.lengthCounter,
+                pulse2_.lengthCounter,
+                triangle_.lengthCounter,
+                noise_.lengthCounter,
+                dmc_.bytesRemaining,
+                frameStep_,
+                frameCounterCycles_,
+                frameIrq_,
+                dmcIrq_,
+                oddCycle_,
+                sampleCount};
     }
 #endif
     float mix() const;   // mono sum; also used by the oscilloscope probe
@@ -471,15 +552,22 @@ private:
 
     struct Pulse {
         bool enabled = false;
-        uint8_t duty = 0; int dutyPos = 0;
-        uint16_t timer = 0; int timerCounter = 0;
-        int lengthCounter = 0; bool lengthHalt = false;
+        uint8_t duty = 0;
+        int dutyPos = 0;
+        uint16_t timer = 0;
+        int timerCounter = 0;
+        int lengthCounter = 0;
+        bool lengthHalt = false;
         // envelope
-        bool constVolume = false; uint8_t volume = 0;
-        bool envStart = false; int envDivider = 0; int envDecay = 0;
+        bool constVolume = false;
+        uint8_t volume = 0;
+        bool envStart = false;
+        int envDivider = 0;
+        int envDecay = 0;
         // sweep
         bool sweepEnabled = false, sweepNegate = false, sweepReload = false;
-        uint8_t sweepPeriod = 0, sweepShift = 0; int sweepDivider = 0;
+        uint8_t sweepPeriod = 0, sweepShift = 0;
+        int sweepDivider = 0;
         bool isPulse2 = false;
         int output() const;
         void stepTimer();
@@ -493,9 +581,13 @@ private:
 
     struct Triangle {
         bool enabled = false;
-        uint16_t timer = 0; int timerCounter = 0;
-        int lengthCounter = 0; bool lengthHalt = false;
-        int linearCounter = 0; uint8_t linearReload = 0; bool linearReloadFlag = false;
+        uint16_t timer = 0;
+        int timerCounter = 0;
+        int lengthCounter = 0;
+        bool lengthHalt = false;
+        int linearCounter = 0;
+        uint8_t linearReload = 0;
+        bool linearReloadFlag = false;
         int seqPos = 0;
         int output() const;
         void stepTimer();
@@ -508,10 +600,15 @@ private:
         bool enabled = false;
         bool mode = false;
         uint16_t shiftReg = 1;
-        int timerPeriod = 0; int timerCounter = 0;
-        int lengthCounter = 0; bool lengthHalt = false;
-        bool constVolume = false; uint8_t volume = 0;
-        bool envStart = false; int envDivider = 0; int envDecay = 0;
+        int timerPeriod = 0;
+        int timerCounter = 0;
+        int lengthCounter = 0;
+        bool lengthHalt = false;
+        bool constVolume = false;
+        uint8_t volume = 0;
+        bool envStart = false;
+        int envDivider = 0;
+        int envDecay = 0;
         int output() const;
         void stepTimer();
 #ifdef NES_EMBEDDED
@@ -523,12 +620,15 @@ private:
     struct DMC {
         bool enabled = false;
         bool irqEnable = false, loop = false;
-        int timerPeriod = 0; int timerCounter = 0;
+        int timerPeriod = 0;
+        int timerCounter = 0;
         uint8_t outputLevel = 0;
         uint16_t sampleAddr = 0, currentAddr = 0;
         int sampleLength = 0, bytesRemaining = 0;
-        uint8_t shiftReg = 0; int bitsRemaining = 0;
-        bool bufferFilled = false; uint8_t buffer = 0;
+        uint8_t shiftReg = 0;
+        int bitsRemaining = 0;
+        bool bufferFilled = false;
+        uint8_t buffer = 0;
         bool silence = true;
     } dmc_;
 
@@ -610,6 +710,7 @@ public:
         shift_ = (shift_ >> 1) | 0x80;
         return r;
     }
+
 private:
     uint8_t buttons_ = 0, shift_ = 0;
     bool strobe_ = false;
@@ -623,8 +724,8 @@ public:
     }
 
     bool loadRom(const uint8_t* data, size_t size);
-    void reset();      // RESET button: chips reset, RAM preserved (bug techniques!)
-    void powerOn();    // power cycle: RAM cleared + reset
+    void reset();   // RESET button: chips reset, RAM preserved (bug techniques!)
+    void powerOn();   // power cycle: RAM cleared + reset
     void runFrame();
     void runCycles(int n);   // sub-frame stepping for very low clock rates
 
@@ -645,9 +746,9 @@ public:
     bool pinOk[61];
     // derived signal masks/flags, recomputed by updatePins()
     uint16_t prgAddrAnd = 0x7FFF;   // CPU A0-A14 to cart
-    uint8_t  prgDataAnd = 0xFF;     // CPU D0-D7
+    uint8_t prgDataAnd = 0xFF;   // CPU D0-D7
     uint16_t chrAddrAnd = 0x3FFF;   // PPU A0-A13 to cart
-    uint8_t  chrDataAnd = 0xFF;     // PPU D0-D7
+    uint8_t chrDataAnd = 0xFF;   // PPU D0-D7
     bool romselOk = true, m2Ok = true, rwOk = true, irqOk = true;
     bool ppuRdOk = true, ppuWrOk = true, ciramCeOk = true, ciramA10Ok = true;
     bool soundOk = true, powerOk = true;
@@ -698,15 +799,18 @@ public:
 
 #ifndef NES_EMBEDDED
     // ---- oscilloscope probe (hover a pin in the UI) ----
-    int probePin = 0;               // 1-60, 0 = no probe
-    uint8_t probeBuf[2048] = {};    // one sample per CPU cycle (~1.1ms window)
+    int probePin = 0;   // 1-60, 0 = no probe
+    uint8_t probeBuf[2048] = {};   // one sample per CPU cycle (~1.1ms window)
     int probePos = 0;
-    uint16_t lastCpuAddr = 0; uint8_t lastCpuData = 0; bool lastCpuWrite = false;
-    uint16_t lastPpuAddr = 0; uint8_t lastPpuData = 0;
+    uint16_t lastCpuAddr = 0;
+    uint8_t lastCpuData = 0;
+    bool lastCpuWrite = false;
+    uint16_t lastPpuAddr = 0;
+    uint8_t lastPpuData = 0;
     bool ppuRdPulse = false, ppuWrPulse = false, lastCiramA10 = false;
     void probeSample();
     uint8_t probeLevelFor(int pin);
-#endif // !NES_EMBEDDED
+#endif   // !NES_EMBEDDED
 
     uint64_t cycleCount = 0;
     uint8_t cpuReadBus(uint16_t addr);
@@ -737,9 +841,7 @@ public:
     }
     // The IRQ line as the CPU sees it. Inlined and short-circuited so the common
     // no-IRQ-mapper case costs two predictable branches instead of a virtual call.
-    bool irqLineLevel() {
-        return apu.irqPending() || (mapperIrqUsable_ && mapper->irqPending());
-    }
+    bool irqLineLevel() { return apu.irqPending() || (mapperIrqUsable_ && mapper->irqPending()); }
 
 #ifdef NES_EMBEDDED
     // Cached PRG bank pointers for $8000-$FFFF, the CPU-side analogue of the
@@ -780,4 +882,4 @@ extern const uint32_t NES_PALETTE[64];
 // APU length counter table (shared)
 extern const uint8_t LENGTH_TABLE[32];
 
-} // namespace nes
+}   // namespace nes
