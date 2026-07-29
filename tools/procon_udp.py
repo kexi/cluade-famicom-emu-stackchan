@@ -76,11 +76,11 @@ BIT_NAMES = [
 # additionally mapped to NES B so players can rest a second finger on it for
 # rapid fire without re-gripping the pad.
 BUTTON_MAP = {
-    1: NES_A,       # A (right)
-    0: NES_B,       # B (bottom)
-    2: NES_B,       # Y (left) -- duplicate binding for rapid fire
+    1: NES_A,  # A (right)
+    0: NES_B,  # B (bottom)
+    2: NES_B,  # Y (left) -- duplicate binding for rapid fire
     6: NES_SELECT,  # minus
-    7: NES_START,   # plus
+    7: NES_START,  # plus
 }
 
 # Some SDL builds expose the D-pad as buttons 11-14 instead of a hat.
@@ -125,7 +125,7 @@ HID_RIGHT_BUTTONS = {
 }
 HID_SHARED_BUTTONS = {
     0x01: NES_SELECT,  # minus
-    0x02: NES_START,   # plus
+    0x02: NES_START,  # plus
 }
 HID_LEFT_BUTTONS = {
     0x02: NES_UP,
@@ -191,16 +191,21 @@ class HidProController:
     def _send_subcommand(self, subcommand, argument):
         # Rumble payload is mandatory filler; the controller ignores a subcommand
         # sent without it. The low nibble counter must advance per packet.
+        #
+        # 整形を止めているのは、中央の 8 バイトが左右ランブルの 4 バイト × 2 だから。
+        # ruff format に任せると 1 バイト 1 行に展開され、この対称性が読めなくなる
+        # fmt: off
         packet = bytes(
             [
                 0x01,
                 self.packet_counter & 0x0F,
-                0x00, 0x01, 0x40, 0x40,
-                0x00, 0x01, 0x40, 0x40,
+                0x00, 0x01, 0x40, 0x40,  # 左ランブル (ニュートラル)
+                0x00, 0x01, 0x40, 0x40,  # 右ランブル (ニュートラル)
                 subcommand,
                 argument,
             ]
         )
+        # fmt: on
         self.packet_counter += 1
         self.device.write(packet + b"\x00" * (64 - len(packet)))
 
@@ -527,7 +532,9 @@ def open_hid_backend():
     """Open the Pro Controller through hidapi, or return None if unavailable."""
     is_hid_importable = hid is not None
     if not is_hid_importable:
-        print("hidapi が import できません (uv run なら自動で入ります)。", file=sys.stderr)
+        print(
+            "hidapi が import できません (uv run なら自動で入ります)。", file=sys.stderr
+        )
         return None
 
     try:
@@ -598,7 +605,8 @@ def run_loop(sender, rate_hz, backend="auto"):
         )
         if is_suspect:
             print(
-                "SDL が押されていない入力を報告しています。hidapi にフォールバックします...",
+                "SDL が押されていない入力を報告しています。"
+                "hidapi にフォールバックします...",
                 file=sys.stderr,
             )
             joystick = None
@@ -611,7 +619,10 @@ def run_loop(sender, rate_hz, backend="auto"):
     if has_no_backend:
         print("エラー: コントローラを開けませんでした。", file=sys.stderr)
         print("", file=sys.stderr)
-        print("Switch Pro コントローラを USB ケーブルで Mac に接続してください。", file=sys.stderr)
+        print(
+            "Switch Pro コントローラを USB ケーブルで Mac に接続してください。",
+            file=sys.stderr,
+        )
         print("接続済みのデバイスは --list で確認できます。", file=sys.stderr)
         print("", file=sys.stderr)
         print(HANDSHAKE_HINT, file=sys.stderr)
@@ -696,7 +707,9 @@ def run_loop(sender, rate_hz, backend="auto"):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Switch Pro コントローラの入力を UDP で NES エミュレータへ送信します。"
+        description=(
+            "Switch Pro コントローラの入力を UDP で NES エミュレータへ送信します。"
+        )
     )
     parser.add_argument(
         "--host",
@@ -704,7 +717,10 @@ def parse_args(argv=None):
         help=f"送信先アドレス (default: {DEFAULT_HOST} = ブロードキャスト)",
     )
     parser.add_argument(
-        "--port", type=int, default=DEFAULT_PORT, help=f"送信先ポート (default: {DEFAULT_PORT})"
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"送信先ポート (default: {DEFAULT_PORT})",
     )
     parser.add_argument(
         "--rate",
@@ -716,7 +732,10 @@ def parse_args(argv=None):
         "--backend",
         choices=("auto", "sdl", "hid"),
         default="auto",
-        help="入力バックエンド (default: auto = SDL 失敗時に hidapi へ自動フォールバック)",
+        help=(
+            "入力バックエンド "
+            "(default: auto = SDL 失敗時に hidapi へ自動フォールバック)"
+        ),
     )
     parser.add_argument(
         "--list", action="store_true", help="ジョイスティックを列挙して終了する"

@@ -187,17 +187,20 @@ def build_rom_data(session: int, index: int, payload: bytes) -> bytes:
     datagram size, so the device can reject a truncated frame instead of
     silently storing a short chunk.
     """
-    return struct.pack(
-        "<2sBBHBBHH",
-        PROTOCOL_MAGIC,
-        PROTOCOL_VERSION,
-        TYPE_ROM,
-        session & 0xFFFF,
-        ROM_OP_DATA,
-        0,
-        index & 0xFFFF,
-        len(payload),
-    ) + payload
+    return (
+        struct.pack(
+            "<2sBBHBBHH",
+            PROTOCOL_MAGIC,
+            PROTOCOL_VERSION,
+            TYPE_ROM,
+            session & 0xFFFF,
+            ROM_OP_DATA,
+            0,
+            index & 0xFFFF,
+            len(payload),
+        )
+        + payload
+    )
 
 
 def build_rom_mark(session: int, op: int) -> bytes:
@@ -309,8 +312,15 @@ class PinRelay:
         try:
             sock.settimeout(DEBUG_TIMEOUT_S)
             sock.sendto(
-                struct.pack("<2sBBHBB", PROTOCOL_MAGIC, PROTOCOL_VERSION,
-                            TYPE_DEBUG, seq, flags, 0),
+                struct.pack(
+                    "<2sBBHBB",
+                    PROTOCOL_MAGIC,
+                    PROTOCOL_VERSION,
+                    TYPE_DEBUG,
+                    seq,
+                    flags,
+                    0,
+                ),
                 (host, self.device_port),
             )
             parts: dict[int, bytes] = {}
@@ -329,7 +339,7 @@ class PinRelay:
                 if data[2] != PROTOCOL_VERSION:
                     continue
                 if (data[5] | (data[6] << 8)) != seq:
-                    continue      # stale answer to an earlier query
+                    continue  # stale answer to an earlier query
                 nparts = data[4]
                 parts[data[3]] = data[DEBUG_HEADER:]
             if not nparts or len(parts) != nparts:
@@ -355,7 +365,7 @@ class PinRelay:
         """
         session = random.randrange(1, 0x10000)
         crc = zlib.crc32(data) & 0xFFFFFFFF
-        chunks = [data[i:i + ROM_CHUNK] for i in range(0, len(data), ROM_CHUNK)]
+        chunks = [data[i : i + ROM_CHUNK] for i in range(0, len(data), ROM_CHUNK)]
         started = time.monotonic()
         retries = 0
         report = _progress_thinner(on_progress, len(chunks))
@@ -370,7 +380,9 @@ class PinRelay:
             index = 0
             while index < len(chunks):
                 packet = build_rom_data(session, index, chunks[index])
-                ack = self._rom_send_until_ack(sock, host, session, ROM_OP_DATA, index, packet)
+                ack = self._rom_send_until_ack(
+                    sock, host, session, ROM_OP_DATA, index, packet
+                )
                 retries += ack["retries"]
                 is_out_of_order = ack["status"] == ROM_STATUS_SEQ
                 if is_out_of_order:
@@ -379,14 +391,18 @@ class PinRelay:
                     # left us one chunk ahead of its cursor.
                     expected = ack["expected"]
                     if expected > len(chunks):
-                        raise RomTransferError(ROM_STATUS_SEQ, "device asked for a chunk past the end")
+                        raise RomTransferError(
+                            ROM_STATUS_SEQ, "device asked for a chunk past the end"
+                        )
                     index = expected
                     retries += 1
                     if retries > ROM_MAX_TOTAL_RETRIES:
                         raise RomTransferError(None, "too many retries")
                     continue
                 if ack["status"] != ROM_STATUS_OK:
-                    raise RomTransferError(ack["status"], ROM_STATUS_NAMES.get(ack["status"], "?"))
+                    raise RomTransferError(
+                        ack["status"], ROM_STATUS_NAMES.get(ack["status"], "?")
+                    )
                 index += 1
                 report(index, force=index == len(chunks))
                 if retries > ROM_MAX_TOTAL_RETRIES:
@@ -413,7 +429,9 @@ class PinRelay:
         """
         ack = self._rom_send_until_ack(sock, host, session, op, index, packet)
         if ack["status"] != ROM_STATUS_OK:
-            raise RomTransferError(ack["status"], ROM_STATUS_NAMES.get(ack["status"], "?"))
+            raise RomTransferError(
+                ack["status"], ROM_STATUS_NAMES.get(ack["status"], "?")
+            )
         return ack["retries"]
 
     def _rom_send_until_ack(self, sock, host, session, op, index, packet) -> dict:
@@ -437,7 +455,7 @@ class PinRelay:
                     break
                 ack = parse_rom_ack(reply, session, op)
                 if ack is None:
-                    continue      # stale or foreign datagram
+                    continue  # stale or foreign datagram
                 ack["retries"] = attempt
                 return ack
         raise RomTransferError(None, "device did not answer")
@@ -612,7 +630,9 @@ class Handler(SimpleHTTPRequestHandler):
             raw = payload.get("volume")
             # bool is an int subclass, so reject it explicitly rather than
             # silently accepting True as volume 1.
-            valid = isinstance(raw, int) and not isinstance(raw, bool) and 0 <= raw <= 255
+            valid = (
+                isinstance(raw, int) and not isinstance(raw, bool) and 0 <= raw <= 255
+            )
             if not valid:
                 self._reply(400, {"error": "bad volume"})
                 return
@@ -647,10 +667,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8000, help="HTTP port")
     parser.add_argument("--device-port", type=int, default=5555, help="CoreS3 UDP port")
-    parser.add_argument("--dir", default=None, help="directory to serve (default: web/)")
+    parser.add_argument(
+        "--dir", default=None, help="directory to serve (default: web/)"
+    )
     args = parser.parse_args()
 
-    root = Path(args.dir) if args.dir else Path(__file__).resolve().parent.parent / "web"
+    root = (
+        Path(args.dir) if args.dir else Path(__file__).resolve().parent.parent / "web"
+    )
     if not root.is_dir():
         print(f"no such directory: {root}", file=sys.stderr)
         return 1

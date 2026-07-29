@@ -50,13 +50,19 @@ check:
     clang++ -std=c++17 -fsyntax-only core/*.cpp
     clang++ -std=c++17 -DNES_EMBEDDED -fsyntax-only core/*.cpp
 
-# コードを整形 (.clang-format 準拠)
+# コードを整形 (C++ は .clang-format、Python は ruff.toml 準拠)
 format:
     clang-format -i core/*.cpp core/*.h m5stack/src/*.cpp m5stack/src/*.h
+    ruff format tools/
 
 # 整形漏れがないか検査 (差分があれば失敗)
 format-check:
     clang-format --dry-run --Werror core/*.cpp core/*.h m5stack/src/*.cpp m5stack/src/*.h
+    ruff format --check tools/
+
+# Python の静的解析 (ruff.toml 準拠。PEP 8 + pyflakes + import 整列)
+lint-py:
+    ruff check tools/
 
 # コアの静的解析 (.clang-tidy 準拠)。m5stack/src は対象外 — ESP-IDF/Arduino の
 # ヘッダが必要で、PlatformIO の toolchain 抜きには単体でパースできない

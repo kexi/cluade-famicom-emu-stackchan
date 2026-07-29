@@ -23,7 +23,7 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - run: nix develop --command just check
 
-  # 整形漏れ (clang-format) と静的解析 (clang-tidy)
+  # 整形漏れ (clang-format / ruff format) と静的解析 (clang-tidy / ruff check)
   lint:
     runs-on: ubuntu-latest
     permissions:
@@ -35,6 +35,7 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - run: nix develop --command just format-check
       - run: nix develop --command just tidy
+      - run: nix develop --command just lint-py
 
   # Web (WASM) ビルド
   build-web:
