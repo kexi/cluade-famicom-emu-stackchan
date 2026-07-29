@@ -50,19 +50,28 @@ check:
     clang++ -std=c++17 -fsyntax-only core/*.cpp
     clang++ -std=c++17 -DNES_EMBEDDED -fsyntax-only core/*.cpp
 
-# コードを整形 (C++ は .clang-format、Python は ruff.toml 準拠)
+# コードを整形 (C++ は .clang-format、Python は ruff.toml、JS は .oxfmtrc.json 準拠)
+#
+# oxfmt に web/*.js を明示するのは、ディレクトリを渡すと index.html まで
+# 整形対象に入るため (HTML の整形は今回の範囲外)
 format:
     clang-format -i core/*.cpp core/*.h m5stack/src/*.cpp m5stack/src/*.h
     ruff format tools/
+    oxfmt 'web/*.js'
 
 # 整形漏れがないか検査 (差分があれば失敗)
 format-check:
     clang-format --dry-run --Werror core/*.cpp core/*.h m5stack/src/*.cpp m5stack/src/*.h
     ruff format --check tools/
+    oxfmt --check 'web/*.js'
 
 # Python の静的解析 (ruff.toml 準拠。PEP 8 + pyflakes + import 整列)
 lint-py:
     ruff check tools/
+
+# JS の静的解析 (.oxlintrc.json 準拠)。warning も CI を落とすため --deny-warnings
+lint-js:
+    oxlint --deny-warnings web/
 
 # コアの静的解析 (.clang-tidy 準拠)。m5stack/src は対象外 — ESP-IDF/Arduino の
 # ヘッダが必要で、PlatformIO の toolchain 抜きには単体でパースできない

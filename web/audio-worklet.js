@@ -2,7 +2,7 @@
 class NesAudioProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.capacity = 16384;          // frames (L,R pairs)
+    this.capacity = 16384; // frames (L,R pairs)
     this.ring = new Float32Array(this.capacity * 2);
     this.readPos = 0;
     this.writePos = 0;
@@ -10,7 +10,7 @@ class NesAudioProcessor extends AudioWorkletProcessor {
     this.lastL = 0;
     this.lastR = 0;
     this.port.onmessage = (e) => {
-      const s = e.data;                 // interleaved L,R
+      const s = e.data; // interleaved L,R
       const frames = s.length >> 1;
       for (let i = 0; i < frames; i++) {
         if (this.available >= this.capacity) break; // drop on overflow
@@ -31,7 +31,7 @@ class NesAudioProcessor extends AudioWorkletProcessor {
         this.readPos = (this.readPos + 1) % this.capacity;
         this.available--;
       }
-      outL[i] = this.lastL;   // hold last sample on underrun
+      outL[i] = this.lastL; // hold last sample on underrun
       outR[i] = this.lastR;
     }
     return true;

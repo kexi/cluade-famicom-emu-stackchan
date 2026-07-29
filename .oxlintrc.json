@@ -1,0 +1,60 @@
+// web/*.js の静的解析設定。C++ 側の .clang-tidy / Python 側の ruff.toml [lint]
+// と同じ立ち位置で、just lint-js と CI から参照される
+{
+  "$schema": "https://raw.githubusercontent.com/oxc-project/oxc/main/npm/oxlint/configuration_schema.json",
+
+  // 既定の correctness のみ。suspicious 以上を入れると既存コードの書き味を
+  // 変えるだけの指摘が大量に出る (ruff で select を E/W/F/I に絞ったのと同じ判断)
+  "categories": {
+    "correctness": "warn"
+  },
+
+  // ブラウザのメインスレッド (main.js / i18n.js) と AudioWorklet の
+  // グローバルスコープ (audio-worklet.js) が混在する
+  "env": {
+    "browser": true,
+    "es2022": true,
+    "worker": true
+  },
+
+  "globals": {
+    // audio-worklet.js は AudioWorkletGlobalScope で動くため browser env に
+    // 含まれない。registerProcessor / sampleRate も同じスコープ由来
+    "AudioWorkletProcessor": "readonly",
+    "registerProcessor": "readonly",
+    // build.sh の emcc -sEXPORT_NAME で web/nes.js が定義するファクトリ
+    "createNesModule": "readonly",
+    // web/smb-ram.js が window に生やす RAM ラベル表
+    "SMB_RAM_LABELS": "readonly"
+  },
+
+  "rules": {
+    // catch (_) {} / catch (e) {} は「失敗しても続行する」ことを示す意図的な
+    // 書き方 (localStorage が private mode で投げる等)。引数を省く
+    // optional catch binding への書き換えは挙動に関係ない差分を広げるので、
+    // 名前で無視する側に倒す
+    "no-unused-vars": [
+      "warn",
+      {
+        "caughtErrorsIgnorePattern": "^(_|e)$"
+      }
+    ],
+
+    // main.js の `buttons = (buttons & 0) | bits` を「常に 0」と指摘するが、
+    // これはタッチパッドが状態を上書きすることを明示する意図的な書き方。
+    // 単純化するとレビュー時に「なぜ上書きなのか」が読めなくなる
+    "oxc/erasing-op": "off",
+
+    // pinDesc() は /^CPU A/.test(name) と name === 'GND' を同じ if 連鎖で
+    // 並べている。startsWith に変えると等価だが連鎖の見た目が不揃いになる。
+    // このエミュレータは実機と挙動比較されるため、機能に効かない書き換えは
+    // 入れない方針
+    "unicorn/prefer-string-starts-ends-with": "off"
+  },
+
+  // 整形と同じ理由でビルド生成物・機械生成データは対象外
+  "ignorePatterns": [
+    "web/nes.js", // build.sh の emcc -o 出力
+    "web/smb-ram.js" // SMBDIS.ASM から抽出した RAM ラベル表
+  ]
+}

@@ -64,7 +64,10 @@
   }
   function applyLanguage() {
     document.documentElement.lang = lang;
-    const set = (id, key) => { const el = document.getElementById(id); if (el) el.textContent = t(key); };
+    const set = (id, key) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = t(key);
+    };
     set('lbl-open', 'openRom');
     set('btn-power', 'power');
     set('btn-reset', 'reset');
@@ -128,8 +131,12 @@
   if (!(masterVolume >= 0 && masterVolume <= 1.5)) masterVolume = 1;
 
   // fallback ring buffer for ScriptProcessorNode (insecure contexts have no AudioWorklet)
-  const fallbackRing = new Float32Array(16384 * 2);   // interleaved L,R
-  let fbRead = 0, fbWrite = 0, fbAvail = 0, fbLast = 0, fbLastR = 0;
+  const fallbackRing = new Float32Array(16384 * 2); // interleaved L,R
+  let fbRead = 0,
+    fbWrite = 0,
+    fbAvail = 0,
+    fbLast = 0,
+    fbLastR = 0;
   let pushSamples = null;
 
   function makeMasterGain() {
@@ -202,31 +209,65 @@
     }
   }
   ['touchstart', 'mousedown', 'keydown'].forEach((ev) =>
-    document.addEventListener(ev, resumeAudio, { once: false, passive: true }));
+    document.addEventListener(ev, resumeAudio, { once: false, passive: true }),
+  );
 
   // ------------------------------------------------------------------ input
   let buttons = 0; // bit0:A 1:B 2:Select 3:Start 4:Up 5:Down 6:Left 7:Right
 
   const KEYMAP = {
-    KeyX: 1, KeyZ: 2, ShiftRight: 4, ShiftLeft: 4, Enter: 8,
-    ArrowUp: 16, ArrowDown: 32, ArrowLeft: 64, ArrowRight: 128,
+    KeyX: 1,
+    KeyZ: 2,
+    ShiftRight: 4,
+    ShiftLeft: 4,
+    Enter: 8,
+    ArrowUp: 16,
+    ArrowDown: 32,
+    ArrowLeft: 64,
+    ArrowRight: 128,
   };
   function toggleFullscreen() {
     if (document.fullscreenElement) document.exitFullscreen();
-    else document.getElementById('app').requestFullscreen().catch(() => {});
+    else
+      document
+        .getElementById('app')
+        .requestFullscreen()
+        .catch(() => {});
   }
 
   document.addEventListener('keydown', (e) => {
-    if (e.code === 'KeyF' && !e.repeat) { toggleFullscreen(); e.preventDefault(); return; }
-    if (e.code === 'KeyR' && !e.repeat) { setResetHold(true); e.preventDefault(); return; }
-    if (e.code === 'KeyD' && !e.repeat) { document.getElementById('btn-debug').click(); e.preventDefault(); return; }
+    if (e.code === 'KeyF' && !e.repeat) {
+      toggleFullscreen();
+      e.preventDefault();
+      return;
+    }
+    if (e.code === 'KeyR' && !e.repeat) {
+      setResetHold(true);
+      e.preventDefault();
+      return;
+    }
+    if (e.code === 'KeyD' && !e.repeat) {
+      document.getElementById('btn-debug').click();
+      e.preventDefault();
+      return;
+    }
     const bit = KEYMAP[e.code];
-    if (bit) { buttons |= bit; e.preventDefault(); }
+    if (bit) {
+      buttons |= bit;
+      e.preventDefault();
+    }
   });
   document.addEventListener('keyup', (e) => {
-    if (e.code === 'KeyR') { setResetHold(false); e.preventDefault(); return; }
+    if (e.code === 'KeyR') {
+      setResetHold(false);
+      e.preventDefault();
+      return;
+    }
     const bit = KEYMAP[e.code];
-    if (bit) { buttons &= ~bit; e.preventDefault(); }
+    if (bit) {
+      buttons &= ~bit;
+      e.preventDefault();
+    }
   });
 
   // virtual pad: multi-touch with slide support
@@ -238,8 +279,7 @@
     for (const el of padButtons) {
       const r = el.getBoundingClientRect();
       // generous hit margin for small screens
-      if (x >= r.left - 8 && x <= r.right + 8 && y >= r.top - 8 && y <= r.bottom + 8)
-        return el;
+      if (x >= r.left - 8 && x <= r.right + 8 && y >= r.top - 8 && y <= r.bottom + 8) return el;
     }
     return null;
   }
@@ -266,7 +306,8 @@
     refreshPadState();
   }
   ['touchstart', 'touchmove', 'touchend', 'touchcancel'].forEach((ev) =>
-    pad.addEventListener(ev, onTouch, { passive: false }));
+    pad.addEventListener(ev, onTouch, { passive: false }),
+  );
 
   // ------------------------------------------------------------------ SRAM save
   let romKey = null;
@@ -279,7 +320,9 @@
     const data = Module.HEAPU8.subarray(ptr, ptr + size);
     let bin = '';
     for (let i = 0; i < size; i++) bin += String.fromCharCode(data[i]);
-    try { localStorage.setItem('sram:' + romKey, btoa(bin)); } catch (_) {}
+    try {
+      localStorage.setItem('sram:' + romKey, btoa(bin));
+    } catch (_) {}
   }
   function loadSram() {
     if (!romKey || !api.hasBattery()) return;
@@ -304,35 +347,43 @@
   // No signal: animated TV snow. Rendered at the canvas's on-screen
   // resolution rather than 256x240, so the grain stays fine instead of
   // inheriting the emulator's chunky pixels.
-  let snowImage = null, snowView = null, snowW = 0, snowH = 0;
-  let noiseSeed = 0x9E3779B9;
+  let snowImage = null,
+    snowView = null,
+    snowW = 0,
+    snowH = 0;
+  let noiseSeed = 0x9e3779b9;
 
   function ensureSnowBuffer() {
     const r = canvas.getBoundingClientRect();
     const w = Math.max(256, Math.min(1280, Math.round(r.width) || 256));
     const h = Math.max(240, Math.min(960, Math.round(r.height) || 240));
     if (w === snowW && h === snowH && canvas.width === w) return;
-    snowW = w; snowH = h;
-    canvas.width = w; canvas.height = h;
+    snowW = w;
+    snowH = h;
+    canvas.width = w;
+    canvas.height = h;
     snowImage = ctx.createImageData(w, h);
     snowView = new Uint32Array(snowImage.data.buffer);
   }
 
   function drawStatic() {
     ensureSnowBuffer();
-    const view = snowView, len = view.length;
+    const view = snowView,
+      len = view.length;
     // one xorshift32 step feeds four pixels (one per byte) to keep this cheap
     for (let i = 0; i < len; i += 4) {
-      noiseSeed ^= noiseSeed << 13; noiseSeed ^= noiseSeed >>> 17; noiseSeed ^= noiseSeed << 5;
+      noiseSeed ^= noiseSeed << 13;
+      noiseSeed ^= noiseSeed >>> 17;
+      noiseSeed ^= noiseSeed << 5;
       const r = noiseSeed;
-      const a = 30 + (((r & 0xFF) * 210) >> 8);
-      const b = 30 + ((((r >>> 8) & 0xFF) * 210) >> 8);
-      const c = 30 + ((((r >>> 16) & 0xFF) * 210) >> 8);
-      const d = 30 + ((((r >>> 24) & 0xFF) * 210) >> 8);
-      view[i] = 0xFF000000 | (a << 16) | (a << 8) | a;
-      if (i + 1 < len) view[i + 1] = 0xFF000000 | (b << 16) | (b << 8) | b;
-      if (i + 2 < len) view[i + 2] = 0xFF000000 | (c << 16) | (c << 8) | c;
-      if (i + 3 < len) view[i + 3] = 0xFF000000 | (d << 16) | (d << 8) | d;
+      const a = 30 + (((r & 0xff) * 210) >> 8);
+      const b = 30 + ((((r >>> 8) & 0xff) * 210) >> 8);
+      const c = 30 + ((((r >>> 16) & 0xff) * 210) >> 8);
+      const d = 30 + ((((r >>> 24) & 0xff) * 210) >> 8);
+      view[i] = 0xff000000 | (a << 16) | (a << 8) | a;
+      if (i + 1 < len) view[i + 1] = 0xff000000 | (b << 16) | (b << 8) | b;
+      if (i + 2 < len) view[i + 2] = 0xff000000 | (c << 16) | (c << 8) | c;
+      if (i + 3 < len) view[i + 3] = 0xff000000 | (d << 16) | (d << 8) | d;
     }
     ctx.putImageData(snowImage, 0, 0);
   }
@@ -362,7 +413,7 @@
     if (powered) {
       setPower(false);
     } else {
-      api.powerOn();   // 電源投入 = RAMクリア+リセット
+      api.powerOn(); // 電源投入 = RAMクリア+リセット
       setPower(true);
     }
   });
@@ -375,7 +426,8 @@
     // PRG/CHR copies for dump diagnostics
     const trainer = buf[6] & 0x04;
     const off = 16 + (trainer ? 512 : 0);
-    const prgLen = buf[4] * 16384, chrLen = buf[5] * 8192;
+    const prgLen = buf[4] * 16384,
+      chrLen = buf[5] * 8192;
     lastRom = {
       prg: buf.slice(off, off + prgLen),
       chr: buf.slice(off + prgLen, off + prgLen + chrLen),
@@ -402,9 +454,9 @@
     Module.HEAPU8.set(buf, ptr);
     if (!api.loadRom(buf.length)) {
       let info = '';
-      if (buf.length >= 16 && buf[0] === 0x4E && buf[1] === 0x45 && buf[2] === 0x53 && buf[3] === 0x1A) {
+      if (buf.length >= 16 && buf[0] === 0x4e && buf[1] === 0x45 && buf[2] === 0x53 && buf[3] === 0x1a) {
         const dirty = buf[12] || buf[13] || buf[14] || buf[15];
-        const mapper = (buf[6] >> 4) | (dirty ? 0 : (buf[7] & 0xF0));
+        const mapper = (buf[6] >> 4) | (dirty ? 0 : buf[7] & 0xf0);
         info = ` (mapper ${mapper}, PRG ${buf[4] * 16}KB, CHR ${buf[5] * 8}KB)`;
       } else {
         info = t('noHeader');
@@ -421,7 +473,7 @@
     resumeAudio(); // don't await: resume() only settles after a user gesture
     statusEl.textContent = file.name;
     romLoaded = true;
-    setPower(true);   // 電源ON(パワーオンリセット込み)
+    setPower(true); // 電源ON(パワーオンリセット込み)
   });
 
   // リセットはレベル信号: 押している間はリセット状態(停止)、離した瞬間に再起動
@@ -432,7 +484,10 @@
     resetHeld = held;
     btnReset.classList.toggle('held', held);
     // オフトリガーでリセットベクタから起動
-    if (!held && running) { api.reset(); mirrorResetNow(); }
+    if (!held && running) {
+      api.reset();
+      mirrorResetNow();
+    }
   }
   btnReset.addEventListener('pointerdown', (e) => {
     setResetHold(true);
@@ -444,13 +499,14 @@
   // ---- カセット入替ダイアログ: まるごと or PRG/CHR を別カセットから合体 ----
   const swapPanel = document.getElementById('swap-panel');
   const swapCurrent = document.getElementById('swap-current');
-  let cartPrg = null;   // {name, header(16B), data}
-  let cartChr = null;   // {name, data}
+  let cartPrg = null; // {name, header(16B), data}
+  let cartChr = null; // {name, data}
 
   function parseNes(buf) {
-    if (buf.length < 16 || buf[0] !== 0x4E || buf[1] !== 0x45 || buf[2] !== 0x53 || buf[3] !== 0x1A) return null;
-    const off = 16 + ((buf[6] & 0x04) ? 512 : 0);
-    const prgLen = buf[4] * 16384, chrLen = buf[5] * 8192;
+    if (buf.length < 16 || buf[0] !== 0x4e || buf[1] !== 0x45 || buf[2] !== 0x53 || buf[3] !== 0x1a) return null;
+    const off = 16 + (buf[6] & 0x04 ? 512 : 0);
+    const prgLen = buf[4] * 16384,
+      chrLen = buf[5] * 8192;
     if (off + prgLen + chrLen > buf.length) return null;
     return {
       header: buf.slice(0, 16),
@@ -464,7 +520,9 @@
     document.getElementById('cart-label').textContent =
       cartPrg && cartChr && cartPrg.name !== cartChr.name
         ? strip(cartPrg.name) + ' + ' + strip(cartChr.name)
-        : (cartPrg ? strip(cartPrg.name) : 'CASSETTE');
+        : cartPrg
+          ? strip(cartPrg.name)
+          : 'CASSETTE';
   }
   function setCartSources(name, buf) {
     const p = parseNes(buf);
@@ -479,7 +537,7 @@
     h.set(cartPrg.header);
     h[4] = cartPrg.data.length / 16384;
     h[5] = cartChr.data.length / 8192;
-    h[6] &= ~0x04;   // trainer stripped
+    h[6] &= ~0x04; // trainer stripped
     const img = new Uint8Array(16 + cartPrg.data.length + cartChr.data.length);
     img.set(h);
     img.set(cartPrg.data, 16);
@@ -489,7 +547,10 @@
   // リセットは掛けない(電源入れっぱなし差し替え=バグ技用)
   function applySwap() {
     const img = buildCombined();
-    if (img.length > 4 * 1024 * 1024) { statusEl.textContent = t('tooBig'); return false; }
+    if (img.length > 4 * 1024 * 1024) {
+      statusEl.textContent = t('tooBig');
+      return false;
+    }
     Module.HEAPU8.set(img, api.romBuffer());
     if (!api.swapRom(img.length)) {
       statusEl.textContent = t('unsupportedSwap');
@@ -510,10 +571,17 @@
     e.target.value = '';
     if (!file) return null;
     let buf;
-    try { buf = new Uint8Array(await file.arrayBuffer()); }
-    catch (_) { statusEl.textContent = t('readFail'); return null; }
+    try {
+      buf = new Uint8Array(await file.arrayBuffer());
+    } catch (_) {
+      statusEl.textContent = t('readFail');
+      return null;
+    }
     const p = parseNes(buf);
-    if (!p) { statusEl.textContent = t('unsupportedFmt'); return null; }
+    if (!p) {
+      statusEl.textContent = t('unsupportedFmt');
+      return null;
+    }
     return { name: file.name, header: p.header, prg: p.prg, chr: p.chr };
   }
   document.getElementById('btn-swap').addEventListener('click', () => {
@@ -524,7 +592,7 @@
   document.getElementById('swap-input').addEventListener('change', async (e) => {
     const f = await readSwapFile(e);
     if (!f) return;
-    saveSram();   // 旧カセットのSRAMを保存してから抜く
+    saveSram(); // 旧カセットのSRAMを保存してから抜く
     cartPrg = { name: f.name, header: f.header, data: f.prg };
     cartChr = { name: f.name, data: f.chr };
     applySwap();
@@ -566,12 +634,15 @@
       parts.push(value);
       received += value.length;
       statusEl.textContent = total
-        ? t('urlFetching') + ' ' + Math.round(received / total * 100) + '%'
+        ? t('urlFetching') + ' ' + Math.round((received / total) * 100) + '%'
         : t('urlFetching') + ' ' + Math.round(received / 1024) + 'KB';
     }
     const buf = new Uint8Array(received);
     let at = 0;
-    for (const part of parts) { buf.set(part, at); at += part.length; }
+    for (const part of parts) {
+      buf.set(part, at);
+      at += part.length;
+    }
     return buf;
   }
 
@@ -581,7 +652,8 @@
     // beats surfacing that as an opaque fetch failure.
     url = url.replace(
       /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:blob|raw)\/(.+)$/,
-      'https://raw.githubusercontent.com/$1/$2/$3');
+      'https://raw.githubusercontent.com/$1/$2/$3',
+    );
     statusEl.textContent = t('urlFetching');
     let buf;
     try {
@@ -593,7 +665,10 @@
       return;
     }
     const p = parseNes(buf);
-    if (!p) { statusEl.textContent = t('unsupportedFmt'); return; }
+    if (!p) {
+      statusEl.textContent = t('unsupportedFmt');
+      return;
+    }
     const name = decodeURIComponent((url.split('/').pop() || 'rom.nes').split('?')[0]) || 'rom.nes';
     saveSram();
     cartPrg = { name, header: p.header, data: p.prg };
@@ -650,28 +725,27 @@
     refreshMaster();
     settingsPanel.classList.toggle('show');
   });
-  document.getElementById('settings-close').addEventListener('click', () =>
-    settingsPanel.classList.remove('show'));
+  document.getElementById('settings-close').addEventListener('click', () => settingsPanel.classList.remove('show'));
   refreshMaster();
 
   // ------------------------------------------------------------------ dump check (XEVIOUS判定)
   // reference CRCs from a known-good Xevious (Japan) cartridge
-  const XEV_REF = { name: 'XEVIOUS (J)', prgCrc: 0xEEB16683, prgKB: 32, chrCrc: 0x668B4EE6, chrKB: 8 };
-  let lastRom = null;   // {prg, chr} Uint8Array copies of the loaded ROM
+  const XEV_REF = { name: 'XEVIOUS (J)', prgCrc: 0xeeb16683, prgKB: 32, chrCrc: 0x668b4ee6, chrKB: 8 };
+  let lastRom = null; // {prg, chr} Uint8Array copies of the loaded ROM
 
   const CRC_TABLE = (() => {
     const t = new Uint32Array(256);
     for (let n = 0; n < 256; n++) {
       let c = n;
-      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
       t[n] = c >>> 0;
     }
     return t;
   })();
   function crc32(u8) {
-    let c = 0xFFFFFFFF;
-    for (let i = 0; i < u8.length; i++) c = CRC_TABLE[(c ^ u8[i]) & 0xFF] ^ (c >>> 8);
-    return (c ^ 0xFFFFFFFF) >>> 0;
+    let c = 0xffffffff;
+    for (let i = 0; i < u8.length; i++) c = CRC_TABLE[(c ^ u8[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
   }
   const hex8 = (v) => (v >>> 0).toString(16).toUpperCase().padStart(8, '0');
 
@@ -681,50 +755,22 @@
     for (let b = 0; b < addrBits; b++) {
       const m = 1 << b;
       let dup = true;
-      for (let a = 0; a < data.length; a++) if (data[a] !== data[a ^ m]) { dup = false; break; }
+      for (let a = 0; a < data.length; a++)
+        if (data[a] !== data[a ^ m]) {
+          dup = false;
+          break;
+        }
       if (dup) stuck.push(b);
     }
     return stuck;
   }
-  // If a single swapped address/data line reproduces the reference CRC,
-  // the dumper's bus is miswired — report which lines.
-  function findBusMiswire(data, refCrc, addrBits) {
-    const buf = new Uint8Array(data.length);
-    for (let i = 0; i < addrBits; i++) {
-      for (let j = i + 1; j < addrBits; j++) {
-        const mi = 1 << i, mj = 1 << j;
-        for (let a = 0; a < data.length; a++) {
-          let b2 = a & ~(mi | mj);
-          if (a & mi) b2 |= mj;
-          if (a & mj) b2 |= mi;
-          buf[b2] = data[a];
-        }
-        if (crc32(buf) === refCrc) return { kind: 'addr', i, j };
-      }
-    }
-    for (let i = 0; i < 8; i++) {
-      for (let j = i + 1; j < 8; j++) {
-        const mi = 1 << i, mj = 1 << j;
-        for (let a = 0; a < data.length; a++) {
-          const v = data[a];
-          let w = v & ~(mi | mj);
-          if (v & mi) w |= mj;
-          if (v & mj) w |= mi;
-          buf[a] = w;
-        }
-        if (crc32(buf) === refCrc) return { kind: 'data', i, j };
-      }
-    }
-    return null;
-  }
-
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const progressBox = document.getElementById('check-progress');
   const progressLabel = document.getElementById('check-progress-label');
   const progressFill = document.getElementById('check-bar-fill');
   function setProgress(label, ratio) {
     progressLabel.textContent = `${label} ${Math.round(ratio * 100)}%`;
-    progressFill.style.width = (ratio * 100) + '%';
+    progressFill.style.width = ratio * 100 + '%';
   }
 
   // CRC32 computed over ~durationMs of wall-clock time, with retro progress
@@ -732,27 +778,24 @@
   // timer throttling doesn't stretch the total duration.
   async function crc32Slow(u8, label, durationMs) {
     const t0 = performance.now();
-    let c = 0xFFFFFFFF;
+    let c = 0xffffffff;
     let processed = 0;
     while (processed < u8.length) {
       const ratio = Math.min(1, (performance.now() - t0) / durationMs);
       const target = Math.floor(u8.length * ratio);
-      for (; processed < target; processed++)
-        c = CRC_TABLE[(c ^ u8[processed]) & 0xFF] ^ (c >>> 8);
+      for (; processed < target; processed++) c = CRC_TABLE[(c ^ u8[processed]) & 0xff] ^ (c >>> 8);
       setProgress(label, processed / u8.length);
       if (processed >= u8.length) break;
       await sleep(40);
     }
     setProgress(label, 1);
-    return (c ^ 0xFFFFFFFF) >>> 0;
+    return (c ^ 0xffffffff) >>> 0;
   }
 
   async function findBusMiswireSlow(data, refCrc, addrBits, label) {
     const combos = [];
-    for (let i = 0; i < addrBits; i++)
-      for (let j = i + 1; j < addrBits; j++) combos.push({ kind: 'addr', i, j });
-    for (let i = 0; i < 8; i++)
-      for (let j = i + 1; j < 8; j++) combos.push({ kind: 'data', i, j });
+    for (let i = 0; i < addrBits; i++) for (let j = i + 1; j < addrBits; j++) combos.push({ kind: 'addr', i, j });
+    for (let i = 0; i < 8; i++) for (let j = i + 1; j < 8; j++) combos.push({ kind: 'data', i, j });
     const buf = new Uint8Array(data.length);
     const DIAG_MS = 1500;
     const t0 = performance.now();
@@ -762,7 +805,8 @@
       const target = Math.max(k + 1, Math.floor(combos.length * ratio));
       for (; k < target; k++) {
         const { kind, i, j } = combos[k];
-        const mi = 1 << i, mj = 1 << j;
+        const mi = 1 << i,
+          mj = 1 << j;
         if (kind === 'addr') {
           for (let a = 0; a < data.length; a++) {
             let b2 = a & ~(mi | mj);
@@ -802,8 +846,7 @@
     const mis = await findBusMiswireSlow(data, refCrc, addrBits, t('xevBusLabel', { label }));
     if (mis) {
       const p = mis.kind === 'addr' ? 'A' : 'D';
-      out += t(mis.kind === 'addr' ? 'xevSwapAddr' : 'xevSwapData',
-               { a: p + mis.i, b: p + mis.j, label }) + '\n';
+      out += t(mis.kind === 'addr' ? 'xevSwapAddr' : 'xevSwapData', { a: p + mis.i, b: p + mis.j, label }) + '\n';
     } else if (!stuck.length) {
       out += t('xevUnknown') + '\n';
     }
@@ -835,23 +878,78 @@
   });
 
   // ------------------------------------------------------------------ cartridge connector (60pin)
-  const PIN_NAMES = [null,
-    'GND', 'CPU A11', 'CPU A10', 'CPU A9', 'CPU A8', 'CPU A7', 'CPU A6', 'CPU A5',
-    'CPU A4', 'CPU A3', 'CPU A2', 'CPU A1', 'CPU A0', 'CPU R/W', '/IRQ', 'GND',
-    'PPU /RD', 'CIRAM A10', 'PPU A6', 'PPU A5', 'PPU A4', 'PPU A3', 'PPU A2',
-    'PPU A1', 'PPU A0', 'PPU D0', 'PPU D1', 'PPU D2', 'PPU D3', '+5V',
-    '+5V', 'M2', 'CPU A12', 'CPU A13', 'CPU A14', 'CPU D7', 'CPU D6', 'CPU D5',
-    'CPU D4', 'CPU D3', 'CPU D2', 'CPU D1', 'CPU D0', '/ROMSEL', 'SOUND IN',
-    'SOUND OUT', 'PPU /WR', 'CIRAM /CE', 'PPU /A13', 'PPU A7', 'PPU A8', 'PPU A9',
-    'PPU A10', 'PPU A11', 'PPU A12', 'PPU A13', 'PPU D7', 'PPU D6', 'PPU D5', 'PPU D4',
-    '/NMI', 'APU /IRQ', 'MAPPER /IRQ',
+  const PIN_NAMES = [
+    null,
+    'GND',
+    'CPU A11',
+    'CPU A10',
+    'CPU A9',
+    'CPU A8',
+    'CPU A7',
+    'CPU A6',
+    'CPU A5',
+    'CPU A4',
+    'CPU A3',
+    'CPU A2',
+    'CPU A1',
+    'CPU A0',
+    'CPU R/W',
+    '/IRQ',
+    'GND',
+    'PPU /RD',
+    'CIRAM A10',
+    'PPU A6',
+    'PPU A5',
+    'PPU A4',
+    'PPU A3',
+    'PPU A2',
+    'PPU A1',
+    'PPU A0',
+    'PPU D0',
+    'PPU D1',
+    'PPU D2',
+    'PPU D3',
+    '+5V',
+    '+5V',
+    'M2',
+    'CPU A12',
+    'CPU A13',
+    'CPU A14',
+    'CPU D7',
+    'CPU D6',
+    'CPU D5',
+    'CPU D4',
+    'CPU D3',
+    'CPU D2',
+    'CPU D1',
+    'CPU D0',
+    '/ROMSEL',
+    'SOUND IN',
+    'SOUND OUT',
+    'PPU /WR',
+    'CIRAM /CE',
+    'PPU /A13',
+    'PPU A7',
+    'PPU A8',
+    'PPU A9',
+    'PPU A10',
+    'PPU A11',
+    'PPU A12',
+    'PPU A13',
+    'PPU D7',
+    'PPU D6',
+    'PPU D5',
+    'PPU D4',
+    '/NMI',
+    'APU /IRQ',
+    'MAPPER /IRQ',
   ];
   const busFront = document.getElementById('bus-front');
   const busBack = document.getElementById('bus-back');
   const pinEls = [null];
-  const manualOff = new Set();   // pins the user broke by clicking
-  let tilt = 0;                  // cartridge tilt in degrees (-6 .. +6)
-  let clockHz = 1789773;         // CPU clock in Hz (1 .. 1789773)
+  const manualOff = new Set(); // pins the user broke by clicking
+  let tilt = 0; // cartridge tilt in degrees (-6 .. +6)
+  let clockHz = 1789773; // CPU clock in Hz (1 .. 1789773)
   const TILT_MAX = 6;
 
   // per-signal hover explanations (localized)
@@ -921,9 +1019,10 @@
   // --- half-insertion model: tilting lifts one side of the edge connector ---
   // column 0..29 across the connector; both rows share the column
   const pinColumn = (pin) => (pin <= 30 ? pin - 1 : pin - 31);
-  function contactQuality(col) {   // 1 = solid, 0 = no contact
+  function contactQuality(col) {
+    // 1 = solid, 0 = no contact
     if (tilt === 0) return 1;
-    const x = (col / 29) * 2 - 1;              // -1 (left) .. +1 (right)
+    const x = (col / 29) * 2 - 1; // -1 (left) .. +1 (right)
     // clockwise (右回り, tilt>0) about the bottom-center pivot lifts the LEFT side
     const lift = (tilt / TILT_MAX) * -x;
     if (lift <= 0.15) return 1;
@@ -944,14 +1043,22 @@
     // Query string wins over the stored value so a link can always retarget.
     const fromQuery = new URLSearchParams(location.search).get('device');
     if (fromQuery) {
-      try { localStorage.setItem('nesDeviceIp', fromQuery); } catch (e) { /* private mode */ }
+      try {
+        localStorage.setItem('nesDeviceIp', fromQuery);
+      } catch (e) {
+        /* private mode */
+      }
       return fromQuery;
     }
-    try { return localStorage.getItem('nesDeviceIp') || ''; } catch (e) { return ''; }
+    try {
+      return localStorage.getItem('nesDeviceIp') || '';
+    } catch (e) {
+      return '';
+    }
   })();
 
   let mirrorLastSent = 0;
-  let mirrorPending = null;    // newest mask held back by the throttle
+  let mirrorPending = null; // newest mask held back by the throttle
   let mirrorTimer = 0;
   let mirrorWarned = false;
 
@@ -1064,7 +1171,10 @@
   function mirrorPinsNow(mask) {
     if (!deviceIp) return;
     mirrorPending = null;
-    if (mirrorTimer) { clearTimeout(mirrorTimer); mirrorTimer = 0; }
+    if (mirrorTimer) {
+      clearTimeout(mirrorTimer);
+      mirrorTimer = 0;
+    }
     mirrorPost(mask);
   }
 
@@ -1078,7 +1188,7 @@
   // Offered only when a device is configured — without one there is nowhere to
   // send to. Revealed here rather than where deviceIp is resolved so the whole
   // feature reads as one block.
-  const DEVICE_ROM_MAX = 1024 * 1024;   // matches ROM_MAX_SIZE on the device
+  const DEVICE_ROM_MAX = 1024 * 1024; // matches ROM_MAX_SIZE on the device
   const swapDeviceRow = document.getElementById('swap-device-row');
   const swapDeviceBtn = document.getElementById('swap-device-btn');
   const swapDeviceNoReset = document.getElementById('swap-device-noreset');
@@ -1117,19 +1227,28 @@
 
   async function sendRomToDevice() {
     const hasCart = cartPrg && cartChr;
-    if (!hasCart) { statusEl.textContent = t('deviceNoCart'); return; }
+    if (!hasCart) {
+      statusEl.textContent = t('deviceNoCart');
+      return;
+    }
     const img = buildCombined();
-    if (img.length > DEVICE_ROM_MAX) { statusEl.textContent = t('deviceTooBig'); return; }
+    if (img.length > DEVICE_ROM_MAX) {
+      statusEl.textContent = t('deviceTooBig');
+      return;
+    }
 
     const noReset = swapDeviceNoReset.checked;
     swapDeviceBtn.disabled = true;
     statusEl.textContent = t('deviceSending');
     try {
-      const res = await fetch('/api/rom?host=' + encodeURIComponent(deviceIp) + '&swap=' + (noReset ? 1 : 0) + '&progress=1', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: img,
-      });
+      const res = await fetch(
+        '/api/rom?host=' + encodeURIComponent(deviceIp) + '&swap=' + (noReset ? 1 : 0) + '&progress=1',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: img,
+        },
+      );
       // A rejection before the stream opens (bad host, oversized body) still
       // arrives as a plain status code, so keep the original mapping for it.
       if (!res.ok) {
@@ -1140,7 +1259,7 @@
       await readNdjson(res, (line) => {
         const isProgress = line.chunks > 0 && line.ok === undefined && !line.error;
         if (isProgress) {
-          statusEl.textContent = t('deviceSending') + ' ' + Math.round(line.sent / line.chunks * 100) + '%';
+          statusEl.textContent = t('deviceSending') + ' ' + Math.round((line.sent / line.chunks) * 100) + '%';
           return;
         }
         verdict = line;
@@ -1151,7 +1270,10 @@
       }
       // No verdict means the stream died mid-transfer: the relay committed to
       // 200 in its headers, so there is no status code left to explain it.
-      if (!verdict) { statusEl.textContent = t('deviceFail'); return; }
+      if (!verdict) {
+        statusEl.textContent = t('deviceFail');
+        return;
+      }
       statusEl.textContent = t(DEVICE_ROM_ERRORS[verdict.http] || 'deviceFail');
     } catch (err) {
       // The relay itself is unreachable — a device that merely stayed silent
@@ -1183,7 +1305,7 @@
       let on = 0;
       if (!manualOff.has(pin)) {
         const q = contactQuality(pinColumn(pin));
-        on = (q >= 1 || Math.random() < q) ? 1 : 0;
+        on = q >= 1 || Math.random() < q ? 1 : 0;
       }
       api.setPin(pin, on);
       if (on) mask |= 1n << BigInt(pin - 1);
@@ -1236,13 +1358,14 @@
     clockLabel.textContent = 'CLOCK ' + fmtHz(clockHz);
     // APU resample ratio follows the clock: slower clock = lower pitch
     const rate = audioCtx ? audioCtx.sampleRate : 44100;
-    api.init(rate * NES_CLOCK / clockHz);
+    api.init((rate * NES_CLOCK) / clockHz);
   }
   clockSlider.addEventListener('input', () => setClock(Math.pow(10, parseFloat(clockSlider.value))));
   clockSlider.addEventListener('dblclick', () => setClock(NES_CLOCK));
   clockInput.addEventListener('change', () => {
     const v = parseFloat(clockInput.value);
-    if (!isNaN(v)) setClock(v); else clockInput.value = clockHz;
+    if (!isNaN(v)) setClock(v);
+    else clockInput.value = clockHz;
   });
   clockInput.addEventListener('keydown', (e) => e.stopPropagation());
   clockInput.addEventListener('keyup', (e) => e.stopPropagation());
@@ -1252,10 +1375,11 @@
   function pointerTiltAngle(e) {
     const r = cartStage.getBoundingClientRect();
     const px = r.left + r.width / 2;
-    const py = r.bottom - 21;   // cart-body bottom (0.75-scaled stage)
-    return Math.atan2(e.clientX - px, py - e.clientY) * 180 / Math.PI;
+    const py = r.bottom - 21; // cart-body bottom (0.75-scaled stage)
+    return (Math.atan2(e.clientX - px, py - e.clientY) * 180) / Math.PI;
   }
-  let dragBaseAngle = 0, dragBaseTilt = 0;
+  let dragBaseAngle = 0,
+    dragBaseTilt = 0;
   cartBody.style.cursor = 'grab';
   cartBody.addEventListener('pointerdown', (e) => {
     dragBaseAngle = pointerTiltAngle(e);
@@ -1271,7 +1395,9 @@
   const endDrag = (e) => {
     if (!cartBody.classList.contains('dragging')) return;
     cartBody.classList.remove('dragging');
-    try { cartBody.releasePointerCapture(e.pointerId); } catch (_) {}
+    try {
+      cartBody.releasePointerCapture(e.pointerId);
+    } catch (_) {}
   };
   cartBody.addEventListener('pointerup', endDrag);
   cartBody.addEventListener('pointercancel', endDrag);
@@ -1285,28 +1411,28 @@
     // 変化は基本PPU側(グラフィック系)に出る: 画面化けが定番症状
     const isPpuPin = (pin) => (pin >= 17 && pin <= 29) || (pin >= 47 && pin <= 60);
     for (let pin = 1; pin <= 60; pin++) {
-      const breakChance = isPpuPin(pin) ? 0.10 : 0.005;
+      const breakChance = isPpuPin(pin) ? 0.1 : 0.005;
       if (manualOff.has(pin)) {
-        if (Math.random() < 0.65) manualOff.delete(pin);   // ゴミが飛んで復活
+        if (Math.random() < 0.65) manualOff.delete(pin); // ゴミが飛んで復活
       } else {
-        if (Math.random() < breakChance) manualOff.add(pin);  // 湿気で接触不良に
+        if (Math.random() < breakChance) manualOff.add(pin); // 湿気で接触不良に
       }
     }
     applyContacts();
     updateBusUI(true);
-    api.reset();   // フーフーしたらリセットを押すのがお作法
-    mirrorResetNow();   // applyContacts() above already mirrored the new pin state
+    api.reset(); // フーフーしたらリセットを押すのがお作法
+    mirrorResetNow(); // applyContacts() above already mirrored the new pin state
     // 💨 演出
     const stage = document.getElementById('cart-stage');
     const puff = document.createElement('div');
     puff.className = 'blow-puff';
     puff.textContent = '💨';
-    puff.style.left = (30 + Math.random() * 40) + '%';
+    puff.style.left = 30 + Math.random() * 40 + '%';
     stage.appendChild(puff);
     setTimeout(() => puff.remove(), 1000);
     const label = document.getElementById('cart-label');
     label.classList.remove('shake');
-    void label.offsetWidth;   // restart animation
+    void label.offsetWidth; // restart animation
     label.classList.add('shake');
   });
 
@@ -1321,7 +1447,7 @@
     // order the device must see them in: contacts restored before the reset
     // vector is fetched, or it would boot straight back into a broken bus.
     mirrorPinsNow((1n << 60n) - 1n);
-    api.reset();   // 挿し直したらリセットボタンを押すのがお作法
+    api.reset(); // 挿し直したらリセットボタンを押すのがお作法
     mirrorResetNow();
     updateBusUI(true);
   });
@@ -1332,7 +1458,7 @@
 
   function parseFm2(text) {
     const frames = [];
-    const map = [128, 64, 32, 16, 8, 4, 2, 1];   // R L D U T(Start) S(Select) B A
+    const map = [128, 64, 32, 16, 8, 4, 2, 1]; // R L D U T(Start) S(Select) B A
     for (const line of text.split(/\r?\n/)) {
       if (!line.startsWith('|')) continue;
       const parts = line.split('|');
@@ -1359,8 +1485,8 @@
     // deterministic start: power cycle + FCEUX-style RAM pattern (00x4 FFx4)
     api.powerOn();
     const ramPtr = api.ram();
-    for (let i = 0; i < 0x800; i++) Module.HEAPU8[ramPtr + i] = (i & 4) ? 0xFF : 0x00;
-    api.reset();   // vectors fetched fresh after the pattern fill
+    for (let i = 0; i < 0x800; i++) Module.HEAPU8[ramPtr + i] = i & 4 ? 0xff : 0x00;
+    api.reset(); // vectors fetched fresh after the pattern fill
     tasFrames = frames;
     tasIndex = 0;
     setPower(true);
@@ -1369,8 +1495,14 @@
   }
 
   document.getElementById('btn-tas').addEventListener('click', () => {
-    if (tasFrames) { tasStop(t('tasStopped')); return; }
-    if (!romLoaded) { statusEl.textContent = t('needRom'); return; }
+    if (tasFrames) {
+      tasStop(t('tasStopped'));
+      return;
+    }
+    if (!romLoaded) {
+      statusEl.textContent = t('needRom');
+      return;
+    }
     document.getElementById('tas-input').click();
   });
   document.getElementById('tas-input').addEventListener('change', async (e) => {
@@ -1378,9 +1510,17 @@
     e.target.value = '';
     if (!file) return;
     let text;
-    try { text = await file.text(); } catch (_) { statusEl.textContent = t('readFail'); return; }
+    try {
+      text = await file.text();
+    } catch (_) {
+      statusEl.textContent = t('readFail');
+      return;
+    }
     const frames = parseFm2(text);
-    if (!frames) { statusEl.textContent = t('tasBad'); return; }
+    if (!frames) {
+      statusEl.textContent = t('tasBad');
+      return;
+    }
     tasStart(frames);
   });
 
@@ -1398,7 +1538,7 @@
     const r = el.getBoundingClientRect();
     const w = 272;
     probeScope.style.left = Math.max(4, Math.min(window.innerWidth - w - 4, r.left - w / 2)) + 'px';
-    probeScope.style.top = (document.getElementById('cartbus').getBoundingClientRect().bottom + 4) + 'px';
+    probeScope.style.top = document.getElementById('cartbus').getBoundingClientRect().bottom + 4 + 'px';
     probeScope.classList.add('show');
   }
   function probeDetach(pin) {
@@ -1420,7 +1560,8 @@
     if (!ptr) return;
     const buf = Module.HEAPU8.subarray(ptr, ptr + 2048);
     const head = api.probePos();
-    const W = probeCanvas.width, H = probeCanvas.height;
+    const W = probeCanvas.width,
+      H = probeCanvas.height;
     // slow clock: the 2048-cycle window spans seconds — switch to a
     // wall-time strip chart sampled every animation frame instead
     const slowMode = clockHz < 60000;
@@ -1434,8 +1575,14 @@
     probeCtx.strokeStyle = '#1c2a12';
     probeCtx.lineWidth = 1;
     probeCtx.beginPath();
-    for (let gx = 0; gx <= W; gx += 32) { probeCtx.moveTo(gx + 0.5, 0); probeCtx.lineTo(gx + 0.5, H); }
-    for (let gy = 0; gy <= H; gy += 20) { probeCtx.moveTo(0, gy + 0.5); probeCtx.lineTo(W, gy + 0.5); }
+    for (let gx = 0; gx <= W; gx += 32) {
+      probeCtx.moveTo(gx + 0.5, 0);
+      probeCtx.lineTo(gx + 0.5, H);
+    }
+    for (let gy = 0; gy <= H; gy += 20) {
+      probeCtx.moveTo(0, gy + 0.5);
+      probeCtx.lineTo(W, gy + 0.5);
+    }
     probeCtx.stroke();
     probeCtx.strokeStyle = '#7CFC66';
     probeCtx.lineWidth = 0.8;
@@ -1443,22 +1590,27 @@
     if (slowMode) {
       // real-time scrolling trace (right edge = now)
       for (let x = 0; x < W; x++) {
-        const v = stripChart[(x * 256 / W) | 0];
+        const v = stripChart[((x * 256) / W) | 0];
         const y = H - 4 - (v / 255) * (H - 8);
-        if (x === 0) probeCtx.moveTo(x, y); else probeCtx.lineTo(x, y);
+        if (x === 0) probeCtx.moveTo(x, y);
+        else probeCtx.lineTo(x, y);
       }
     } else {
       // simple rising-edge trigger for a stable trace
       const at = (i) => buf[(head + i) & 2047];
       let trig = 0;
       for (let i = 1; i < 1024; i++) {
-        if (at(i - 1) < 128 && at(i) >= 128) { trig = i; break; }
+        if (at(i - 1) < 128 && at(i) >= 128) {
+          trig = i;
+          break;
+        }
       }
       const N = 1024;
       for (let x = 0; x < W; x++) {
-        const i = trig + ((x * N / W) | 0);
+        const i = trig + (((x * N) / W) | 0);
         const y = H - 4 - (at(i) / 255) * (H - 8);
-        if (x === 0) probeCtx.moveTo(x, y); else probeCtx.lineTo(x, y);
+        if (x === 0) probeCtx.moveTo(x, y);
+        else probeCtx.lineTo(x, y);
       }
     }
     probeCtx.stroke();
@@ -1471,7 +1623,9 @@
     gamepadConnected = true;
     statusEl.textContent = '🎮 ' + e.gamepad.id.slice(0, 40);
   });
-  window.addEventListener('gamepaddisconnected', () => { gamepadConnected = false; });
+  window.addEventListener('gamepaddisconnected', () => {
+    gamepadConnected = false;
+  });
 
   function pollGamepad() {
     if (!gamepadConnected) return 0;
@@ -1480,14 +1634,14 @@
       if (!gp || !gp.connected) continue;
       const b = gp.buttons;
       const pressed = (i) => b[i] && b[i].pressed;
-      if (pressed(1) || pressed(3)) bits |= 1;    // A (right / top)
-      if (pressed(0) || pressed(2)) bits |= 2;    // B (bottom / left)
-      if (pressed(8)) bits |= 4;                  // Select
-      if (pressed(9)) bits |= 8;                  // Start
-      if (pressed(12)) bits |= 16;                // Up
-      if (pressed(13)) bits |= 32;                // Down
-      if (pressed(14)) bits |= 64;                // Left
-      if (pressed(15)) bits |= 128;               // Right
+      if (pressed(1) || pressed(3)) bits |= 1; // A (right / top)
+      if (pressed(0) || pressed(2)) bits |= 2; // B (bottom / left)
+      if (pressed(8)) bits |= 4; // Select
+      if (pressed(9)) bits |= 8; // Start
+      if (pressed(12)) bits |= 16; // Up
+      if (pressed(13)) bits |= 32; // Down
+      if (pressed(14)) bits |= 64; // Left
+      if (pressed(15)) bits |= 128; // Right
       // left stick fallback
       if (gp.axes.length >= 2) {
         if (gp.axes[1] < -0.5) bits |= 16;
@@ -1501,12 +1655,30 @@
 
   // ------------------------------------------------------------------ debug panel
   const APU_REG_NAMES = [
-    'SQ1_VOL', 'SQ1_SWEEP', 'SQ1_LO', 'SQ1_HI',
-    'SQ2_VOL', 'SQ2_SWEEP', 'SQ2_LO', 'SQ2_HI',
-    'TRI_LINEAR', '(unused)', 'TRI_LO', 'TRI_HI',
-    'NOISE_VOL', '(unused)', 'NOISE_LO', 'NOISE_HI',
-    'DMC_FREQ', 'DMC_RAW', 'DMC_START', 'DMC_LEN',
-    'OAMDMA', 'SND_CHN', 'JOY1', 'JOY2/FRAME',
+    'SQ1_VOL',
+    'SQ1_SWEEP',
+    'SQ1_LO',
+    'SQ1_HI',
+    'SQ2_VOL',
+    'SQ2_SWEEP',
+    'SQ2_LO',
+    'SQ2_HI',
+    'TRI_LINEAR',
+    '(unused)',
+    'TRI_LO',
+    'TRI_HI',
+    'NOISE_VOL',
+    '(unused)',
+    'NOISE_LO',
+    'NOISE_HI',
+    'DMC_FREQ',
+    'DMC_RAW',
+    'DMC_START',
+    'DMC_LEN',
+    'OAMDMA',
+    'SND_CHN',
+    'JOY1',
+    'JOY2/FRAME',
   ];
   const dbgApu = document.getElementById('dbg-apu');
   const dbgWram = document.getElementById('dbg-wram');
@@ -1533,22 +1705,30 @@
   }
   // SMB loaded → show SMBDIS work-RAM names on hover
   function updateRamLabels(fileName) {
-    const isSmb = /mario/i.test(fileName)
-      || (lastRom && lastRom.prg && lastRom.prg.length === 0x8000 && crc32(lastRom.prg) === 0x5CF548D3);
-    const L = (isSmb && window.SMB_RAM_LABELS) ? window.SMB_RAM_LABELS : null;
+    const isSmb =
+      /mario/i.test(fileName) ||
+      (lastRom && lastRom.prg && lastRom.prg.length === 0x8000 && crc32(lastRom.prg) === 0x5cf548d3);
+    const L = isSmb && window.SMB_RAM_LABELS ? window.SMB_RAM_LABELS : null;
     for (let a = 0; a < 0x800; a++) {
       wramSpans[a].title = '$' + a.toString(16).toUpperCase().padStart(4, '0');
     }
     if (!L) return;
-    const addrs = Object.keys(L).map(Number).sort((x, y) => x - y);
+    const addrs = Object.keys(L)
+      .map(Number)
+      .sort((x, y) => x - y);
     for (let i = 0; i < addrs.length; i++) {
       const start = addrs[i];
       const end = Math.min(i + 1 < addrs.length ? addrs[i + 1] : start + 16, 0x800);
       const [name, comment] = L[start];
       for (let a = start; a < end; a++) {
         const off = a - start;
-        wramSpans[a].title = '$' + a.toString(16).toUpperCase().padStart(4, '0')
-          + '  ' + name + (off ? '+' + off : '') + (comment ? '\n' + comment : '');
+        wramSpans[a].title =
+          '$' +
+          a.toString(16).toUpperCase().padStart(4, '0') +
+          '  ' +
+          name +
+          (off ? '+' + off : '') +
+          (comment ? '\n' + comment : '');
       }
     }
   }
@@ -1576,7 +1756,7 @@
       editingSpan = null;
       const v = parseInt(inp.value, 16);
       inp.remove();
-      if (commit && !isNaN(v)) Module.HEAPU8[api.ram() + addr] = v & 0xFF;
+      if (commit && !isNaN(v)) Module.HEAPU8[api.ram() + addr] = v & 0xff;
       span.textContent = hex2(Module.HEAPU8[api.ram() + addr]);
     };
     // keep hotkeys (R/D/F, pad keys) from firing while typing hex
@@ -1593,8 +1773,9 @@
   const chrImage = chrCtx.createImageData(128, 256);
   let chrPal = 0;
   function updateChrTitle() {
-    document.getElementById('chr-title').textContent =
-      t('chrTitle', { pal: t(chrPal < 4 ? 'bgPal' : 'spPal', { n: chrPal & 3 }) });
+    document.getElementById('chr-title').textContent = t('chrTitle', {
+      pal: t(chrPal < 4 ? 'bgPal' : 'spPal', { n: chrPal & 3 }),
+    });
   }
   chrCanvas.addEventListener('click', () => {
     chrPal = (chrPal + 1) & 7;
@@ -1632,16 +1813,24 @@
     label.textContent = name;
     label.addEventListener('click', () => setChannelMute(ch, !chanOn[ch]));
     const vol = document.createElement('input');
-    vol.type = 'range'; vol.className = 'vol';
-    vol.min = 0; vol.max = 2; vol.step = 0.05; vol.value = 1;
+    vol.type = 'range';
+    vol.className = 'vol';
+    vol.min = 0;
+    vol.max = 2;
+    vol.step = 0.05;
+    vol.value = 1;
     const pan = document.createElement('input');
-    pan.type = 'range'; pan.className = 'pan';
-    pan.min = -1; pan.max = 1; pan.step = 0.05; pan.value = 0;
+    pan.type = 'range';
+    pan.className = 'pan';
+    pan.min = -1;
+    pan.max = 1;
+    pan.step = 0.05;
+    pan.value = 0;
     const val = document.createElement('span');
     val.className = 'val';
     const refresh = () => {
       const p = chanPan[ch];
-      const side = Math.abs(p) < 0.03 ? 'C' : (p < 0 ? 'L' : 'R');
+      const side = Math.abs(p) < 0.03 ? 'C' : p < 0 ? 'L' : 'R';
       val.textContent = Math.round(chanVol[ch] * 100) + '% ' + side;
     };
     vol.addEventListener('input', () => {
@@ -1654,8 +1843,14 @@
       api.setChannelPan(ch, chanPan[ch]);
       refresh();
     });
-    vol.addEventListener('dblclick', () => { vol.value = 1; vol.dispatchEvent(new Event('input')); });
-    pan.addEventListener('dblclick', () => { pan.value = 0; pan.dispatchEvent(new Event('input')); });
+    vol.addEventListener('dblclick', () => {
+      vol.value = 1;
+      vol.dispatchEvent(new Event('input'));
+    });
+    pan.addEventListener('dblclick', () => {
+      pan.value = 0;
+      pan.dispatchEvent(new Event('input'));
+    });
     refresh();
     row.append(label, vol, pan, val);
     mixerBox.appendChild(row);
@@ -1665,15 +1860,20 @@
     pan.title = 'pan (double-click = center)';
   });
   function updateMuteTips() {
-    document.querySelectorAll('#dbg-waves .wave-row span.chan-toggle')
-      .forEach((sp) => { sp.title = t('muteTip'); });
-    document.querySelectorAll('#dbg-mixer .vol').forEach((el) => { el.title = t('volTip'); });
-    document.querySelectorAll('#dbg-mixer .pan').forEach((el) => { el.title = t('panTip'); });
+    document.querySelectorAll('#dbg-waves .wave-row span.chan-toggle').forEach((sp) => {
+      sp.title = t('muteTip');
+    });
+    document.querySelectorAll('#dbg-mixer .vol').forEach((el) => {
+      el.title = t('volTip');
+    });
+    document.querySelectorAll('#dbg-mixer .pan').forEach((el) => {
+      el.title = t('panTip');
+    });
   }
   // raw level range per channel: SQ1 SQ2 TRI NOI DMC / VRC6 pulse1 pulse2 sawtooth
   const WAVE_SCALE = [15, 15, 15, 15, 127, 15, 15, 31];
   const MIX_ROW = 8;
-  let waveData = null;  // captured per frame while debug is on
+  let waveData = null; // captured per frame while debug is on
 
   function captureWave(count) {
     const chans = [];
@@ -1690,17 +1890,19 @@
     const { count, chans, mix } = waveData;
     for (let ch = 0; ch <= MIX_ROW; ch++) {
       const ctx2 = waveCtxs[ch];
-      const w = waveCanvases[ch].width, h = waveCanvases[ch].height;
+      const w = waveCanvases[ch].width,
+        h = waveCanvases[ch].height;
       ctx2.fillStyle = '#000';
       ctx2.fillRect(0, 0, w, h);
-      ctx2.strokeStyle = ch === MIX_ROW ? '#ffcf5a' : (ch >= 5 ? '#6fd0dc' : '#6fdc6f');
+      ctx2.strokeStyle = ch === MIX_ROW ? '#ffcf5a' : ch >= 5 ? '#6fd0dc' : '#6fdc6f';
       ctx2.lineWidth = 1;
       ctx2.beginPath();
       for (let x = 0; x < w; x++) {
-        const i = Math.min(count - 1, (x * count / w) | 0);
+        const i = Math.min(count - 1, ((x * count) / w) | 0);
         const v = ch < MIX_ROW ? chans[ch][i] / WAVE_SCALE[ch] : Math.min(1, mix[i] * 2);
         const y = h - 2 - v * (h - 4);
-        if (x === 0) ctx2.moveTo(x, y); else ctx2.lineTo(x, y);
+        if (x === 0) ctx2.moveTo(x, y);
+        else ctx2.lineTo(x, y);
       }
       ctx2.stroke();
     }
@@ -1783,7 +1985,9 @@
         dbgSrcNote.textContent = '× ' + err.message;
         selectLocalRadio();
       })
-      .finally(() => { dbgFetchInFlight = false; });
+      .finally(() => {
+        dbgFetchInFlight = false;
+      });
   }
 
   // ---- debug data source: the local emulator, or a Stack-chan snapshot ----
@@ -1847,7 +2051,7 @@
     cpuRegs: () => Module.HEAPU8.subarray(api.cpuRegs(), api.cpuRegs() + 12),
     apuRegs: () => Module.HEAPU8.subarray(api.apuRegs(), api.apuRegs() + 0x18),
     ram: () => Module.HEAPU8.subarray(api.ram(), api.ram() + 0x800),
-    peek: (addr) => api.peek(addr & 0xFFFF),
+    peek: (addr) => api.peek(addr & 0xffff),
   };
 
   let remoteSnap = null;
@@ -1857,9 +2061,9 @@
     ram: () => (remoteSnap ? remoteSnap.ram : new Uint8Array(0x800)),
     peek: (addr) => {
       if (!remoteSnap) return -1;
-      const off = (addr - remoteSnap.pc) & 0xFFFF;
+      const off = (addr - remoteSnap.pc) & 0xffff;
       // Work RAM is carried in full, so honour it wherever it is asked for.
-      if ((addr & 0xFFFF) < 0x2000) return remoteSnap.ram[addr & 0x7FF];
+      if ((addr & 0xffff) < 0x2000) return remoteSnap.ram[addr & 0x7ff];
       return off < remoteSnap.code.length ? remoteSnap.code[off] : -1;
     },
   };
@@ -1914,7 +2118,21 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
     }
     return tab;
   })();
-  const DIS_LEN = { imp: 1, acc: 1, imm: 2, zp: 2, zpx: 2, zpy: 2, rel: 2, izx: 2, izy: 2, abs: 3, abx: 3, aby: 3, ind: 3 };
+  const DIS_LEN = {
+    imp: 1,
+    acc: 1,
+    imm: 2,
+    zp: 2,
+    zpx: 2,
+    zpy: 2,
+    rel: 2,
+    izx: 2,
+    izy: 2,
+    abs: 3,
+    abx: 3,
+    aby: 3,
+    ind: 3,
+  };
   const h4 = (v) => v.toString(16).toUpperCase().padStart(4, '0');
 
   function disasmLine(addr) {
@@ -1931,18 +2149,42 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
     const w = b1 | (b2 << 8);
     let operand = '';
     switch (mode) {
-      case 'acc': operand = 'A'; break;
-      case 'imm': operand = '#$' + hex2(b1); break;
-      case 'zp':  operand = '$' + hex2(b1); break;
-      case 'zpx': operand = '$' + hex2(b1) + ',X'; break;
-      case 'zpy': operand = '$' + hex2(b1) + ',Y'; break;
-      case 'abs': operand = '$' + h4(w); break;
-      case 'abx': operand = '$' + h4(w) + ',X'; break;
-      case 'aby': operand = '$' + h4(w) + ',Y'; break;
-      case 'ind': operand = '($' + h4(w) + ')'; break;
-      case 'izx': operand = '($' + hex2(b1) + ',X)'; break;
-      case 'izy': operand = '($' + hex2(b1) + '),Y'; break;
-      case 'rel': operand = '$' + h4((addr + 2 + (b1 << 24 >> 24)) & 0xFFFF); break;
+      case 'acc':
+        operand = 'A';
+        break;
+      case 'imm':
+        operand = '#$' + hex2(b1);
+        break;
+      case 'zp':
+        operand = '$' + hex2(b1);
+        break;
+      case 'zpx':
+        operand = '$' + hex2(b1) + ',X';
+        break;
+      case 'zpy':
+        operand = '$' + hex2(b1) + ',Y';
+        break;
+      case 'abs':
+        operand = '$' + h4(w);
+        break;
+      case 'abx':
+        operand = '$' + h4(w) + ',X';
+        break;
+      case 'aby':
+        operand = '$' + h4(w) + ',Y';
+        break;
+      case 'ind':
+        operand = '($' + h4(w) + ')';
+        break;
+      case 'izx':
+        operand = '($' + hex2(b1) + ',X)';
+        break;
+      case 'izy':
+        operand = '($' + hex2(b1) + '),Y';
+        break;
+      case 'rel':
+        operand = '$' + h4((addr + 2 + ((b1 << 24) >> 24)) & 0xffff);
+        break;
     }
     const bytes = [op, b1, b2].slice(0, len).map(hex2).join(' ').padEnd(9);
     return { len, text: `${h4(addr)}  ${bytes} ${name} ${operand}`.trimEnd() };
@@ -1953,8 +2195,10 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
     const lines = [];
     for (let i = 0; i < 12; i++) {
       const l = disasmLine(addr);
-      lines.push((i === 0 ? '<span class="cur">&gt;' : '\u00a0') + l.text.replace(/</g, '&lt;') + (i === 0 ? '</span>' : ''));
-      addr = (addr + l.len) & 0xFFFF;
+      lines.push(
+        (i === 0 ? '<span class="cur">&gt;' : '\u00a0') + l.text.replace(/</g, '&lt;') + (i === 0 ? '</span>' : ''),
+      );
+      addr = (addr + l.len) & 0xffff;
     }
     document.getElementById('dbg-disasm').innerHTML = lines.join('\n');
   }
@@ -1967,8 +2211,10 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
       const c = dbgSource.cpuRegs();
       const pc = c[0] | (c[1] << 8);
       const p = c[6];
-      const flags = ['C','Z','I','D','B','-','V','N']
-        .map((f, i) => (p >> i) & 1 ? f : f.toLowerCase()).reverse().join('');
+      const flags = ['C', 'Z', 'I', 'D', 'B', '-', 'V', 'N']
+        .map((f, i) => ((p >> i) & 1 ? f : f.toLowerCase()))
+        .reverse()
+        .join('');
       const frameN = c[8] | (c[9] << 8) | (c[10] << 16) | (c[11] << 24);
       document.getElementById('dbg-cpu').textContent =
         `PC=${pc.toString(16).toUpperCase().padStart(4, '0')}  A=${hex2(c[2])} X=${hex2(c[3])} Y=${hex2(c[4])}  SP=${hex2(c[5])}  P=${hex2(p)} [${flags}]  FRAME=${frameN}`;
@@ -1977,23 +2223,22 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
     const regs = dbgSource.apuRegs();
     let apuText = '';
     for (let i = 0; i < 0x18; i++) {
-      apuText += '$' + (0x4000 + i).toString(16).toUpperCase() + '  ' + hex2(regs[i])
-               + '  ' + APU_REG_NAMES[i] + '\n';
+      apuText += '$' + (0x4000 + i).toString(16).toUpperCase() + '  ' + hex2(regs[i]) + '  ' + APU_REG_NAMES[i] + '\n';
     }
     dbgApu.textContent = apuText;
 
     const ram = dbgSource.ram();
     for (let a = 0; a < 0x800; a++) {
       const s = wramSpans[a];
-      if (s === editingSpan) continue;   // don't clobber the byte being edited
+      if (s === editingSpan) continue; // don't clobber the byte being edited
       const h = hex2(ram[a]);
       const changed = s.textContent !== h;
       if (changed) s.textContent = h;
-      if (!wramPrimed) continue;         // no classification on the initial fill
+      if (!wramPrimed) continue; // no classification on the initial fill
       // consecutive-change streak: constantly-changing bytes (timers, RNG)
       // are shown gray instead of glowing, so real events stand out
       let st = wramStreak[a];
-      st = changed ? Math.min(st + 1, 20) : (st > 0 ? st - 1 : 0);
+      st = changed ? Math.min(st + 1, 20) : st > 0 ? st - 1 : 0;
       wramStreak[a] = st;
       if (st >= 8) {
         s.classList.add('busy');
@@ -2005,7 +2250,7 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
           s.classList.add('hot');
           wramHotAt[a] = now;
         } else if (wramHotAt[a] && now - wramHotAt[a] > 700) {
-          s.classList.remove('hot');     // let the CSS transition fade it out
+          s.classList.remove('hot'); // let the CSS transition fade it out
           wramHotAt[a] = 0;
         }
       }
@@ -2037,20 +2282,23 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
 
   function tick(now) {
     requestAnimationFrame(tick);
-    drawProbe();   // oscilloscope updates in real time, even when paused
-    if (!powered) { drawStatic(); return; }        // no signal
-    if (!running || resetHeld) return;   // reset held: CPU frozen in reset state
+    drawProbe(); // oscilloscope updates in real time, even when paused
+    if (!powered) {
+      drawStatic();
+      return;
+    } // no signal
+    if (!running || resetHeld) return; // reset held: CPU frozen in reset state
 
     acc += now - lastTime;
     lastTime = now;
     // at very low clocks we must accumulate enough time for at least 1 cycle
-    const accCap = Math.max(150, 2200 * 1000 / clockHz);
+    const accCap = Math.max(150, (2200 * 1000) / clockHz);
     if (acc > accCap) acc = accCap;
 
     let ranFrame = false;
     if (tasFrames) {
       // TAS: strict frame stepping with the movie's inputs
-      const effFrameMs = FRAME_MS * NES_CLOCK / clockHz;
+      const effFrameMs = (FRAME_MS * NES_CLOCK) / clockHz;
       let burst = 0;
       while (tasFrames && acc >= effFrameMs && burst < 8) {
         burst++;
@@ -2078,35 +2326,38 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
         }
       }
     } else {
-    const wantCycles = Math.min((clockHz * acc / 1000) | 0, 240000);
-    if (wantCycles >= 1) {
-      acc -= wantCycles * 1000 / clockHz;
-      if (tilt !== 0) applyContacts();   // flaky contacts re-roll each burst
-      api.setButtons(0, buttons | pollGamepad());
-      api.runCycles(wantCycles);
-      window.__nes.frames++;
-      ranFrame = true;
+      const wantCycles = Math.min(((clockHz * acc) / 1000) | 0, 240000);
+      if (wantCycles >= 1) {
+        acc -= (wantCycles * 1000) / clockHz;
+        if (tilt !== 0) applyContacts(); // flaky contacts re-roll each burst
+        api.setButtons(0, buttons | pollGamepad());
+        api.runCycles(wantCycles);
+        window.__nes.frames++;
+        ranFrame = true;
 
-      // ship audio produced by this frame
-      const count = api.audioCount();
-      if (count > 0) {
-        if (pushSamples && !muted) {
-          const l = api.audioBuffer() >> 2, r = api.audioBufferR() >> 2;
-          const inter = new Float32Array(count * 2);
-          for (let i = 0; i < count; i++) {
-            inter[i * 2] = Module.HEAPF32[l + i];
-            inter[i * 2 + 1] = Module.HEAPF32[r + i];
+        // ship audio produced by this frame
+        const count = api.audioCount();
+        if (count > 0) {
+          if (pushSamples && !muted) {
+            const l = api.audioBuffer() >> 2,
+              r = api.audioBufferR() >> 2;
+            const inter = new Float32Array(count * 2);
+            for (let i = 0; i < count; i++) {
+              inter[i * 2] = Module.HEAPF32[l + i];
+              inter[i * 2 + 1] = Module.HEAPF32[r + i];
+            }
+            pushSamples(inter);
           }
-          pushSamples(inter);
+          if (debugOn) captureWave(count);
+          api.audioClear();
         }
-        if (debugOn) captureWave(count);
-        api.audioClear();
+
+        // periodic SRAM save (~every 5s)
+        if (++sramDirty >= 300) {
+          sramDirty = 0;
+          saveSram();
+        }
       }
-
-      // periodic SRAM save (~every 5s)
-      if (++sramDirty >= 300) { sramDirty = 0; saveSram(); }
-    }
-
     }
     if (ranFrame) {
       const ptr = api.framebuffer();
@@ -2128,7 +2379,7 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
     if (qs.get('debug') === '1' && !document.body.classList.contains('debug-on')) {
       document.getElementById('btn-debug').click();
     }
-    const pinQ = qs.get('pin') ?? qs.get('bus');   // 端子パネルの表示 (既定は1)
+    const pinQ = qs.get('pin') ?? qs.get('bus'); // 端子パネルの表示 (既定は1)
     if (pinQ === '0' && document.body.classList.contains('bus-on')) document.getElementById('btn-bus').click();
     if (pinQ === '1' && !document.body.classList.contains('bus-on')) document.getElementById('btn-bus').click();
     const clk = parseFloat(qs.get('clock'));
@@ -2151,10 +2402,12 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
     }
     const romQ = qs.get('rom');
     // ROM未指定時は既定のゲームを起動
-    const DEFAULT_ROM_URL =
-      'https://raw.githubusercontent.com/GOROman/calude-famicom-game/main/game.nes';
+    const DEFAULT_ROM_URL = 'https://raw.githubusercontent.com/GOROman/calude-famicom-game/main/game.nes';
     loadRomFromUrl(romQ || DEFAULT_ROM_URL);
   }
   applyLanguage();
-  requestAnimationFrame((now) => { lastTime = now; tick(now); });
+  requestAnimationFrame((now) => {
+    lastTime = now;
+    tick(now);
+  });
 })();
