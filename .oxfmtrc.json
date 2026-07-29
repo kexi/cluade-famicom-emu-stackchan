@@ -1,0 +1,25 @@
+// web/*.js の整形設定。C++ 側の .clang-format / Python 側の ruff.toml と同じ
+// 立ち位置で、just format / format-check と CI から参照される
+//
+// oxfmt は Prettier 互換のキー名だけを解釈し、知らないキーは黙って無視する
+// (quoteStyle や indentWidth と書いてもエラーにならず効かない)。ここにある
+// 名前は実際に効くことを確認済みのものだけ
+{
+  // 既存コードは 2 スペース + シングルクォート + セミコロンあり。oxfmt の既定は
+  // ダブルクォートなので singleQuote だけ既定から倒す (767 箇所の書き換えを回避)
+  "tabWidth": 2,
+  "singleQuote": true,
+
+  // oxfmt の既定は 100。120 にしているのは i18n.js の翻訳テーブルのため —
+  // oxfmt は全角文字も 1 桁として数えるので、100 だと日本語の訳文が実際の
+  // 表示幅より早く折り返され、`key:` と値が別行に割れて対訳表として読みづらい。
+  // 120 なら 1 行に収まる。80 にしない理由も同じ (差分が 1195 行 → 809 行)
+  "printWidth": 120,
+
+  // ビルド生成物と機械生成データは整形しない。emscripten が build.sh で
+  // 吐き直すため手を入れても次のビルドで消え、差分もレビュー不能に膨らむ
+  "ignorePatterns": [
+    "web/nes.js", // build.sh の emcc -o 出力
+    "web/smb-ram.js" // SMBDIS.ASM から抽出した RAM ラベル表 (1 行 11KB の JSON)
+  ]
+}
