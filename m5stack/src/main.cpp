@@ -8,7 +8,10 @@
 #include <WiFi.h>
 #include <lwip/sockets.h>
 #include <esp_timer.h>
+#include <esp_heap_caps.h>
+#include <esp_rom_crc.h>
 #include <atomic>
+#include <new>
 
 #include "../../core/nes.h"
 #include "config.h"
@@ -43,6 +46,19 @@ static std::atomic<bool> g_debugWantWaves{false};
 // millis() of the last wave request; the frame loop disarms capture once this
 // goes stale. 0 = never asked.
 static std::atomic<uint32_t> g_debugWaveAskedMs{0};
+// A ROM received over UDP, staged in PSRAM by the UDP task and installed by the
+// emulation loop at a frame boundary.
+//
+// Unlike the other latches this one guards a whole buffer rather than a single
+// value, so it is release/acquire and not relaxed: the release store publishes
+// every byte written into g_romBuf (plus g_romSize/g_romFlags) to whichever core
+// observes the flag with an acquire load. Core 0 must not touch the buffer again
+// until core 1 has cleared the flag, which is why core 1 clears it only after the
+// install has completely finished.
+static uint8_t* g_romBuf = nullptr;
+static uint32_t g_romSize = 0;
+static uint8_t g_romFlags = 0;
+static std::atomic<bool> g_romApplyRequested{false};
 // The UDP socket, shared so loop() can answer directly. lwIP's sendto is
 // thread-safe, and replying from the emulation core avoids handing the snapshot
 // buffer across tasks while it is being filled.
@@ -60,6 +76,209 @@ static int16_t g_chunk[AUDIO_CHUNK_SLOTS][AUDIO_CHUNK_SAMPLES];
 static int g_chunkIndex = 0;
 
 static bool g_wifiConnected = false;
+
+// ---------------------------------------------------------------- ROM receive
+
+// Transfer state, owned entirely by the UDP task. Kept at file scope only so the
+// packet handler can be split out of udpTask's loop for readability.
+static bool g_romActive = false;        // a BEGIN has been accepted and not yet finished
+static uint16_t g_romSession = 0;
+static uint32_t g_romExpectedSize = 0;
+static uint32_t g_romExpectedCrc = 0;
+static uint8_t g_romPendingFlags = 0;
+static uint16_t g_romNextChunk = 0;     // the chunk index a DATA packet must carry
+static uint32_t g_romReceived = 0;      // bytes staged so far
+static uint32_t g_romLastRxMs = 0;      // for the stale-session takeover
+
+static void sendRomAck(int sock, const sockaddr_in& to, uint8_t op, uint16_t session,
+                       uint16_t chunk, uint8_t status) {
+    uint8_t ack[UDP_ROM_ACK_SIZE] = {};
+    ack[0] = 'N';
+    ack[1] = 'R';
+    ack[2] = UDP_PROTOCOL_VERSION;
+    ack[3] = op;
+    ack[4] = session & 0xFF;
+    ack[5] = session >> 8;
+    ack[6] = chunk & 0xFF;
+    ack[7] = chunk >> 8;
+    ack[8] = status;
+    // Where the sender should resume. Meaningful on a SEQ rejection; harmless
+    // elsewhere, and always filling it keeps the layout fixed.
+    ack[9] = g_romNextChunk & 0xFF;
+    ack[10] = g_romNextChunk >> 8;
+    ::sendto(sock, ack, sizeof(ack), 0, (const sockaddr*)&to, sizeof(to));
+}
+
+// Validate the staged image the same way nes::loadRom will, so a cart that cannot
+// possibly load is rejected while the sender is still listening — rather than
+// failing on core 1 where the only report would be a serial line.
+static uint8_t checkStagedRom() {
+    const bool magicOk = g_romBuf[0] == 'N' && g_romBuf[1] == 'E' &&
+                         g_romBuf[2] == 'S' && g_romBuf[3] == 0x1A;
+    if (!magicOk) return UDP_ROM_STATUS_BAD_HEADER;
+
+    // Archaic iNES: bytes 12-15 should be zero, and when they are not (e.g.
+    // "DiskDude!" garbage) flags7's upper nibble is not a mapper number. Mirrors
+    // cartridge.cpp's dirtyHeader rule exactly — disagreeing would let a ROM pass
+    // here and then fail to load.
+    const bool dirtyHeader = g_romBuf[12] || g_romBuf[13] || g_romBuf[14] || g_romBuf[15];
+    const int mapperNum = (g_romBuf[6] >> 4) | (dirtyHeader ? 0 : (g_romBuf[7] & 0xF0));
+    const bool mapperSupported = mapperNum == 0 || mapperNum == 1 || mapperNum == 2 ||
+                                 mapperNum == 3 || mapperNum == 4 || mapperNum == 24 ||
+                                 mapperNum == 26;
+    if (!mapperSupported) return UDP_ROM_STATUS_UNSUPPORTED_MAPPER;
+    return UDP_ROM_STATUS_OK;
+}
+
+static void handleRomPacket(int sock, const sockaddr_in& from,
+                            const uint8_t* packet, int received) {
+    const uint16_t session = (uint16_t)(packet[4] | (packet[5] << 8));
+    const uint8_t op = packet[6];
+
+    // The staging buffer belongs to core 1 until it has installed the ROM. Taking
+    // a new transfer now would overwrite the image out from under it.
+    const bool applyPending = g_romApplyRequested.load(std::memory_order_acquire);
+    if (applyPending) {
+        sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_BUSY);
+        return;
+    }
+
+    if (op == UDP_ROM_OP_BEGIN) {
+        const bool beginShort = received < UDP_ROM_BEGIN_SIZE;
+        if (beginShort) return;
+        const uint32_t total = (uint32_t)packet[8] | ((uint32_t)packet[9] << 8) |
+                               ((uint32_t)packet[10] << 16) | ((uint32_t)packet[11] << 24);
+
+        // A retransmitted BEGIN (its ACK was lost) must not restart a transfer
+        // that is already making progress, so only re-acknowledge it.
+        const bool sameSession = g_romActive && session == g_romSession;
+        if (sameSession) {
+            g_romLastRxMs = millis();
+            sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_OK);
+            return;
+        }
+        const bool otherSessionAlive = g_romActive &&
+                                       (millis() - g_romLastRxMs) <= ROM_SESSION_TIMEOUT_MS;
+        if (otherSessionAlive) {
+            sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_BUSY);
+            return;
+        }
+        const bool tooBig = total == 0 || total > ROM_MAX_SIZE;
+        if (tooBig) {
+            sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_TOO_BIG);
+            return;
+        }
+        // Reserved once and never released: a buffer that comes and goes would
+        // race core 1 and fragment PSRAM for nothing. 1MB against 8MB is cheap.
+        const bool needBuffer = g_romBuf == nullptr;
+        if (needBuffer) {
+            g_romBuf = (uint8_t*)heap_caps_malloc(ROM_MAX_SIZE, MALLOC_CAP_SPIRAM);
+        }
+        if (!g_romBuf) {
+            sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_ALLOC);
+            return;
+        }
+
+        g_romActive = true;
+        g_romSession = session;
+        g_romExpectedSize = total;
+        g_romExpectedCrc = (uint32_t)packet[12] | ((uint32_t)packet[13] << 8) |
+                           ((uint32_t)packet[14] << 16) | ((uint32_t)packet[15] << 24);
+        g_romPendingFlags = packet[7];
+        g_romNextChunk = 0;
+        g_romReceived = 0;
+        g_romLastRxMs = millis();
+        sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_OK);
+        return;
+    }
+
+    const bool noSession = !g_romActive || session != g_romSession;
+    if (noSession) {
+        sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_NO_SESSION);
+        return;
+    }
+
+    if (op == UDP_ROM_OP_ABORT) {
+        g_romActive = false;
+        sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_OK);
+        return;
+    }
+
+    if (op == UDP_ROM_OP_DATA) {
+        const bool dataShort = received < UDP_ROM_DATA_HEADER;
+        if (dataShort) return;
+        const uint16_t chunk = (uint16_t)(packet[8] | (packet[9] << 8));
+        const uint16_t len = (uint16_t)(packet[10] | (packet[11] << 8));
+        // Trust the datagram's own length over the claimed one, or a lying header
+        // would read past what actually arrived.
+        const bool lengthLies = (int)len != received - UDP_ROM_DATA_HEADER;
+        if (lengthLies) return;
+
+        // The ACK for the previous chunk was lost and the sender repeated it. The
+        // bytes are already staged, so re-acknowledge without copying — copying
+        // would advance nothing but could only ever corrupt.
+        const bool duplicate = g_romNextChunk > 0 && chunk == (uint16_t)(g_romNextChunk - 1);
+        if (duplicate) {
+            g_romLastRxMs = millis();
+            sendRomAck(sock, from, op, session, chunk, UDP_ROM_STATUS_OK);
+            return;
+        }
+        const bool outOfOrder = chunk != g_romNextChunk;
+        if (outOfOrder) {
+            g_romLastRxMs = millis();
+            sendRomAck(sock, from, op, session, chunk, UDP_ROM_STATUS_SEQ);
+            return;
+        }
+        const bool overflows = g_romReceived + len > g_romExpectedSize;
+        if (overflows) {
+            g_romActive = false;
+            sendRomAck(sock, from, op, session, chunk, UDP_ROM_STATUS_SIZE_MISMATCH);
+            return;
+        }
+
+        memcpy(g_romBuf + g_romReceived, packet + UDP_ROM_DATA_HEADER, len);
+        g_romReceived += len;
+        g_romNextChunk++;
+        g_romLastRxMs = millis();
+        sendRomAck(sock, from, op, session, chunk, UDP_ROM_STATUS_OK);
+        return;
+    }
+
+    if (op == UDP_ROM_OP_END) {
+        const bool sizeMismatch = g_romReceived != g_romExpectedSize;
+        if (sizeMismatch) {
+            g_romActive = false;
+            sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_SIZE_MISMATCH);
+            return;
+        }
+        // esp_rom_crc32_le brackets its own computation with '~' (see
+        // esp_rom_crc.h), so seeding it with 0 yields exactly zlib's CRC-32 —
+        // init 0xFFFFFFFF, reflected, final xor 0xFFFFFFFF. Verified equal to
+        // Python's zlib.crc32, which is what the sender uses.
+        const uint32_t crc = esp_rom_crc32_le(0, g_romBuf, g_romReceived);
+        const bool crcMismatch = crc != g_romExpectedCrc;
+        if (crcMismatch) {
+            g_romActive = false;
+            sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_CRC);
+            return;
+        }
+        const uint8_t headerStatus = checkStagedRom();
+        const bool unloadable = headerStatus != UDP_ROM_STATUS_OK;
+        if (unloadable) {
+            g_romActive = false;
+            sendRomAck(sock, from, op, session, 0, headerStatus);
+            return;
+        }
+
+        g_romSize = g_romReceived;
+        g_romFlags = g_romPendingFlags;
+        g_romActive = false;
+        // Publishes the buffer and the two plain globals above to core 1.
+        g_romApplyRequested.store(true, std::memory_order_release);
+        sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_OK);
+        return;
+    }
+}
 
 // ---------------------------------------------------------------- UDP task
 
@@ -85,7 +304,9 @@ static void udpTask(void*) {
 
     g_udpSock = sock;
 
-    uint8_t packet[64];
+    // Static, not on the stack: a ROM chunk needs 1412 bytes and this task only
+    // gets 4096 in total.
+    static uint8_t packet[UDP_ROM_DATA_HEADER + UDP_ROM_CHUNK];
     for (;;) {
         // The sender address is captured so a debug query can be answered; the
         // other packet types ignore it.
@@ -123,6 +344,10 @@ static void udpTask(void*) {
             if (wantWaves) g_debugWaveAskedMs.store(millis(), std::memory_order_relaxed);
             g_debugRequested.store(true, std::memory_order_relaxed);
             continue;
+        }
+        if (type == UDP_TYPE_ROM) {
+            handleRomPacket(sock, from, packet, received);
+            continue;   // not controller input: leave g_lastRxMs alone
         }
         if (type == UDP_TYPE_CTRL) {
             const uint8_t cmd = packet[6];
@@ -292,6 +517,75 @@ static void applyResetRequest() {
     if (!requested) return;
     g_nes.reset();
     Serial.println("RESET: console reset");
+}
+
+// Install a ROM that arrived over UDP, if one is waiting.
+//
+// Runs at a frame boundary for the same reason as the reset above: the UDP task
+// stages the image mid-frame, and swapping the mapper out from under a running
+// instruction would fault. The acquire load pairs with the UDP task's release
+// store, so every staged byte is visible here.
+static void applyRomRequest() {
+    const bool requested = g_romApplyRequested.load(std::memory_order_acquire);
+    if (!requested) return;
+
+    const bool wantSwap = (g_romFlags & ROM_FLAG_SWAP) != 0;
+    bool ok = false;
+    // The core allocates PRG/CHR through InternalRamAllocator, which throws when
+    // internal SRAM runs out. A ROM the device cannot fit must leave the current
+    // game running, not kill the console.
+    try {
+        if (wantSwap) {
+            // No reset: keep the old cart until the new one is fully built, so a
+            // failed load leaves the running game untouched. The two therefore
+            // coexist briefly and the new PRG may land in PSRAM — accepted, since
+            // continuing to play matters more than that cart's speed.
+            auto m = nes::loadRom(g_romBuf, g_romSize);
+            if (m) {
+                g_nes.mapper = std::move(m);
+                g_nes.refreshMapperCaps();
+                // Not optional here, though the web build's nes_swap_rom omits it:
+                // there chrWindow_ is a constexpr nullptr, while this build caches
+                // a real pointer into the old cart's CHR — which std::move just
+                // freed. Skipping this leaves the PPU reading dangling memory.
+                g_nes.ppu.refreshChrWindow();
+                ok = true;
+            }
+        } else {
+            // Drop the old cart first so its PRG/CHR return to internal SRAM before
+            // the new one asks for any. NES::loadRom assigns (mapper = loadRom(...)),
+            // which builds the replacement while the old one is still held, and on
+            // this part that peak is enough to exhaust SRAM on a large ROM.
+            g_nes.mapper.reset();
+            ok = g_nes.loadRom(g_romBuf, g_romSize);   // powerOn + refreshChrWindow included
+        }
+    } catch (const std::bad_alloc&) {
+        ok = false;
+    }
+
+    // The powerOn path already discarded the old cart, so a failure here leaves
+    // the console with no mapper at all — fall back to the image built into the
+    // firmware rather than run on nothing.
+    const bool cartMissing = !g_nes.mapper;
+    if (cartMissing) {
+        const size_t embeddedSize = (size_t)(rom_end - rom_start);
+        bool restored = false;
+        try {
+            restored = g_nes.loadRom(rom_start, embeddedSize);
+        } catch (const std::bad_alloc&) {
+            restored = false;
+        }
+        if (!restored) haltWithError("ROM load failed");
+    }
+
+    if (ok) Serial.printf("ROM: applied %u bytes%s\n", (unsigned)g_romSize,
+                          wantSwap ? " (no reset)" : "");
+    else Serial.printf("ROM: failed %u bytes\n", (unsigned)g_romSize);
+
+    // Cleared last: until this store the UDP task treats the buffer as ours and
+    // refuses new transfers. Clearing it earlier would let a BEGIN overwrite the
+    // image we are still reading.
+    g_romApplyRequested.store(false, std::memory_order_release);
 }
 
 // Answer a debug snapshot request, if one is pending.
@@ -505,6 +799,7 @@ void loop() {
     applyInput();
     applyPinChanges();
     applyResetRequest();
+    applyRomRequest();
     applyVolumeRequest();
     updateWaveCapture();
 

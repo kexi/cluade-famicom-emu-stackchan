@@ -104,6 +104,50 @@ constexpr uint8_t UDP_DEBUG_HEADER = 7;
 constexpr int UDP_DEBUG_CHUNK = 1400;   // stays inside a 1500-byte MTU
 constexpr uint8_t UDP_CTRL_RESET = 0x01;    // byte [6] bit 0
 constexpr uint8_t UDP_CTRL_VOLUME = 0x02;   // byte [6] bit 1, level in byte [7]
+
+// Cartridge swap over WiFi. The ROM arrives in chunks because a .nes image is far
+// past any MTU; it is staged in PSRAM and only handed to the core once the whole
+// image has been verified, so a truncated or corrupted transfer can never take
+// down a running game.
+constexpr uint8_t UDP_TYPE_ROM = 4;
+// byte [6]: which step of the transfer this datagram is.
+constexpr uint8_t UDP_ROM_OP_BEGIN = 0;
+constexpr uint8_t UDP_ROM_OP_DATA = 1;
+constexpr uint8_t UDP_ROM_OP_END = 2;
+constexpr uint8_t UDP_ROM_OP_ABORT = 3;
+// 'N','P' | version | type | session u16 LE | op | flags | total u32 LE | crc32 u32 LE
+constexpr uint8_t UDP_ROM_BEGIN_SIZE = 16;
+// 'N','P' | version | type | session u16 LE | op | 0 | chunk u16 LE | len u16 LE | payload
+constexpr uint8_t UDP_ROM_DATA_HEADER = 12;
+// END and ABORT carry nothing beyond the session and op, so they are the bare
+// common header — which is also the existing minimum length check.
+constexpr uint8_t UDP_ROM_END_SIZE = 8;
+constexpr int UDP_ROM_CHUNK = 1400;     // stays inside a 1500-byte MTU, as UDP_DEBUG_CHUNK
+// Every request is acknowledged, so the sender can be a simple stop-and-wait
+// loop: 'N','R' | version | op echo | session u16 LE | chunk echo u16 LE |
+// status | expected chunk u16 LE | 0
+constexpr uint8_t UDP_ROM_ACK_SIZE = 12;
+constexpr uint8_t UDP_ROM_STATUS_OK = 0;
+constexpr uint8_t UDP_ROM_STATUS_BUSY = 1;
+constexpr uint8_t UDP_ROM_STATUS_TOO_BIG = 2;
+constexpr uint8_t UDP_ROM_STATUS_ALLOC = 3;
+constexpr uint8_t UDP_ROM_STATUS_SEQ = 4;
+constexpr uint8_t UDP_ROM_STATUS_SIZE_MISMATCH = 5;
+constexpr uint8_t UDP_ROM_STATUS_CRC = 6;
+constexpr uint8_t UDP_ROM_STATUS_BAD_HEADER = 7;
+constexpr uint8_t UDP_ROM_STATUS_UNSUPPORTED_MAPPER = 8;
+constexpr uint8_t UDP_ROM_STATUS_NO_SESSION = 9;
+// The largest image accepted. The supported mappers (0/1/2/3/4/24/26) top out
+// near 768KB, so this leaves room while keeping the one permanent PSRAM
+// reservation small against the 8MB part.
+constexpr uint32_t ROM_MAX_SIZE = 1024 * 1024;
+// BEGIN byte [7] bit 0: install the cart without resetting the CPU, the same
+// semantics as the web build's nes_swap_rom.
+constexpr uint8_t ROM_FLAG_SWAP = 0x01;
+// How long a half-finished transfer keeps owning the staging buffer. A sender
+// that dies mid-ROM would otherwise lock out every later attempt, so a new
+// session may take over once the old one has been quiet this long.
+constexpr uint32_t ROM_SESSION_TIMEOUT_MS = 3000;
 // 'N','P' | version | type | seq u16 LE | mask u64 LE
 constexpr uint8_t UDP_PIN_PACKET_SIZE = 14;
 // Only bits 0..59 are meaningful (pins 1..60); applyPinMask ignores the rest.

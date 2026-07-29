@@ -86,6 +86,8 @@
     set('lbl-swap-chr', 'swapChr');
     set('swap-note', 'swapNote');
     set('swap-url-btn', 'urlLoad');
+    set('swap-device-btn', 'sendDevice');
+    set('lbl-swap-noreset', 'sendDeviceNoReset');
     set('btn-settings', 'settingsBtn');
     set('settings-title', 'settingsTitle');
     set('lbl-master', 'masterVol');
@@ -1031,6 +1033,61 @@
     if (mirrorTimer) { clearTimeout(mirrorTimer); mirrorTimer = 0; }
     mirrorPost(mask);
   }
+
+  // --- send the current cartridge to the device over WiFi ---
+  //
+  // The device runs a ROM baked into its firmware, so this is the only way to
+  // put a different game on it. The relay does the UDP work (see send_rom in
+  // tools/serve_web.py) and answers once the device has accepted the image, so
+  // the button can stay disabled for the whole transfer instead of guessing.
+  //
+  // Offered only when a device is configured — without one there is nowhere to
+  // send to. Revealed here rather than where deviceIp is resolved so the whole
+  // feature reads as one block.
+  const DEVICE_ROM_MAX = 1024 * 1024;   // matches ROM_MAX_SIZE on the device
+  const swapDeviceRow = document.getElementById('swap-device-row');
+  const swapDeviceBtn = document.getElementById('swap-device-btn');
+  const swapDeviceNoReset = document.getElementById('swap-device-noreset');
+  if (deviceIp) swapDeviceRow.hidden = false;
+
+  // Device verdicts, as the relay maps them onto HTTP.
+  const DEVICE_ROM_ERRORS = {
+    409: 'deviceBusy',
+    413: 'deviceTooBig',
+    422: 'deviceUnsupported',
+    504: 'deviceNoAnswer',
+  };
+
+  async function sendRomToDevice() {
+    const hasCart = cartPrg && cartChr;
+    if (!hasCart) { statusEl.textContent = t('deviceNoCart'); return; }
+    const img = buildCombined();
+    if (img.length > DEVICE_ROM_MAX) { statusEl.textContent = t('deviceTooBig'); return; }
+
+    const noReset = swapDeviceNoReset.checked;
+    swapDeviceBtn.disabled = true;
+    statusEl.textContent = t('deviceSending');
+    try {
+      const res = await fetch('/api/rom?host=' + encodeURIComponent(deviceIp) + '&swap=' + (noReset ? 1 : 0), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: img,
+      });
+      if (res.ok) {
+        statusEl.textContent = t(noReset ? 'deviceSentSwap' : 'deviceSent');
+        return;
+      }
+      statusEl.textContent = t(DEVICE_ROM_ERRORS[res.status] || 'deviceFail');
+    } catch (err) {
+      // The relay itself is unreachable — a device that merely stayed silent
+      // comes back as 504 above, not as a rejected fetch.
+      console.warn('[nes] rom send failed:', err);
+      statusEl.textContent = t('deviceFail');
+    } finally {
+      swapDeviceBtn.disabled = false;
+    }
+  }
+  swapDeviceBtn.addEventListener('click', sendRomToDevice);
 
   // Everything the mirror needs is now initialised; volume changes may flow.
   // Push the current setting once so a device that booted at SPEAKER_VOLUME
