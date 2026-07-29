@@ -1,5 +1,16 @@
 #include "nes.h"
 
+// Cycle-accurate timing for the emulation breakdown. xthal_get_ccount() reads
+// the Xtensa CCOUNT register directly — esp_timer_get_time() costs more than
+// some of the batches being measured and its 1us resolution is coarser than a
+// whole APU step. core-macros.h rather than esp_cpu.h because the latter is
+// IDF-4.4 vintage here and pulls in esp_err_t without including esp_err.h, so it
+// does not compile standalone. Kept inside the guard so the shared core still
+// builds for web and host with no ESP headers on the include path.
+#ifdef NES_PROFILE
+#include <xtensa/core-macros.h>
+#endif
+
 namespace nes {
 
 // Famicom 60-pin cartridge connector: recompute signal masks from pin states.
@@ -209,11 +220,23 @@ void NES_HOT NES::catchUp() {
     const int cycles = pendingCpuCycles_;
     if (cycles <= 0) return;
     pendingCpuCycles_ = 0;
+#ifdef NES_PROFILE
+    const uint32_t profApuStart = xthal_get_ccount();
+#endif
     apu.stepMany(cycles);
+#ifdef NES_PROFILE
+    const uint32_t profPpuStart = xthal_get_ccount();
+    // Unsigned subtraction, so a CCOUNT wrap (every ~18s at 240MHz) still yields
+    // the right delta as long as the batch itself is shorter than 2^32 cycles.
+    profApuCycles += (uint32_t)(profPpuStart - profApuStart);
+#endif
     // PPU: stepMany's dot-skipping proved unsafe (it desynchronises mid-frame
     // register timing on synth.nes), so the PPU is still stepped per dot here.
     // The win from batching is in the APU and in not re-entering runFrame's loop.
     ppu.stepMany(cycles * 3);
+#ifdef NES_PROFILE
+    profPpuCycles += (uint32_t)(xthal_get_ccount() - profPpuStart);
+#endif
     // Only VRC-style carts drive anything off the CPU clock; for everything else
     // this loop was ~29,780 calls a frame into an empty virtual.
     if (mapperWantsCpuCycle_) {

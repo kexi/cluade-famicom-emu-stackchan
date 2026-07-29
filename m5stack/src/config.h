@@ -55,10 +55,51 @@ constexpr int AUDIO_RING_SAMPLES = 8192;     // ~186ms at 44.1kHz
 constexpr int AUDIO_CHUNK_SAMPLES = 512;     // ~11.6ms per submission
 constexpr int AUDIO_CHUNK_SLOTS = 4;         // rotation depth; playRaw holds the pointer
 
-// The NES produces 44100/60.0988 samples per frame. When the emulator cannot hit
-// 60fps the sample rate is retimed to the measured rate so playback stays
-// continuous (slightly lower pitch) instead of repeatedly underrunning.
-constexpr double AUDIO_SAMPLES_PER_FRAME = 733.8;
+// ---- playback rate control ----
+// The NES produces 44100/60.0988 = ~733.8 samples per frame. When the emulator
+// cannot hit 60fps it produces fewer, so the sample rate handed to playRaw is
+// retimed to what is actually being produced and playback stays continuous
+// (slightly lower pitch) instead of repeatedly underrunning.
+//
+// The rate handed to playRaw is servoed every frame instead of being recomputed
+// from a once-per-second fps average: a per-second update moves the pitch in
+// audible steps (a 27->32fps swing is nearly a whole tone) and, being derived
+// from the perf window, it also disappeared whenever PERF_LOG was off.
+//
+// How full the ring should sit in steady state. Half of AUDIO_RING_SAMPLES so
+// the same headroom exists in both directions — a late frame can eat 2048
+// samples before starving, and a fast one can add 2048 before dropping.
+constexpr int AUDIO_RING_TARGET = 2048;
+// Smoothing for the measured production rate. 0.03 per frame is a ~0.5s time
+// constant: long enough that one long frame does not move the pitch, short
+// enough to follow a real change in emulation speed within a second. Applied to
+// the sample count and the frame time separately, never to their ratio — see
+// updatePlaybackRate().
+constexpr float AUDIO_RATE_EWMA_ALPHA = 0.03f;
+// Frames during which the servo follows its target without the slew limit. The
+// EWMAs start at the 60fps ideal, so a ROM that runs slower needs a large one-off
+// correction that the slew limit would otherwise stretch over several seconds of
+// wrong-pitch playback. ~120 frames is a few EWMA time constants: long enough to
+// arrive, short enough that the audible transient stays at boot.
+constexpr int AUDIO_RATE_WARMUP_FRAMES = 120;
+// Ring-depth feedback, in Hz of rate correction per sample of error. The ring
+// level is the integral of the production/consumption mismatch, so feeding it
+// back is what removes the residual drift the EWMA alone cannot see. 0.02 pulls
+// a full 2048-sample error back with ~41Hz (~0.1%), i.e. gently.
+constexpr float AUDIO_RATE_FEEDBACK_GAIN = 0.02f;
+// Ceiling on that correction. Beyond ~1% the pitch offset becomes audible, and
+// a ring error that large is a symptom of the emulator's speed, not something
+// the servo should chase.
+constexpr float AUDIO_RATE_FEEDBACK_MAX = 0.01f;
+// Slew limit per frame. 0.25% per 16.6ms is below the ~0.5% pitch difference
+// most listeners can detect, so even a large rate change arrives as a drift
+// rather than a step.
+constexpr float AUDIO_RATE_SLEW_MAX = 0.0025f;
+// Snap window around AUDIO_SAMPLE_RATE. Once the emulator holds 60fps the servo
+// would otherwise hover a few Hz off nominal forever, dithering the pitch; the
+// wider release threshold is hysteresis so it does not chatter in and out.
+constexpr float AUDIO_RATE_SNAP_ENTER = 0.005f;
+constexpr float AUDIO_RATE_SNAP_EXIT = 0.0075f;
 
 // APU::mix() returns 0..~0.45 — positive only, with a standing DC offset of
 // about +0.24. A one-pole high-pass removes it; the pole sits near 1.0 so the
@@ -223,6 +264,11 @@ constexpr int64_t FRAME_PERIOD_US = 16639;
 
 // ------------------------------------------------------------------ logging
 #define PERF_LOG 1
+// CCOUNT ticks per microsecond, for turning NES_PROFILE's cycle counters into
+// times. The ESP32-S3 on the CoreS3 runs at 240MHz and nothing here changes the
+// clock, so this is a constant rather than a getCpuFrequencyMhz() call on a path
+// that runs once a second next to the counters it scales.
+constexpr uint32_t CPU_CYCLES_PER_US = 240;
 
 // --------------------------------------------------------------------- WiFi
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;

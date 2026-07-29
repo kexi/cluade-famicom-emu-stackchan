@@ -464,6 +464,35 @@ private:
     void halfFrame();
     void stepDmc();
 #ifdef NES_EMBEDDED
+    // Mixer division tables. channelOutputs() ran five-plus float divides per
+    // output sample and the APU measured 5.6ms/frame on hardware; every divide
+    // whose input is one of the channels' small integer levels is precomputed
+    // instead.
+    //
+    // Only the divides are tabulated — not the stage totals, and not the
+    // proportional splits. Folding the splits away (mix() sums shares that add
+    // back to the stage total, so pulseTable_[psum] + tnd would be algebraically
+    // identical) was measured to differ from the current path by 1 ULP on 34% of
+    // inputs, because splitting and re-summing rounds differently than the single
+    // add. The core is bit-exact-verified against the web build, so the sum keeps
+    // its exact shape and only its inputs come from tables — every downstream
+    // operation then sees identical values and the result is bit-identical.
+    // The tables themselves live in apu.cpp's anonymous namespace: they are
+    // read only from channelOutputs() and nothing else needs the symbols.
+    //
+    // They are indexed by raw integer level, so they are only valid while
+    // no channel is muted or re-gained. The embedded frontend never touches
+    // either array, but the UDP debug protocol could grow to, so the slow path
+    // stays reachable rather than silently producing wrong audio.
+    bool mixerTablesUsable() const {
+        for (int c = 0; c < 8; c++) {
+            const bool plain = chanEnable[c] && chanVolume[c] == 1.0f;
+            if (!plain) return false;
+        }
+        return true;
+    }
+#endif
+#ifdef NES_EMBEDDED
     // Record one scope sample. Both downsample sites call this so the two paths
     // cannot drift apart; the branch is what keeps it free when nobody is
     // watching. NES_INLINE because it sits in the per-sample path.
@@ -592,6 +621,15 @@ public:
 
     uint64_t cycleCount = 0;
     uint8_t cpuReadBus(uint16_t addr);
+
+#ifdef NES_PROFILE
+    // CPU cycles spent inside catchUp()'s APU and PPU batches, so the frontend
+    // can split emulation time three ways (whatever is left of the measured frame
+    // is the CPU core plus the mapper). Owned by the frontend: it reads and
+    // resets them, nothing here ever clears them.
+    uint64_t profApuCycles = 0;
+    uint64_t profPpuCycles = 0;
+#endif
 
     // Cached mapper capabilities, refreshed on load. Both guard per-cycle and
     // per-instruction virtual calls that are pure overhead on the many carts that
