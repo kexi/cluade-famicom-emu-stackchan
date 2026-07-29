@@ -58,7 +58,7 @@ window.I18N = {
     noHeader: ' (iNESヘッダなし)',
     swapDoneReset: '入替完了 (リセットで起動 — RAMは保持)',
     swapDonePower: '入替完了 (電源ONで起動)',
-    sendDevice: '実機に送る',
+    sendDevice: 'ｽﾀｯｸﾁｬﾝに送る',
     sendDeviceNoReset: 'リセットせず差し替え',
     deviceSending: '実機へ転送中…',
     deviceSent: '実機へ転送完了',
