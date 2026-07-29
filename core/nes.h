@@ -86,6 +86,19 @@ public:
     // banks must keep it current (see Mapper3::cpuWrite).
     virtual const uint8_t* chrWindow() const { return nullptr; }
 
+#ifdef NES_EMBEDDED
+    // Direct pointers to the four 8KB PRG slots at $8000/$A000/$C000/$E000, the
+    // CPU-side counterpart of chrWindow(). Fills win[] and returns true when the
+    // mapper's $8000+ reads are a plain lookup through those pointers; false
+    // leaves the caller on the virtual cpuRead() path.
+    //
+    // Four separate pointers rather than one base: every mapper here banks PRG at
+    // 8KB or coarser, so a slot is always contiguous, but the slots need not be
+    // adjacent in the ROM (MMC3 slot 1 and 3 come from unrelated banks) and a
+    // 16KB cart mirrors two slots onto the same bytes.
+    virtual bool prgWindows(const uint8_t* win[4]) const { (void)win; return false; }
+#endif
+
     // Called once per scanline at PPU dot ~260 when rendering enabled (MMC3 IRQ)
     virtual void scanline() {}
     // Called once per CPU cycle (VRC-style IRQ counters, expansion audio)
@@ -116,6 +129,37 @@ public:
     const uint8_t* chrData() const { return chr_.data(); }
 
 protected:
+#ifdef NES_EMBEDDED
+    // Window derivation for the mappers whose $8000+ read is
+    // prg_[(addr - 0x8000) % prg_.size()] — Mapper 0 and 3, i.e. no PRG banking.
+    //
+    // Requires an 8KB-aligned PRG so that a slot never straddles the wrap: at
+    // 16KB the modulo mirrors $C000-$FFFF back onto the first half, which is
+    // exactly slots 0 and 1 repeated, but at (say) 12KB the wrap would land
+    // mid-slot and no single pointer could describe it. Non-multiples are not
+    // real hardware, so they simply decline the fast path.
+    bool fixedPrgWindows(const uint8_t* win[4]) const {
+        const size_t size = prg_.size();
+        const bool slotAligned = size >= 0x2000 && (size % 0x2000) == 0;
+        if (!slotAligned) return false;
+        for (int slot = 0; slot < 4; slot++) {
+            win[slot] = prg_.data() + (((size_t)slot * 0x2000) % size);
+        }
+        return true;
+    }
+    // Window derivation from four already-resolved 8KB bank numbers, applying the
+    // same bank % banks folding the cpuRead paths do.
+    bool bankedPrgWindows(const uint8_t* win[4], const int bank8k[4]) const {
+        const size_t size = prg_.size();
+        const int banks = (int)(size / 0x2000);
+        const bool slotAligned = banks > 0 && (size % 0x2000) == 0;
+        if (!slotAligned) return false;
+        for (int slot = 0; slot < 4; slot++) {
+            win[slot] = prg_.data() + (size_t)(bank8k[slot] % banks) * 0x2000;
+        }
+        return true;
+    }
+#endif
     RomBuffer prg_, chr_, prgRam_;
     Mirroring mirroring_;
     bool battery_;
@@ -653,6 +697,24 @@ public:
     }
 
 #ifdef NES_EMBEDDED
+    // Cached PRG bank pointers for $8000-$FFFF, the CPU-side analogue of the
+    // PPU's chrWindow_. Instruction fetch alone reads this range tens of
+    // thousands of times a frame, and each one was a virtual cpuRead() that then
+    // recomputed its bank arithmetic — on Mapper 3 a modulo per byte fetched.
+    //
+    // Refreshed rather than computed on demand: bank state only changes on a
+    // write to the cartridge, which is rare enough that recomputing all four
+    // slots there is free compared to testing for staleness on every read.
+    const uint8_t* prgWin_[4] = {nullptr, nullptr, nullptr, nullptr};
+    bool prgFastValid_ = false;
+    void refreshPrgWindows() {
+        // Dropped while the connector is faulty for the same reason
+        // refreshChrWindow() drops its pointer: the window bypasses the address
+        // and data masking, so a broken PRG line would go unnoticed.
+        const bool canUseWindows = mapper && !pinsFaulty_;
+        prgFastValid_ = canUseWindows && mapper->prgWindows(prgWin_);
+    }
+
     // Catch-up scheduling.
     //
     // Stepping the PPU three times and the APU once inside the CPU's cycle loop

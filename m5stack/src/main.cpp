@@ -558,6 +558,9 @@ static void applyRomRequest() {
                 // a real pointer into the old cart's CHR — which std::move just
                 // freed. Skipping this leaves the PPU reading dangling memory.
                 g_nes.ppu.refreshChrWindow();
+                // The PRG windows point into the old cart the same way, and the
+                // CPU reads them far more often than the PPU reads CHR.
+                g_nes.refreshPrgWindows();
                 ok = true;
             }
         } else {

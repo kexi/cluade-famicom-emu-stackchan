@@ -16,6 +16,11 @@ public:
     }
     uint8_t ppuRead(uint16_t addr) override { return chr_[addr & 0x1FFF]; }
     const uint8_t* chrWindow() const override { return chr_.data(); }
+#ifdef NES_EMBEDDED
+    bool prgWindows(const uint8_t* win[4]) const override {
+        return fixedPrgWindows(win);
+    }
+#endif
 };
 
 // ------------------------------------------------------------- Mapper 1: MMC1
@@ -69,6 +74,39 @@ public:
     }
     uint8_t ppuRead(uint16_t addr) override { return chr_[chrAddr(addr)]; }
     void ppuWrite(uint16_t addr, uint8_t v) override { if (chrRam_) chr_[chrAddr(addr)] = v; }
+#ifdef NES_EMBEDDED
+    bool prgWindows(const uint8_t* win[4]) const override {
+        const bool bankable = prgBanks_ > 0;
+        if (!bankable) return false;
+        // MMC1 selects 16KB banks and folds with `bank % prgBanks_` on the 16KB
+        // index, so the fold must happen before the split into 8KB halves — doing
+        // it on the derived 8KB number would wrap at the wrong modulus on any cart
+        // whose bank count is not a power of two.
+        const int prgMode = (control_ >> 2) & 3;
+        int lo16, hi16;   // 16KB banks feeding $8000-$BFFF and $C000-$FFFF
+        if (prgMode <= 1) {
+            // 32KB mode: one aligned pair, low half from the even bank.
+            lo16 = (prgBank_ & 0x0E);
+            hi16 = (prgBank_ & 0x0E) + 1;
+        } else if (prgMode == 2) {
+            lo16 = 0;
+            hi16 = prgBank_;
+        } else {
+            lo16 = prgBank_;
+            hi16 = prgBanks_ - 1;
+        }
+        const size_t size = prg_.size();
+        const bool slotAligned = (size % 0x2000) == 0;
+        if (!slotAligned) return false;
+        const size_t loBase = (size_t)(lo16 % prgBanks_) * 0x4000;
+        const size_t hiBase = (size_t)(hi16 % prgBanks_) * 0x4000;
+        win[0] = prg_.data() + loBase;
+        win[1] = prg_.data() + loBase + 0x2000;
+        win[2] = prg_.data() + hiBase;
+        win[3] = prg_.data() + hiBase + 0x2000;
+        return true;
+    }
+#endif
 private:
     size_t chrAddr(uint16_t addr) {
         size_t banks4k = chr_.size() / 0x1000;
@@ -108,6 +146,23 @@ public:
     }
     uint8_t ppuRead(uint16_t addr) override { return chr_[addr & 0x1FFF]; }
     const uint8_t* chrWindow() const override { return chr_.data(); }
+#ifdef NES_EMBEDDED
+    bool prgWindows(const uint8_t* win[4]) const override {
+        const bool bankable = prgBanks_ > 0;
+        if (!bankable) return false;
+        // Same ordering rule as MMC1: fold the 16KB index, then split.
+        const size_t size = prg_.size();
+        const bool slotAligned = (size % 0x2000) == 0;
+        if (!slotAligned) return false;
+        const size_t loBase = (size_t)(bank_ % prgBanks_) * 0x4000;
+        const size_t hiBase = (size_t)((prgBanks_ - 1) % prgBanks_) * 0x4000;
+        win[0] = prg_.data() + loBase;
+        win[1] = prg_.data() + loBase + 0x2000;
+        win[2] = prg_.data() + hiBase;
+        win[3] = prg_.data() + hiBase + 0x2000;
+        return true;
+    }
+#endif
 private:
     int bank_ = 0, prgBanks_;
 };
@@ -128,6 +183,12 @@ public:
         return chr_[(size_t)bank_ * 0x2000 + (addr & 0x1FFF)];
     }
     const uint8_t* chrWindow() const override { return chr_.data() + (size_t)bank_ * 0x2000; }
+#ifdef NES_EMBEDDED
+    // CNROM banks CHR only; PRG is fixed, so the same derivation as NROM.
+    bool prgWindows(const uint8_t* win[4]) const override {
+        return fixedPrgWindows(win);
+    }
+#endif
 private:
     int bank_ = 0;
 };
@@ -181,6 +242,21 @@ public:
         else irqCounter_--;
         if (irqCounter_ == 0 && irqEnabled_) irqPending_ = true;
     }
+#ifdef NES_EMBEDDED
+    // MMC3 already banks in 8KB units, so the slots map straight across. Mirrors
+    // cpuRead's switch exactly, including the $C000 slot's dependence on the
+    // bankSelect_ swap bit.
+    bool prgWindows(const uint8_t* win[4]) const override {
+        const bool swap = bankSelect_ & 0x40;
+        const int bank8k[4] = {
+            swap ? prgBanks8k_ - 2 : regs_[6],
+            regs_[7],
+            swap ? regs_[6] : prgBanks8k_ - 2,
+            prgBanks8k_ - 1,
+        };
+        return bankedPrgWindows(win, bank8k);
+    }
+#endif
     // MMC3 counts scanlines, not CPU cycles, so cpuCycle() stays unimplemented.
     bool hasIrq() const override { return true; }
     bool irqPending() const override { return irqPending_; }
@@ -226,6 +302,29 @@ public:
         else                    bank = prgBanks8_ - 1;
         return prg_[((size_t)(bank % prgBanks8_)) * 0x2000 + (addr & 0x1FFF)];
     }
+
+#ifdef NES_EMBEDDED
+    bool prgWindows(const uint8_t* win[4]) const override {
+        const bool bankable = prgBanks8_ > 0;
+        if (!bankable) return false;
+        // Reproduces cpuRead's two-stage folding literally: the 16KB register is
+        // folded by prgBanks16_ before doubling to an 8KB index, then folded again
+        // by prgBanks8_ inside bankedPrgWindows. The outer fold is in fact
+        // redundant (prgBanks8_ is exactly 2*prgBanks16_, so the two agree for
+        // every input), but it is kept so this reads as a transcription of
+        // cpuRead rather than as an algebraic simplification a later edit to
+        // either side could silently invalidate.
+        const int banks16 = prgBanks16_ ? prgBanks16_ : 1;
+        const int prg16Folded = (prg16_ % banks16) * 2;
+        const int bank8k[4] = {
+            prg16Folded,        // $8000: (addr >> 13) & 1 == 0
+            prg16Folded + 1,    // $A000: (addr >> 13) & 1 == 1
+            prg8_,
+            prgBanks8_ - 1,
+        };
+        return bankedPrgWindows(win, bank8k);
+    }
+#endif
 
     void cpuWrite(uint16_t addr, uint8_t v) override {
         if (addr >= 0x6000 && addr < 0x8000) { if (prgRamEnable_) prgRam_[addr - 0x6000] = v; return; }

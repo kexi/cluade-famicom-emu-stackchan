@@ -71,6 +71,10 @@ void NES::applyPinMask(uint64_t mask) {
     // PPU's direct-CHR shortcut must be re-evaluated (refreshChrWindow drops it
     // to null while the connector is faulty).
     ppu.refreshChrWindow();
+#ifdef NES_EMBEDDED
+    // Same reasoning on the CPU side: the PRG windows bypass the masking too.
+    refreshPrgWindows();
+#endif
 }
 
 // ---- shared cartridge-connector fault paths ----
@@ -100,6 +104,9 @@ bool NES::loadRom(const uint8_t* data, size_t size) {
     refreshMapperCaps();
     powerOn();
     ppu.refreshChrWindow();
+#ifdef NES_EMBEDDED
+    refreshPrgWindows();
+#endif
     return true;
 }
 
@@ -153,6 +160,14 @@ uint8_t NES_HOT NES::cpuRead(uint16_t addr) {
 uint8_t NES_HOT NES::cpuReadBus(uint16_t addr) {
     if (addr < 0x2000) return ram[addr & 0x7FF];
 #ifdef NES_EMBEDDED
+    // Cartridge ROM through the cached bank pointers. Placed above the register
+    // decode because $8000+ is by far the most common address here (every
+    // instruction fetch), and the ranges are disjoint so the order is free.
+    // prgFastValid_ is false whenever a pin is broken, which is what routes the
+    // faulty connector back down to cartReadFaulty() below.
+    const bool prgFastPath = addr >= 0x8000 && prgFastValid_;
+    if (prgFastPath) return prgWin_[(addr >> 13) & 3][addr & 0x1FFF];
+
     // These observe PPU/APU state, so the deferred cycles must land first.
     if (addr < 0x4000) { catchUp(); return ppu.readReg(addr); }
     if (addr == 0x4015) { catchUp(); return apu.readStatus(); }
@@ -211,6 +226,9 @@ void NES_HOT NES::cpuWrite(uint16_t addr, uint8_t v) {
     // Bank switches can move the CHR window; re-cache it. Harmless while faulty
     // (refreshChrWindow yields null then), so it stays outside the branch.
     ppu.refreshChrWindow();
+    // Likewise for PRG: this is the only path that can move a PRG bank, so
+    // recomputing the four slots here is what lets the read side skip the check.
+    refreshPrgWindows();
 #endif
 }
 
