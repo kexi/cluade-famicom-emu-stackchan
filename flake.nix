@@ -12,8 +12,10 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         # nixpkgs の platformio-core は esptool の実行時依存を同梱しないため、
-        # pio と同じ python (3.12) の site-packages を PYTHONPATH で補う
-        pioEsptoolDeps = with pkgs.python312Packages; [ intelhex reedsolo bitstring ];
+        # pio と同じ python (3.12) の site-packages を PYTHONPATH で補う。
+        # pip は tool-esptoolpy の postinstall が `python -m pip install` を
+        # 呼ぶため (nix の python 環境は pip を持たず初回インストールが失敗する)
+        pioEsptoolDeps = with pkgs.python312Packages; [ intelhex reedsolo bitstring pip ];
         pioEsptoolPath = pkgs.lib.concatMapStringsSep ":"
           (p: "${p}/lib/python3.12/site-packages") pioEsptoolDeps;
       in
