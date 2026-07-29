@@ -395,7 +395,15 @@ static bool connectWifi() {
     return true;
 }
 
+static void joinBand();
+
 static void haltWithError(const char* text) {
+    // A band may still be in flight: applyRomRequest() can reach here mid-frame,
+    // with a startWrite() open and DMA armed against the framebuffer. Drawing on
+    // top of that would corrupt the error screen and leave the panel parked on an
+    // open transaction, i.e. the one message the user needs would be the one
+    // message they cannot read.
+    joinBand();
     M5.Display.fillScreen(TFT_BLACK);
     M5.Display.setTextColor(TFT_RED, TFT_BLACK);
     showMessage(text, 8, 2);
@@ -694,31 +702,25 @@ static void applyVolumeRequest() {
 //
 // Returns how many samples were written, which is what the rate servo in loop()
 // measures the production rate from.
-static int enqueueAudio() {
-    const int produced = g_nes.apu.sampleCount;
-    g_nes.apu.sampleCount = 0;
-    // Famicom audio loops out through the cartridge (pins 45/46), so a bad
-    // contact there silences the console — same semantics as the web build's
-    // muteIfCartAudioBroken. Zero-fill rather than skip so the ring keeps being
-    // fed and playback stays continuous instead of underrunning into clicks.
-    const bool cartAudioBroken = !g_nes.soundOk;
-    // APU::mix() swings 0..~0.45, i.e. entirely positive with a large standing DC
-    // component. Feeding that to the speaker wastes half the headroom and turns
-    // every queue start/stop into an audible step, so block DC first.
-    static float dcX1 = 0.0f, dcY1 = 0.0f;
-    // Locals for the loop-carried state and the indices: as members/globals the
-    // compiler has to reload them across the store to g_ring, which it cannot
-    // prove does not alias them.
-    float x1 = dcX1, y1 = dcY1;
+// DC blocker state, carried across calls. APU::mix() swings 0..~0.45, i.e.
+// entirely positive with a large standing DC component; feeding that to the
+// speaker wastes half the headroom and turns every queue start/stop into an
+// audible step.
+static float g_dcX1 = 0.0f, g_dcY1 = 0.0f;
+
+// The filter-and-store loop. Muted is a template parameter, not a runtime test,
+// so the mute check stays out of the per-sample path while both variants keep a
+// single definition of the filter — the muted one still advances the state, just
+// with x fixed at zero, so a cart fault does not leave a discontinuity behind.
+template <bool Muted>
+static void enqueueSamples(const float* src, int count) {
+    // Loop-carried state in locals: as globals the compiler has to reload them
+    // across the store to g_ring, which it cannot prove does not alias them.
+    float x1 = g_dcX1, y1 = g_dcY1;
     int w = g_ringWrite, r = g_ringRead;
-    // The mute test is loop-invariant, so it selects the source pointer once
-    // instead of costing a branch per sample. A silent buffer rather than a
-    // second loop body keeps the filter state advancing identically either way.
-    static const float silence[AUDIO_BUF_SAMPLES] = {};
-    const float* const src = cartAudioBroken ? silence : g_nes.apu.sampleBuf;
     constexpr int ringMask = AUDIO_RING_MASK;
-    for (int i = 0; i < produced; i++) {
-        const float x = src[i];
+    for (int i = 0; i < count; i++) {
+        const float x = Muted ? 0.0f : src[i];
         const float y = x - x1 + AUDIO_DC_POLE * y1;
         x1 = x;
         y1 = y;
@@ -739,10 +741,23 @@ static int enqueueAudio() {
             g_ringDropped++;
         }
     }
-    dcX1 = x1;
-    dcY1 = y1;
+    g_dcX1 = x1;
+    g_dcY1 = y1;
     g_ringWrite = w;
     g_ringRead = r;
+}
+
+static int enqueueAudio() {
+    const int produced = g_nes.apu.sampleCount;
+    g_nes.apu.sampleCount = 0;
+    // Famicom audio loops out through the cartridge (pins 45/46), so a bad
+    // contact there silences the console — same semantics as the web build's
+    // muteIfCartAudioBroken. Still run the loop rather than skipping it, so the
+    // ring keeps being fed and playback stays continuous instead of underrunning
+    // into clicks.
+    const bool cartAudioBroken = !g_nes.soundOk;
+    if (cartAudioBroken) enqueueSamples<true>(nullptr, produced);
+    else enqueueSamples<false>(g_nes.apu.sampleBuf, produced);
     return produced;
 }
 
@@ -793,29 +808,32 @@ static void drainAudio(uint32_t rate) {
     }
 }
 
-// Display refresh divisor, adjusted from how often the loop misses its deadline.
+// Display refresh divisor: the PPU only paints every Nth frame (see
+// PPU::renderThisFrame), and the frames in between are what the band transfers
+// hide under. Emulation keeps its real-time 60Hz and only the panel's refresh
+// rate gives way.
 //
-// Raising it does two things at once: the PPU stops writing pixels on the
-// skipped frames (see PPU::renderThisFrame), and — because those frames never
-// touch the framebuffer — the DMA transfer of the last drawn frame is free to
-// run underneath them. Emulation therefore keeps its real-time 60Hz and only the
-// panel's refresh rate gives way.
+// A controller used to float this between MIN and MAX from how often the loop
+// missed its deadline. It is gone: the segmented push made the draw frame cheap
+// enough that MIN and MAX converged on the same value, leaving nothing to trade,
+// and the divisor is now pinned to the band count by static_assert. Kept as a
+// variable rather than folded into the constant so the PERF_LOG line still has
+// something to report and a future controller has somewhere to write.
 static uint32_t g_divisor = DISPLAY_DIVISOR_INITIAL;
 
-static void adjustDivisor(bool wasLate) {
-    static int windowFrames = 0, lateFrames = 0;
-    windowFrames++;
-    if (wasLate) lateFrames++;
-    const bool windowOpen = windowFrames < DIVISOR_WINDOW_FRAMES;
-    if (windowOpen) return;
+// "A band was kicked and its transaction is still open." File scope rather than
+// a local of loop(): any path that draws to the panel has to be able to close
+// that transaction first, and haltWithError() is reachable from the ROM-swap
+// handler in the middle of a frame.
+static bool g_pushOutstanding = false;
 
-    const bool tooSlow = lateFrames >= DIVISOR_LATE_WIDEN;
-    const bool hasSlack = lateFrames <= DIVISOR_LATE_NARROW;
-    if (tooSlow && g_divisor < DISPLAY_DIVISOR_MAX) g_divisor++;
-    else if (hasSlack && g_divisor > DISPLAY_DIVISOR_MIN) g_divisor--;
-
-    windowFrames = 0;
-    lateFrames = 0;
+// Close the open band transaction, if there is one, and wait for its DMA.
+// Panel_LCD::end_transaction() waits on the bus, so this both joins the transfer
+// and releases the SPI lock; waitDMA() alone would leave the lock held.
+static void joinBand() {
+    if (!g_pushOutstanding) return;
+    M5.Display.endWrite();
+    g_pushOutstanding = false;
 }
 
 // Kick one horizontal band of the framebuffer at the panel and return.
@@ -934,7 +952,7 @@ void loop() {
 #if PERF_LOG
     static int64_t perfWindowUs = esp_timer_get_time();
     static uint32_t perfFrames = 0, perfDrawn = 0;
-    static int64_t perfEmuUs = 0, perfPushUs = 0;
+    static int64_t perfEmuUs = 0;
     // Split by drawn/skipped: the gap between them is the cost of the draw path,
     // which is what the display divisor actually buys back.
     static int64_t perfEmuDrawUs = 0, perfEmuSkipUs = 0, perfJoinUs = 0;
@@ -954,23 +972,17 @@ void loop() {
     // nominal rate would drain the ring faster than it fills.
     static uint32_t playbackRate = AUDIO_SAMPLE_RATE;
 
-    // Counts every loop iteration. Drives both the button poll below and the
-    // display divisor further down, so it is incremented exactly once, here.
+    // Counts every loop iteration; drives the display divisor below, so it is
+    // incremented exactly once, here.
     static uint32_t frameIndex = 0;
     const uint32_t thisFrame = frameIndex++;
 
-    // Every other frame. M5.update() rescans the touch panel over I2C and debounces
-    // the buttons, and the only things downstream of it are BtnA/BtnB (SELECT and
-    // START) and BtnC's hold-to-reset — all human button presses, where a 33ms
-    // poll is far below the threshold of noticing. The pads that need per-frame
-    // latency (UDP and Grove) are read independently in applyInput(), which still
-    // runs every frame, so nothing about controller responsiveness changes.
-    //
-    // wasHold() latches until the next update() rather than firing on a specific
-    // frame, so halving the rate delays the reset by at most one frame instead of
-    // dropping it.
-    const bool pollButtons = (thisFrame & 1) == 0;
-    if (pollButtons) M5.update();
+    // Every frame, deliberately. Polling this at half rate to save ~0.2ms was
+    // tried and reverted: touchButtonBits() reads BtnA/BtnB with isPressed(),
+    // which is a level test against state that only advances inside update(), so
+    // any tap shorter than the polling interval is not delayed but lost outright
+    // — and a 33ms window drops taps a player would consider perfectly normal.
+    M5.update();
     applyInput();
     applyPinChanges();
     applyResetRequest();
@@ -990,42 +1002,62 @@ void loop() {
     // read yet and tear the picture.
     static int bandIndex = 0;
     const bool drawThisFrame = (thisFrame % g_divisor) == 0;
-    // Bands still owed from the previous picture. Normally zero by the time the
-    // next draw frame arrives (divisor >= segments), but adjustDivisor() can
-    // narrow the divisor at any window boundary, so this is not guaranteed —
-    // the flush below settles it before runFrame() repaints.
+    // Bands still owed from the previous picture. A static_assert ties the
+    // divisor floor to the segment count, so at the configured divisor this is
+    // always zero on a draw frame; the flush below is the defence for a divisor
+    // that does not satisfy that relation.
     const bool pictureInFlight = bandIndex != 0;
     g_nes.ppu.renderThisFrame = drawThisFrame;
-
-    // "A band was kicked and its transaction is still open." Joined immediately
-    // before the next kick rather than here at the top of the loop — see the
-    // kick site for why that ordering is both faster and still safe.
-    static bool pushOutstanding = false;
 
     const int64_t emuStartUs = esp_timer_get_time();
     // A draw frame can arrive while bands are still owed. Finish the old picture
     // first: runFrame() is about to repaint, so those rows would otherwise ship
     // as a mix of two pictures.
-    //
-    // Unreachable while the divisor is pinned at DISPLAY_DMA_SEGMENTS, which it
-    // now is (DISPLAY_DIVISOR_MIN). Kept as the safety valve that makes the band
-    // scheme correct for any divisor rather than only the configured one — a
-    // narrower divisor would otherwise tear silently.
     const bool mustFlushBeforeRepaint = drawThisFrame && pictureInFlight;
     if (mustFlushBeforeRepaint) {
-        if (pushOutstanding) {
-            M5.Display.endWrite();
-            pushOutstanding = false;
-        }
+        joinBand();
         while (bandIndex != 0) {
             pushBand(bandIndex);
             bandIndex = (bandIndex + 1) % DISPLAY_DMA_SEGMENTS;
             M5.Display.endWrite();
         }
     }
+
+    // Guard the repaint-versus-last-band race. The final band is normally still
+    // in flight here and that is fine, because the repaint reaches its rows far
+    // later than the wire does — but only while emulation stays slower than
+    // DISPLAY_REPAINT_GUARD_MS. Once it is not, the transfer has to be joined
+    // before anything repaints over it.
+    //
+    // Tested against the smoothed draw-frame emulation time rather than the last
+    // one, so a single quick frame cannot arm a stall; the EWMA is updated after
+    // runFrame() below. Independent of PERF_LOG, which is a diagnostic and may be
+    // compiled out.
+    // Seeded from the first draw frame rather than a large constant. A large seed
+    // looks conservative — the guard cannot fire until the average has decayed
+    // into range — but that decay takes ~100 draw frames, i.e. ten seconds during
+    // which a fast build would be running completely unguarded.
+    static float emuDrawMs = 0.0f;
+    static bool emuDrawSeeded = false;
+    const bool repaintRacesBand =
+        drawThisFrame && emuDrawSeeded && emuDrawMs < DISPLAY_REPAINT_GUARD_MS;
+    if (repaintRacesBand) joinBand();
     const int64_t flushEndUs = esp_timer_get_time();
     g_nes.runFrame();
     const int64_t emuEndUs = esp_timer_get_time();
+
+    // Feed the guard above. Only draw frames count: they are the ones that
+    // repaint, and a skipped frame is much cheaper, so mixing the two in would
+    // understate the writer's pace and arm the guard needlessly.
+    if (drawThisFrame) {
+        const float drawMs = (float)(emuEndUs - flushEndUs) / 1000.0f;
+        // The first sample is taken whole: there is no prior average to blend it
+        // into, and starting at the real value is what keeps the guard live from
+        // the second picture onward instead of after a decay.
+        emuDrawMs = emuDrawSeeded ? emuDrawMs + DISPLAY_EMU_EWMA_ALPHA * (drawMs - emuDrawMs)
+                                  : drawMs;
+        emuDrawSeeded = true;
+    }
 
     // Answered here, not with the other applyXxx handlers: the scope rows are
     // decimated from apu.sampleCount, which describes the frame that just ran and
@@ -1061,23 +1093,21 @@ void loop() {
     // finish on the wire at kick+4.1ms. Margin ~11.4ms.
     //
     // That margin shrinks as emulation gets faster, because the writer speeds up
-    // while the reader is fixed at the SPI clock. Break-even is emuD = 4.7ms; at
-    // the ~13ms a comfortable 60fps would imply there is still ~7ms of slack.
-    // Revisit if emuD ever approaches 5ms, or if DISPLAY_DMA_ROWS or
-    // SPI_WRITE_FREQ change — those move the reader side of the calculation.
+    // while the reader is fixed at the SPI clock. Break-even is emuD = 4.7ms.
+    // This is no longer left to a comment: the guard before runFrame() joins the
+    // band outright once the smoothed draw-frame time falls under
+    // DISPLAY_REPAINT_GUARD_MS.
     //
     // Nothing else may touch M5.Display while a band is outstanding; the
-    // boot-time showMessage() calls are all done by then.
-    if (pushOutstanding) {
-        M5.Display.endWrite();
-        pushOutstanding = false;
-    }
+    // boot-time showMessage() calls are all done by then, and haltWithError()
+    // joins first.
+    joinBand();
     const int64_t joinEndUs = esp_timer_get_time();
 
     const bool hasBandToPush = drawThisFrame || pictureInFlight;
     if (hasBandToPush) {
         pushBand(bandIndex);
-        pushOutstanding = true;
+        g_pushOutstanding = true;
         bandIndex = (bandIndex + 1) % DISPLAY_DMA_SEGMENTS;
     }
     const int64_t dmaEndUs = esp_timer_get_time();
@@ -1087,7 +1117,6 @@ void loop() {
 
 #if PERF_LOG
     perfEmuUs += emuEndUs - emuStartUs;
-    perfPushUs += pushEndUs - emuEndUs;
     // join= is now the wait before the next kick, plus the divisor-transition
     // flush before runFrame() when that fires at all.
     perfJoinUs += (joinEndUs - audioEndUs) + (flushEndUs - emuStartUs);
@@ -1111,12 +1140,13 @@ void loop() {
         const double fps = perfFrames * 1000000.0 / (double)windowUs;
         const double drawHz = perfDrawn * 1000000.0 / (double)windowUs;
         const uint32_t skipped = perfFrames - perfDrawn;
-        Serial.printf("fps=%.1f div=%lu draw=%.1fHz emu=%lldus push=%lldus "
+        // push= is gone: it was the sum of aud/join/dma/dr2, which are all now
+        // reported individually on the second line.
+        Serial.printf("fps=%.1f div=%lu draw=%.1fHz emu=%lldus "
                       "join=%lldus emuD=%lldus emuS=%lldus "
                       "ring=%d..%d drop=%lu rate=%lu\n",
                       fps, (unsigned long)g_divisor, drawHz,
                       (long long)(perfEmuUs / perfFrames),
-                      (long long)(perfPushUs / perfFrames),
                       (long long)(perfJoinUs / perfFrames),
                       (long long)(perfDrawn ? perfEmuDrawUs / perfDrawn : 0),
                       (long long)(skipped ? perfEmuSkipUs / skipped : 0),
@@ -1151,7 +1181,6 @@ void loop() {
         perfFrames = 0;
         perfDrawn = 0;
         perfEmuUs = 0;
-        perfPushUs = 0;
         perfJoinUs = 0;
         perfEmuDrawUs = 0;
         perfEmuSkipUs = 0;
@@ -1168,7 +1197,6 @@ void loop() {
     nextFrameUs += FRAME_PERIOD_US;
     const int64_t remainingUs = nextFrameUs - esp_timer_get_time();
     const bool behindSchedule = remainingUs <= 0;
-    adjustDivisor(behindSchedule);
     if (behindSchedule) {
         // Carry the deficit instead of resyncing: the repaint frame structurally
         // overruns the period (~19ms vs 16.6ms) while the following skip frames
