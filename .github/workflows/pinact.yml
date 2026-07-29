@@ -1,0 +1,32 @@
+# GitHub Actions が commit SHA でピン留めされていることを検証する
+# (タグは後から差し替え可能なため、SHA 固定でサプライチェーン攻撃を防ぐ)
+name: pinact
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".github/actions/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - ".github/actions/**"
+
+permissions: {}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # skip_push: 検証のみ (未ピンの action があれば fail、修正の push はしない)
+      # verify: ピン済み SHA が注記のタグと本当に一致するかリモートに照合する
+      - uses: suzuki-shunsuke/pinact-action@896d595f299e71d65b9d28349d6956abe144390a # v3.0.0
+        with:
+          skip_push: "true"
+          verify: "true"
