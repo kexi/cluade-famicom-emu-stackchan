@@ -1,0 +1,55 @@
+# 各ビルドターゲット (コア構文チェック / web WASM / M5Stack ファームウェア) が
+# 壊れていないことを PR と main push で保証する。ツールチェーンはローカルと
+# 同じ nix flake (nix develop) から供給する
+name: build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  # コアの構文チェック (web / NES_EMBEDDED 両モード)
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - run: nix develop --command just check
+
+  # Web (WASM) ビルド
+  build-web:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - run: nix develop --command just build-web
+
+  # M5Stack CoreS3 ファームウェアビルド
+  build-firmware:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      # espressif32 プラットフォーム + toolchain (数百MB) の初回ダウンロードをキャッシュ
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.platformio
+          key: platformio-${{ runner.os }}-${{ hashFiles('m5stack/platformio.ini') }}
+      - run: nix develop --command just secrets # ダミーの WiFi 設定 (ビルドに必要)
+      - run: nix develop --command just fetch-rom # 埋め込み ROM (board_build.embed_files)
+      - run: nix develop --command just build
