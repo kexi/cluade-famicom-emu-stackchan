@@ -27,6 +27,7 @@
             pkgs.just            # タスクランナー (justfile 参照)
             pkgs.lefthook        # git hook 管理 (lefthook.yml 参照)
             pkgs.gitleaks        # pre-commit での秘密情報スキャン
+            pkgs.pinact          # GitHub Actions の SHA ピン留め (CI と同じ版を flake で固定)
           ];
           # nix store 内の emscripten キャッシュは読み取り専用のため、
           # 書き込み可能な場所に複製して EM_CACHE を向ける
