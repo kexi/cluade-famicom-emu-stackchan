@@ -1,6 +1,7 @@
 # Contributing
 
-開発環境はすべて nix flake で固定しています(clang / Emscripten / PlatformIO / Python / just / lefthook / gitleaks)。
+開発ツールは nix flake で固定しています(clang / Emscripten / PlatformIO / uv / just / lefthook / gitleaks)。
+Python スクリプト (`tools/*.py`) は uv が PEP 723 メタデータに従って実行時にインタプリタと依存を解決します(uv 自体は flake で固定)。
 ツールを個別にインストールする必要はなく、環境の入り方は以下の2通りです。
 
 ## 1. nix のインストール
@@ -20,10 +21,14 @@ experimental-features = nix-command flakes
 ## 2A. direnv を使う(推奨)
 
 [direnv](https://direnv.net) を入れておくと、リポジトリに `cd` するだけで環境が整います。
+あわせて [nix-direnv](https://github.com/nix-community/nix-direnv) の導入を推奨します。
+direnv 標準の `use flake` は devshell をキャッシュせず GC root も張らないため、
+`nix-collect-garbage` のたびに環境が丸ごと再構築されます。nix-direnv はどちらも解決します。
 
 ```sh
 # インストール例 (nix でも brew でも可)
-nix profile install nixpkgs#direnv
+nix profile install nixpkgs#direnv nixpkgs#nix-direnv
+echo 'source $HOME/.nix-profile/share/nix-direnv/direnvrc' >> ~/.config/direnv/direnvrc
 
 # シェルへのフック (fish の場合。bash/zsh は direnv のドキュメント参照)
 echo 'direnv hook fish | source' >> ~/.config/fish/config.fish
@@ -67,15 +72,7 @@ just fetch-rom   # デフォルト ROM (game.nes) を取得 (*.nes は gitignore
 ## よく使うタスク
 
 タスクランナーは [just](https://github.com/casey/just) です。一覧は `just --list` で確認できます。
-
-| タスク | コマンド |
-|------|------|
-| M5Stack ファームウェアのビルド | `just build` |
-| ビルド + 実機書き込み | `just flash [port]` |
-| シリアルモニタ | `just monitor` |
-| web (WASM) のビルド | `just build-web` |
-| web 配信 + 実機中継 | `just serve` → `http://localhost:8000/?device=<実機IP>` |
-| コアの構文チェック (web/組み込み両モード) | `just check` |
+主要タスクの一覧表は [README の Reproducible toolchain 節](README.md#reproducible-toolchain-nix) にあります(表の重複管理を避けるためここには置きません)。
 
 ## ブランチ運用
 

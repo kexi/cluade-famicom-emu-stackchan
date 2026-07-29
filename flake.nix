@@ -20,6 +20,7 @@
       {
         devShells.default = pkgs.mkShell {
           packages = [
+            pkgs.clang           # just check (Linux の stdenv は gcc のため明示的に入れる)
             pkgs.platformio-core # M5Stack CoreS3 (m5stack/)
             pkgs.emscripten      # Web/WASM (build.sh)
             pkgs.gnused          # build.sh は GNU sed 前提 (BSD sed 非対応)
