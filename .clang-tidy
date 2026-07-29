@@ -1,0 +1,48 @@
+# コア (core/*.cpp, core/nes.h) の静的解析設定。just tidy / CI の lint ジョブで実行。
+#
+# 軸は「実際のバグを拾う」系のみ: clang-analyzer / bugprone / performance /
+# portability。readability-* と modernize-* を入れていないのは、このコアが実機比較で
+# bit-exact 検証済みで、命名や C++ イディオムの機械的な書き換えに挙動リスクを
+# 負う価値がないため
+Checks: >
+  clang-analyzer-*,
+  bugprone-*,
+  performance-*,
+  portability-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-narrowing-conversions,
+  -bugprone-switch-missing-default-case,
+  -performance-enum-size
+
+# 無効化した理由 (いずれも指摘箇所を確認したうえで、コード側を直すと
+# エミュレーションの挙動または可読性を損なうと判断したもの):
+#
+# bugprone-easily-swappable-parameters
+#   `writeReg(uint16_t addr, uint8_t v)` / `cpuWrite(uint16_t, uint8_t)` など、
+#   バス書き込みは「アドレスと値」の組が本質で、同じ型の引数が並ぶことを
+#   避けられない。構造体に包むと 1 アクセスあたりの呼び出しコストが増え、
+#   ESP32 側のフレームレートに直接響く
+#
+# bugprone-implicit-widening-of-multiplication-result
+#   指摘は PPU のスプライト評価 `oam_[i * 4]` (i < 64) など、OAM/パターンの
+#   固定長インデックス計算。上限が型の範囲内であることが自明で、size_t への
+#   明示キャストを撒いても結果は変わらずキャストが増えるだけ
+#
+# bugprone-narrowing-conversions
+#   指摘は APU ミキサの `pulse1_.output() * chanVolume[0]` のような int→float。
+#   チャンネル出力は 0-15 / 0-127 の小さい整数で float に厳密表現でき、
+#   ミキサ式は NES の音量カーブをそのまま写したもの。式に static_cast を
+#   挟むと実機比較で合わせた式の見た目が崩れる
+#
+# bugprone-switch-missing-default-case
+#   $2000-$2007 / $4000-$4017 のようなレジスタ範囲の switch。呼び出し側が
+#   アドレス範囲を絞ってから入るため default は到達不能で、追加すると
+#   「起きないケース」の死んだ分岐が増える
+#
+# performance-enum-size
+#   `enum class Mirroring` を uint8_t 化しても、格納先は Mapper のメンバ 1 個
+#   だけでサイズ削減にならない
+HeaderFilterRegex: 'core/.*\.h$'
+WarningsAsErrors: '*'
+FormatStyle: file

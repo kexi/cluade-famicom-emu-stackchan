@@ -49,3 +49,25 @@ serve port='8000':
 check:
     clang++ -std=c++17 -fsyntax-only core/*.cpp
     clang++ -std=c++17 -DNES_EMBEDDED -fsyntax-only core/*.cpp
+
+# コードを整形 (.clang-format 準拠)
+format:
+    clang-format -i core/*.cpp core/*.h m5stack/src/*.cpp m5stack/src/*.h
+
+# 整形漏れがないか検査 (差分があれば失敗)
+format-check:
+    clang-format --dry-run --Werror core/*.cpp core/*.h m5stack/src/*.cpp m5stack/src/*.h
+
+# コアの静的解析 (.clang-tidy 準拠)。m5stack/src は対象外 — ESP-IDF/Arduino の
+# ヘッダが必要で、PlatformIO の toolchain 抜きには単体でパースできない
+#
+# nix の clang++ は libc++ の include パスをラッパ経由で注入するため、素の
+# clang-tidy には見えない。NIX_CFLAGS_COMPILE だけでは c++/v1 が欠けるので、
+# ラッパ自身に検索パスを吐かせて -isystem として渡す
+tidy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    isystem=$(echo | clang++ -std=c++17 -E -x c++ - -v 2>&1 \
+        | sed -n '/^#include <\.\.\.>/,/^End of search/p' \
+        | grep '^ /' | grep -v framework | sed 's/^ /-isystem /' | tr '\n' ' ')
+    clang-tidy --quiet core/*.cpp -- -std=c++17 $isystem

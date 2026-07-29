@@ -1,0 +1,46 @@
+# コアと M5Stack ファーム共通の整形ルール。既存コードの見た目を維持できる
+# 最小の差分になるよう調整してある (just format-check / CI の lint ジョブで検証)
+---
+Language: Cpp
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 120
+
+# 1 行に収まる短い関数・分岐は 1 行のまま。コアは
+# `uint8_t CPU::read(uint16_t a) { return nes_.cpuRead(a); }` のような
+# 薄いラッパや `if (!p) return;` の早期リターンが多数あり、展開すると
+# 意味のない行数増加になる
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortLoopsOnASingleLine: true
+# Empty までにしているのは、Always だと `for (...) { 2 文 }` を 1 行に畳んで
+# しまい既存の複数行ブロックが読みにくくなるため。`{}` を伴わない 1 行
+# if/for は上の 2 設定が保つ
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: true
+
+# 行末コメントは既存の 3 スペース空けを尊重する (`= 0;   // $0000-$1FFF` 等)。
+# 1 に詰めると全ファイルで行末コメントが動く
+SpacesBeforeTrailingComments: 3
+
+# `#include` の並びは意図的 (標準ヘッダ → プラットフォーム依存)。
+# 並べ替えると ESP-IDF ヘッダの前提が崩れる
+SortIncludes: false
+IndentPPDirectives: None
+AlignEscapedNewlines: Left
+AlignTrailingComments: false
+AlignConsecutiveAssignments: false
+AlignOperands: Align
+BinPackArguments: true
+BinPackParameters: true
+DerivePointerAlignment: false
+PointerAlignment: Left
+AccessModifierOffset: -4
+BreakConstructorInitializers: BeforeColon
+ConstructorInitializerIndentWidth: 4
+ContinuationIndentWidth: 4
+Cpp11BracedListStyle: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+NamespaceIndentation: None
+ReflowComments: false
