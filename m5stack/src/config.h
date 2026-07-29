@@ -115,6 +115,64 @@ constexpr uint64_t PIN_MASK_VALID = (1ULL << 60) - 1;
 // All 60 connector pins making contact — a properly seated cartridge.
 constexpr uint64_t PIN_MASK_ALL_OK = PIN_MASK_VALID;
 
+// ------------------------------------------------------------------- grove
+// Local controllers on the Grove ports, merged (OR) with the UDP pads so either
+// input source can drive the game.
+//
+// PORT.B (black — K151 base: pin1=G9 / pin2=G8): Joystick Unit. The port is
+// nominally GPIO, but the ESP32 routes its I2C peripheral to any pin, so the
+// external bus is simply bound to these pins instead of PORT.A's. Grove cables
+// are straight-through, so SDA/SCL land on the same positions as on PORT.A
+// (pin1=SDA, pin2=SCL). Both joystick generations are probed at boot; whichever
+// answers is used.
+constexpr int JOY_I2C_SDA = 9;    // PORT.B pin 1 (PORT.A equivalent: G2)
+constexpr int JOY_I2C_SCL = 8;    // PORT.B pin 2 (PORT.A equivalent: G1)
+constexpr uint8_t JOY2_I2C_ADDR = 0x63;   // Joystick2 (U024-C, STM32G030)
+constexpr uint8_t JOY1_I2C_ADDR = 0x52;   // Joystick (U024, MEGA328P)
+// 100kHz, not 400: PORT.B has no I2C pull-ups of its own (it is a GPIO port),
+// so the bus leans on the ESP32's weak internal pulls and the unit's own
+// resistors. At 400kHz the rise times are marginal and reads fail every second
+// or two (observed on hardware as detect/lost flapping).
+constexpr uint32_t GROVE_I2C_FREQ = 100000;
+// A single failed read is a glitch (tolerable on this budget bus); only this
+// many consecutive failures mean the stick was actually unplugged.
+constexpr int JOY_READ_FAIL_LIMIT = 5;
+// Poll every 8ms (~2 samples per NES frame). The reads happen on core 0 so their
+// I2C latency never lands in the frame loop.
+constexpr uint32_t GROVE_POLL_MS = 8;
+// How far the stick must leave centre before it counts as a D-pad press, on a
+// signed -128..127 scale. Large enough to ignore drift, small enough that a
+// deliberate push always registers.
+constexpr int JOY_DEADZONE = 40;
+// Flip these if up/down or left/right come out mirrored on your unit — axis
+// orientation differs between joystick revisions and mounting. X is inverted
+// here: this Joystick2 reports right as negative (verified on hardware).
+constexpr bool JOY_INVERT_X = true;
+constexpr bool JOY_INVERT_Y = false;
+// Joystick (U024) reports the button in byte 2; 1 = pressed on stock firmware.
+constexpr bool JOY1_BTN_ACTIVE_HIGH = true;
+// If the I2C joystick is absent (or unplugged), retry the probe about once a
+// second so plugging it in later just works.
+constexpr uint32_t JOY_REPROBE_MS = 1000;
+
+// PORT.C (blue — K151 base: pin1=G17 / pin2=G18): Dual Button Unit. Nominally
+// the UART port, but the pins are read as plain GPIO. Buttons short the signal
+// line to GND when pressed. Grove wiring on the unit: white wire (pin2) = blue
+// button, yellow wire (pin1) = red button — same positions that put blue on G8
+// and red on G9 back when the unit lived on PORT.B.
+constexpr int DUAL_BTN_PIN_BLUE = 18;  // blue button  -> NES B
+constexpr int DUAL_BTN_PIN_RED = 17;   // red button   -> NES A
+
+// NES pad bit layout (matches Pad::setButtons and the UDP protocol).
+constexpr uint8_t NES_BTN_A = 0x01;
+constexpr uint8_t NES_BTN_B = 0x02;
+constexpr uint8_t NES_BTN_SELECT = 0x04;
+constexpr uint8_t NES_BTN_START = 0x08;
+constexpr uint8_t NES_BTN_UP = 0x10;
+constexpr uint8_t NES_BTN_DOWN = 0x20;
+constexpr uint8_t NES_BTN_LEFT = 0x40;
+constexpr uint8_t NES_BTN_RIGHT = 0x80;
+
 // -------------------------------------------------------------------- timing
 // NTSC NES frame period: 1/60.0988 s.
 constexpr int64_t FRAME_PERIOD_US = 16639;
