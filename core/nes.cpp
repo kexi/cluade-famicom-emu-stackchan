@@ -23,11 +23,14 @@ void NES::updatePins() {
     powerOk = (pinOk[1] || pinOk[16]) && (pinOk[30] || pinOk[31]);
     // CPU address: pins 2..13 = A11..A0, 33..35 = A12..A14
     prgAddrAnd = 0;
-    for (int i = 0; i < 12; i++) if (pinOk[13 - i]) prgAddrAnd |= 1 << i;      // A0-A11
-    for (int i = 0; i < 3; i++)  if (pinOk[33 + i]) prgAddrAnd |= 1 << (12 + i); // A12-A14
+    for (int i = 0; i < 12; i++)
+        if (pinOk[13 - i]) prgAddrAnd |= 1 << i;   // A0-A11
+    for (int i = 0; i < 3; i++)
+        if (pinOk[33 + i]) prgAddrAnd |= 1 << (12 + i);   // A12-A14
     // CPU data: pins 43..36 = D0..D7
     prgDataAnd = 0;
-    for (int i = 0; i < 8; i++) if (pinOk[43 - i]) prgDataAnd |= 1 << i;
+    for (int i = 0; i < 8; i++)
+        if (pinOk[43 - i]) prgDataAnd |= 1 << i;
     rwOk = pinOk[14];
     irqOk = pinOk[15];
     m2Ok = pinOk[32];
@@ -35,12 +38,16 @@ void NES::updatePins() {
     soundOk = pinOk[45] && pinOk[46];
     // PPU address: pins 25..19 = A0..A6, 50..56 = A7..A13
     chrAddrAnd = 0;
-    for (int i = 0; i < 7; i++) if (pinOk[25 - i]) chrAddrAnd |= 1 << i;       // A0-A6
-    for (int i = 0; i < 7; i++) if (pinOk[50 + i]) chrAddrAnd |= 1 << (7 + i); // A7-A13
+    for (int i = 0; i < 7; i++)
+        if (pinOk[25 - i]) chrAddrAnd |= 1 << i;   // A0-A6
+    for (int i = 0; i < 7; i++)
+        if (pinOk[50 + i]) chrAddrAnd |= 1 << (7 + i);   // A7-A13
     // PPU data: pins 26..29 = D0..D3, 60..57 = D4..D7
     chrDataAnd = 0;
-    for (int i = 0; i < 4; i++) if (pinOk[26 + i]) chrDataAnd |= 1 << i;
-    for (int i = 0; i < 4; i++) if (pinOk[60 - i]) chrDataAnd |= 1 << (4 + i);
+    for (int i = 0; i < 4; i++)
+        if (pinOk[26 + i]) chrDataAnd |= 1 << i;
+    for (int i = 0; i < 4; i++)
+        if (pinOk[60 - i]) chrDataAnd |= 1 << (4 + i);
     ppuRdOk = pinOk[17];
     ppuWrOk = pinOk[47];
     ciramA10Ok = pinOk[18];
@@ -50,7 +57,10 @@ void NES::updatePins() {
     // masks above so that a pin whose only effect is cosmetic still counts.
     pinsFaulty_ = false;
     for (int i = 1; i <= 60; i++) {
-        if (!pinOk[i]) { pinsFaulty_ = true; break; }
+        if (!pinOk[i]) {
+            pinsFaulty_ = true;
+            break;
+        }
     }
     // /IRQ reachability folded in here so irqLineLevel() stays a single bool test.
     mapperIrqUsable_ = mapperHasIrq_ && irqOk;
@@ -169,8 +179,14 @@ uint8_t NES_HOT NES::cpuReadBus(uint16_t addr) {
     if (prgFastPath) return prgWin_[(addr >> 13) & 3][addr & 0x1FFF];
 
     // These observe PPU/APU state, so the deferred cycles must land first.
-    if (addr < 0x4000) { catchUp(); return ppu.readReg(addr); }
-    if (addr == 0x4015) { catchUp(); return apu.readStatus(); }
+    if (addr < 0x4000) {
+        catchUp();
+        return ppu.readReg(addr);
+    }
+    if (addr == 0x4015) {
+        catchUp();
+        return apu.readStatus();
+    }
 #else
     if (addr < 0x4000) return ppu.readReg(addr);
     if (addr == 0x4015) return apu.readStatus();
@@ -191,11 +207,21 @@ void NES_HOT NES::cpuWrite(uint16_t addr, uint8_t v) {
     lastCpuData = v;
     lastCpuWrite = true;
 #endif
-    if (addr < 0x2000) { ram[addr & 0x7FF] = v; return; }
+    if (addr < 0x2000) {
+        ram[addr & 0x7FF] = v;
+        return;
+    }
 #ifdef NES_EMBEDDED
-    if (addr < 0x4000) { catchUp(); ppu.writeReg(addr, v); return; }
+    if (addr < 0x4000) {
+        catchUp();
+        ppu.writeReg(addr, v);
+        return;
+    }
 #else
-    if (addr < 0x4000) { ppu.writeReg(addr, v); return; }
+    if (addr < 0x4000) {
+        ppu.writeReg(addr, v);
+        return;
+    }
 #endif
     if (addr == 0x4014) {
         // OAM DMA
@@ -210,11 +236,22 @@ void NES_HOT NES::cpuWrite(uint16_t addr, uint8_t v) {
         return;
     }
     if (addr >= 0x4000 && addr <= 0x4017) apuRegShadow[addr - 0x4000] = v;
-    if (addr == 0x4016) { pad[0].writeStrobe(v); pad[1].writeStrobe(v); return; }
+    if (addr == 0x4016) {
+        pad[0].writeStrobe(v);
+        pad[1].writeStrobe(v);
+        return;
+    }
 #ifdef NES_EMBEDDED
-    if (addr < 0x4020) { catchUp(); apu.writeReg(addr, v); return; }
+    if (addr < 0x4020) {
+        catchUp();
+        apu.writeReg(addr, v);
+        return;
+    }
 #else
-    if (addr < 0x4020) { apu.writeReg(addr, v); return; }
+    if (addr < 0x4020) {
+        apu.writeReg(addr, v);
+        return;
+    }
 #endif
     if (!mapper) return;
     if (pinsFaulty_) {
@@ -330,8 +367,7 @@ size_t NES::buildDebugSnapshot(uint8_t* out, bool withWaves) const {
     out[n++] = cpu.x;
     out[n++] = cpu.y;
     out[n++] = cpu.sp;
-    out[n++] = (cpu.fN << 7) | (cpu.fV << 6) | 0x20 | (cpu.fD << 3) |
-               (cpu.fI << 2) | (cpu.fZ << 1) | (uint8_t)cpu.fC;
+    out[n++] = (cpu.fN << 7) | (cpu.fV << 6) | 0x20 | (cpu.fD << 3) | (cpu.fI << 2) | (cpu.fZ << 1) | (uint8_t)cpu.fC;
     out[n++] = 0;   // padding, matching nes_cpu_regs[7]
     const uint32_t f = ppu.frameCount;
     out[n++] = f & 0xFF;
@@ -384,9 +420,9 @@ size_t NES::buildDebugSnapshot(uint8_t* out, bool withWaves) const {
 
     return n;
 }
-#endif // NES_EMBEDDED
+#endif   // NES_EMBEDDED
 
-} // namespace nes
+}   // namespace nes
 
 #ifndef NES_EMBEDDED
 // Sample the probed pin's logic level once per CPU cycle.
@@ -395,34 +431,40 @@ uint8_t nes::NES::probeLevelFor(int p) {
     auto dig = [](bool b) -> uint8_t { return b ? 220 : 30; };
     uint8_t v = 30;
     switch (p) {
-    case 1: case 16: v = 30; break;                                 // GND
-    case 30: case 31: v = 220; break;                               // +5V
-    case 14: v = dig(!lastCpuWrite); break;                         // R/W (high = read)
-    case 15: v = dig(!(apu.irqPending() || (mapper && irqOk && mapper->irqPending()))); break; // /IRQ
-    case 32: v = dig(cycleCount & 1); break;                        // M2
-    case 44: v = dig(!(lastCpuAddr >= 0x8000)); break;              // /ROMSEL
-    case 45: case 46: {                                             // cart audio loop-through
+    case 1:
+    case 16: v = 30; break;   // GND
+    case 30:
+    case 31: v = 220; break;   // +5V
+    case 14: v = dig(!lastCpuWrite); break;   // R/W (high = read)
+    case 15: v = dig(!(apu.irqPending() || (mapper && irqOk && mapper->irqPending()))); break;   // /IRQ
+    case 32: v = dig(cycleCount & 1); break;   // M2
+    case 44: v = dig(!(lastCpuAddr >= 0x8000)); break;   // /ROMSEL
+    case 45:
+    case 46: {   // cart audio loop-through
         int s = soundOk ? (int)(30 + apu.mix() * 320.0f) : 30;
         v = (uint8_t)(s > 245 ? 245 : s);
         break;
     }
-    case 17: v = dig(!ppuRdPulse); break;                           // PPU /RD
-    case 47: v = dig(!ppuWrPulse); break;                           // PPU /WR
-    case 18: v = dig(lastCiramA10); break;                          // CIRAM A10
-    case 48: case 49: v = dig(!(lastPpuAddr & 0x2000)); break;      // CIRAM /CE, PPU /A13
-    case 56: v = dig(lastPpuAddr & 0x2000); break;                  // PPU A13
+    case 17: v = dig(!ppuRdPulse); break;   // PPU /RD
+    case 47: v = dig(!ppuWrPulse); break;   // PPU /WR
+    case 18: v = dig(lastCiramA10); break;   // CIRAM A10
+    case 48:
+    case 49: v = dig(!(lastPpuAddr & 0x2000)); break;   // CIRAM /CE, PPU /A13
+    case 56:
+        v = dig(lastPpuAddr & 0x2000);
+        break;   // PPU A13
     // internal test points (not on the connector)
-    case 61: v = dig(!ppu.nmiLine()); break;                        // /NMI
-    case 62: v = dig(!apu.irqPending()); break;                     // APU /IRQ
-    case 63: v = dig(!(mapper && mapper->irqPending())); break;     // mapper /IRQ
+    case 61: v = dig(!ppu.nmiLine()); break;   // /NMI
+    case 62: v = dig(!apu.irqPending()); break;   // APU /IRQ
+    case 63: v = dig(!(mapper && mapper->irqPending())); break;   // mapper /IRQ
     default:
-        if (p >= 2 && p <= 13)       v = dig((lastCpuAddr >> (13 - p)) & 1);  // CPU A11..A0
-        else if (p >= 33 && p <= 35) v = dig((lastCpuAddr >> (p - 21)) & 1);  // CPU A12..A14
-        else if (p >= 36 && p <= 43) v = dig((lastCpuData >> (43 - p)) & 1);  // CPU D7..D0
-        else if (p >= 19 && p <= 25) v = dig((lastPpuAddr >> (25 - p)) & 1);  // PPU A6..A0
-        else if (p >= 50 && p <= 55) v = dig((lastPpuAddr >> (p - 43)) & 1);  // PPU A7..A12
-        else if (p >= 26 && p <= 29) v = dig((lastPpuData >> (p - 26)) & 1);  // PPU D0..D3
-        else if (p >= 57 && p <= 60) v = dig((lastPpuData >> (64 - p)) & 1);  // PPU D7..D4
+        if (p >= 2 && p <= 13) v = dig((lastCpuAddr >> (13 - p)) & 1);   // CPU A11..A0
+        else if (p >= 33 && p <= 35) v = dig((lastCpuAddr >> (p - 21)) & 1);   // CPU A12..A14
+        else if (p >= 36 && p <= 43) v = dig((lastCpuData >> (43 - p)) & 1);   // CPU D7..D0
+        else if (p >= 19 && p <= 25) v = dig((lastPpuAddr >> (25 - p)) & 1);   // PPU A6..A0
+        else if (p >= 50 && p <= 55) v = dig((lastPpuAddr >> (p - 43)) & 1);   // PPU A7..A12
+        else if (p >= 26 && p <= 29) v = dig((lastPpuData >> (p - 26)) & 1);   // PPU D0..D3
+        else if (p >= 57 && p <= 60) v = dig((lastPpuData >> (64 - p)) & 1);   // PPU D7..D4
         break;
     }
     return v;
@@ -459,8 +501,12 @@ API int nes_load_rom(int size) {
     return g_nes->loadRom(g_romBuf, (size_t)size) ? 1 : 0;
 }
 
-API void nes_reset() { if (g_nes && g_nes->mapper) g_nes->reset(); }
-API void nes_power_on() { if (g_nes && g_nes->mapper) g_nes->powerOn(); }
+API void nes_reset() {
+    if (g_nes && g_nes->mapper) g_nes->reset();
+}
+API void nes_power_on() {
+    if (g_nes && g_nes->mapper) g_nes->powerOn();
+}
 
 // swap the cartridge WITHOUT any reset: CPU keeps running, RAM survives.
 // Boot the new cart with the RESET button afterwards — bug techniques welcome.
@@ -499,9 +545,7 @@ API void nes_set_pin(int pin, int on) {
     g_nes->pinOk[pin] = on != 0;
     g_nes->updatePins();
 }
-API int nes_get_pin(int pin) {
-    return (g_nes && pin >= 1 && pin <= 60) ? (g_nes->pinOk[pin] ? 1 : 0) : 1;
-}
+API int nes_get_pin(int pin) { return (g_nes && pin >= 1 && pin <= 60) ? (g_nes->pinOk[pin] ? 1 : 0) : 1; }
 API void nes_reset_pins() {
     if (!g_nes) return;
     for (int i = 0; i < 61; i++) g_nes->pinOk[i] = true;
@@ -511,8 +555,7 @@ API void nes_reset_pins() {
 API uint32_t* nes_framebuffer() { return g_nes ? g_nes->ppu.framebuffer : nullptr; }
 
 API void nes_set_buttons(int padIndex, int buttons) {
-    if (g_nes && padIndex >= 0 && padIndex < 2)
-        g_nes->pad[padIndex].setButtons((uint8_t)buttons);
+    if (g_nes && padIndex >= 0 && padIndex < 2) g_nes->pad[padIndex].setButtons((uint8_t)buttons);
 }
 
 API float* nes_audio_buffer() { return g_nes ? g_nes->apu.sampleBuf : nullptr; }
@@ -524,14 +567,12 @@ API void nes_set_channel_pan(int ch, float p) {
     if (g_nes && ch >= 0 && ch < 8) g_nes->apu.chanPan[ch] = p < -1 ? -1 : (p > 1 ? 1 : p);
 }
 API int nes_audio_sample_count() { return g_nes ? g_nes->apu.sampleCount : 0; }
-API void nes_audio_clear() { if (g_nes) g_nes->apu.sampleCount = 0; }
+API void nes_audio_clear() {
+    if (g_nes) g_nes->apu.sampleCount = 0;
+}
 
-API uint8_t* nes_sram() {
-    return (g_nes && g_nes->mapper) ? g_nes->mapper->prgRam().data() : nullptr;
-}
-API int nes_sram_size() {
-    return (g_nes && g_nes->mapper) ? (int)g_nes->mapper->prgRam().size() : 0;
-}
+API uint8_t* nes_sram() { return (g_nes && g_nes->mapper) ? g_nes->mapper->prgRam().data() : nullptr; }
+API int nes_sram_size() { return (g_nes && g_nes->mapper) ? (int)g_nes->mapper->prgRam().size() : 0; }
 // CHR pattern tables rendered as a 128x256 RGBA image (table 0 on top, 1 below)
 static uint32_t g_chrImage[128 * 256];
 
@@ -606,25 +647,17 @@ API void nes_set_probe(int pin) {
     if (g_nes && pin >= 0 && pin <= 63) g_nes->probePin = pin;
 }
 API uint8_t* nes_probe_buffer() { return g_nes ? g_nes->probeBuf : nullptr; }
-API int nes_probe_level() {
-    return g_nes ? g_nes->probeLevelFor(g_nes->probePin) : 0;
-}
+API int nes_probe_level() { return g_nes ? g_nes->probeLevelFor(g_nes->probePin) : 0; }
 API int nes_probe_pos() { return g_nes ? g_nes->probePos : 0; }
 API void nes_set_channel(int ch, int on) {
     if (!g_nes || ch < 0 || ch >= 8) return;
     g_nes->apu.chanEnable[ch] = on != 0;
     if (ch >= 5 && g_nes->mapper) g_nes->mapper->setExpansionMute(ch - 5, on == 0);
 }
-API int nes_has_expansion_audio() {
-    return (g_nes && g_nes->mapper && g_nes->mapper->hasExpansionAudio()) ? 1 : 0;
-}
-API uint8_t* nes_chan_buffer(int ch) {
-    return (g_nes && ch >= 0 && ch < 8) ? g_nes->apu.chanBuf[ch] : nullptr;
-}
+API int nes_has_expansion_audio() { return (g_nes && g_nes->mapper && g_nes->mapper->hasExpansionAudio()) ? 1 : 0; }
+API uint8_t* nes_chan_buffer(int ch) { return (g_nes && ch >= 0 && ch < 8) ? g_nes->apu.chanBuf[ch] : nullptr; }
 
-API int nes_has_battery() {
-    return (g_nes && g_nes->mapper && g_nes->mapper->hasBattery()) ? 1 : 0;
-}
+API int nes_has_battery() { return (g_nes && g_nes->mapper && g_nes->mapper->hasBattery()) ? 1 : 0; }
 
-} // extern "C"
-#endif // !NES_EMBEDDED
+}   // extern "C"
+#endif   // !NES_EMBEDDED

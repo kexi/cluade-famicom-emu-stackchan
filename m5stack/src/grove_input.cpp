@@ -12,17 +12,15 @@
 #include "grove_input.h"
 
 // Joystick2 register map (m5stack/M5Unit-JoyStick2).
-static constexpr uint8_t JOY2_REG_OFFSET_8BIT = 0x60;  // int8 x, int8 y (centred on 0)
-static constexpr uint8_t JOY2_REG_BUTTON = 0x20;       // 0 = pressed
+static constexpr uint8_t JOY2_REG_OFFSET_8BIT = 0x60;   // int8 x, int8 y (centred on 0)
+static constexpr uint8_t JOY2_REG_BUTTON = 0x20;   // 0 = pressed
 
 enum class JoyKind : uint8_t { None, Joy1, Joy2 };
 
 static std::atomic<uint8_t> g_groveBits{0};
 static JoyKind g_joyKind = JoyKind::None;
 
-uint8_t groveInputBits() {
-    return g_groveBits.load(std::memory_order_relaxed);
-}
+uint8_t groveInputBits() { return g_groveBits.load(std::memory_order_relaxed); }
 
 // ---------------------------------------------------------------- joystick
 
@@ -55,8 +53,7 @@ static uint8_t directionBits(int x, int y) {
 // Joystick (U024): a raw 3-byte read — x, y (0..255, centre ~128), button.
 static bool readJoy1(uint8_t* bits) {
     uint8_t raw[3];
-    const bool ok = M5.Ex_I2C.start(JOY1_I2C_ADDR, true, GROVE_I2C_FREQ) &&
-                    M5.Ex_I2C.read(raw, sizeof(raw));
+    const bool ok = M5.Ex_I2C.start(JOY1_I2C_ADDR, true, GROVE_I2C_FREQ) && M5.Ex_I2C.read(raw, sizeof(raw));
     M5.Ex_I2C.stop();
     if (!ok) return false;
     *bits = directionBits((int)raw[0] - 128, (int)raw[1] - 128);
@@ -69,9 +66,8 @@ static bool readJoy1(uint8_t* bits) {
 // calibrated around 0 by the unit's firmware.
 static bool readJoy2(uint8_t* bits) {
     uint8_t off[2], btn;
-    const bool ok =
-        M5.Ex_I2C.readRegister(JOY2_I2C_ADDR, JOY2_REG_OFFSET_8BIT, off, sizeof(off), GROVE_I2C_FREQ) &&
-        M5.Ex_I2C.readRegister(JOY2_I2C_ADDR, JOY2_REG_BUTTON, &btn, 1, GROVE_I2C_FREQ);
+    const bool ok = M5.Ex_I2C.readRegister(JOY2_I2C_ADDR, JOY2_REG_OFFSET_8BIT, off, sizeof(off), GROVE_I2C_FREQ) &&
+                    M5.Ex_I2C.readRegister(JOY2_I2C_ADDR, JOY2_REG_BUTTON, &btn, 1, GROVE_I2C_FREQ);
     if (!ok) return false;
     *bits = directionBits((int8_t)off[0], (int8_t)off[1]);
     if (btn == 0) *bits |= NES_BTN_START;
@@ -100,14 +96,12 @@ static void groveTask(void*) {
                 g_joyKind = probeJoystick();
                 if (g_joyKind != JoyKind::None) {
                     joyFails = 0;
-                    Serial.printf("GROVE: joystick%s detected\n",
-                                  g_joyKind == JoyKind::Joy2 ? "2 @0x63" : " @0x52");
+                    Serial.printf("GROVE: joystick%s detected\n", g_joyKind == JoyKind::Joy2 ? "2 @0x63" : " @0x52");
                 }
             }
         } else {
             uint8_t fresh = 0;
-            const bool ok = g_joyKind == JoyKind::Joy2 ? readJoy2(&fresh)
-                                                       : readJoy1(&fresh);
+            const bool ok = g_joyKind == JoyKind::Joy2 ? readJoy2(&fresh) : readJoy1(&fresh);
             if (ok) {
                 joyFails = 0;
                 joyBits = fresh;
@@ -142,9 +136,9 @@ void groveInputInit() {
 
     g_joyKind = probeJoystick();
     switch (g_joyKind) {
-        case JoyKind::Joy2: Serial.println("GROVE: joystick2 @0x63"); break;
-        case JoyKind::Joy1: Serial.println("GROVE: joystick @0x52"); break;
-        case JoyKind::None: Serial.println("GROVE: no joystick (will re-probe)"); break;
+    case JoyKind::Joy2: Serial.println("GROVE: joystick2 @0x63"); break;
+    case JoyKind::Joy1: Serial.println("GROVE: joystick @0x52"); break;
+    case JoyKind::None: Serial.println("GROVE: no joystick (will re-probe)"); break;
     }
 
     // Same core as the UDP receiver, below its priority: input polling must

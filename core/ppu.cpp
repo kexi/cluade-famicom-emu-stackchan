@@ -48,9 +48,12 @@ void PPU::reset() {
     buildBitSpread();
 #endif
     ctrl_ = mask_ = status_ = oamAddr_ = 0;
-    v_ = t_ = 0; fineX_ = 0; w_ = false;
+    v_ = t_ = 0;
+    fineX_ = 0;
+    w_ = false;
     readBuffer_ = 0;
-    scanline_ = 261; dot_ = 0;
+    scanline_ = 261;
+    dot_ = 0;
     oddFrame_ = false;
     frameReady = false;
     frameCount = 0;
@@ -64,16 +67,15 @@ uint16_t PPU::ntMirror(uint16_t addr) {
     // to the table-select bits only (CIRAM A0-A9 run directly on the motherboard).
     // The mask is only consulted while a pin is open so a clean cart keeps the
     // plain shift it always had.
-    int table = nes_.pinsFaulty_ ? (((addr & nes_.chrAddrAnd) & 0x0FFF) / 0x400)
-                                 : ((addr & 0x0FFF) / 0x400);
+    int table = nes_.pinsFaulty_ ? (((addr & nes_.chrAddrAnd) & 0x0FFF) / 0x400) : ((addr & 0x0FFF) / 0x400);
     int off = addr & 0x3FF;
     uint16_t r;
     switch (nes_.mapper->mirroring()) {
-    case Mirroring::Vertical:   r = ((table & 1) * 0x400) + off; break;
+    case Mirroring::Vertical: r = ((table & 1) * 0x400) + off; break;
     case Mirroring::Horizontal: r = ((table >> 1) * 0x400) + off; break;
-    case Mirroring::SingleLow:  r = off; break;
+    case Mirroring::SingleLow: r = off; break;
     case Mirroring::SingleHigh: r = 0x400 + off; break;
-    default:                    r = ((table & 1) * 0x400) + off; break; // 4-screen fallback
+    default: r = ((table & 1) * 0x400) + off; break;   // 4-screen fallback
     }
     if (nes_.pinsFaulty_ && !nes_.ciramA10Ok) r &= ~0x400;   // CIRAM A10 broken: bit floats low
 #ifndef NES_EMBEDDED
@@ -126,7 +128,10 @@ void PPU::vramWriteFaulty(uint16_t addr, uint8_t v) {
 uint8_t PPU::vramRead(uint16_t addr) {
     addr &= 0x3FFF;
 #ifndef NES_EMBEDDED
-    if (addr < 0x3F00) { nes_.lastPpuAddr = addr; nes_.ppuRdPulse = true; }
+    if (addr < 0x3F00) {
+        nes_.lastPpuAddr = addr;
+        nes_.ppuRdPulse = true;
+    }
 #endif
     if (addr < 0x3F00) {
         if (nes_.pinsFaulty_) return vramReadFaulty(addr);
@@ -144,11 +149,21 @@ uint8_t PPU::vramRead(uint16_t addr) {
 void PPU::vramWrite(uint16_t addr, uint8_t v) {
     addr &= 0x3FFF;
 #ifndef NES_EMBEDDED
-    if (addr < 0x3F00) { nes_.lastPpuAddr = addr; nes_.lastPpuData = v; nes_.ppuWrPulse = true; }
+    if (addr < 0x3F00) {
+        nes_.lastPpuAddr = addr;
+        nes_.lastPpuData = v;
+        nes_.ppuWrPulse = true;
+    }
 #endif
     if (addr < 0x3F00) {
-        if (nes_.pinsFaulty_) { vramWriteFaulty(addr, v); return; }
-        if (addr < 0x2000) { nes_.mapper->ppuWrite(addr & 0x1FFF, v); return; }
+        if (nes_.pinsFaulty_) {
+            vramWriteFaulty(addr, v);
+            return;
+        }
+        if (addr < 0x2000) {
+            nes_.mapper->ppuWrite(addr & 0x1FFF, v);
+            return;
+        }
         vram_[ntMirror(addr)] = v;
         return;
     }
@@ -166,14 +181,12 @@ uint8_t NES_HOT PPU::readReg(uint16_t addr) {
         openBus_ = r;
         return r;
     }
-    case 4:
-        openBus_ = oam_[oamAddr_];
-        return openBus_;
+    case 4: openBus_ = oam_[oamAddr_]; return openBus_;
     case 7: {
         uint8_t r;
         if ((v_ & 0x3FFF) >= 0x3F00) {
             r = vramRead(v_);
-            readBuffer_ = vramRead(v_ - 0x1000);  // underlying nametable
+            readBuffer_ = vramRead(v_ - 0x1000);   // underlying nametable
         } else {
             r = readBuffer_;
             readBuffer_ = vramRead(v_);
@@ -182,8 +195,7 @@ uint8_t NES_HOT PPU::readReg(uint16_t addr) {
         openBus_ = r;
         return r;
     }
-    default:
-        return openBus_;
+    default: return openBus_;
     }
 }
 
@@ -200,8 +212,7 @@ void NES_HOT PPU::writeReg(uint16_t addr, uint8_t val) {
     }
     case 1: mask_ = val; break;
     case 3: oamAddr_ = val; break;
-    case 4:
-        oam_[oamAddr_++] = val;
+    case 4: oam_[oamAddr_++] = val;
 #ifdef NES_EMBEDDED
         invalidateSpriteCandidates();
 #endif
@@ -239,16 +250,23 @@ void PPU::writeOamDma(uint8_t, const uint8_t* page) {
 }
 
 void PPU::incHoriz() {
-    if ((v_ & 0x1F) == 31) { v_ &= ~0x1F; v_ ^= 0x0400; }
-    else v_++;
+    if ((v_ & 0x1F) == 31) {
+        v_ &= ~0x1F;
+        v_ ^= 0x0400;
+    } else v_++;
 }
 
 void PPU::incVert() {
-    if ((v_ & 0x7000) != 0x7000) { v_ += 0x1000; return; }
+    if ((v_ & 0x7000) != 0x7000) {
+        v_ += 0x1000;
+        return;
+    }
     v_ &= ~0x7000;
     int y = (v_ >> 5) & 0x1F;
-    if (y == 29) { y = 0; v_ ^= 0x0800; }
-    else if (y == 31) y = 0;
+    if (y == 29) {
+        y = 0;
+        v_ ^= 0x0800;
+    } else if (y == 31) y = 0;
     else y++;
     v_ = (v_ & ~0x03E0) | (y << 5);
 }
@@ -269,15 +287,9 @@ void NES_HOT PPU::fetchBg() {
         atByte_ = (at >> shift) & 3;
         break;
     }
-    case 5:
-        patLo_ = vramRead(((ctrl_ & 0x10) << 8) + ntByte_ * 16 + ((v_ >> 12) & 7));
-        break;
-    case 7:
-        patHi_ = vramRead(((ctrl_ & 0x10) << 8) + ntByte_ * 16 + ((v_ >> 12) & 7) + 8);
-        break;
-    case 0:
-        incHoriz();
-        break;
+    case 5: patLo_ = vramRead(((ctrl_ & 0x10) << 8) + ntByte_ * 16 + ((v_ >> 12) & 7)); break;
+    case 7: patHi_ = vramRead(((ctrl_ & 0x10) << 8) + ntByte_ * 16 + ((v_ >> 12) & 7) + 8); break;
+    case 0: incHoriz(); break;
     }
 }
 
@@ -320,16 +332,22 @@ bool PPU::evalSprite(int i, int line, int height, bool& overflow) {
     int sy = oam_[i * 4];
     int row = line - sy;
     if (row < 0 || row >= height) return true;
-    if (spriteCount_ == 8) { overflow = true; return false; }
+    if (spriteCount_ == 8) {
+        overflow = true;
+        return false;
+    }
     uint8_t tile = oam_[i * 4 + 1];
     uint8_t attr = oam_[i * 4 + 2];
     int sx = oam_[i * 4 + 3];
-    if (attr & 0x80) row = height - 1 - row;    // vertical flip
+    if (attr & 0x80) row = height - 1 - row;   // vertical flip
     uint16_t patAddr;
     if (height == 16) {
         uint16_t bank = (tile & 1) << 12;
         uint8_t t = tile & 0xFE;
-        if (row >= 8) { t++; row -= 8; }
+        if (row >= 8) {
+            t++;
+            row -= 8;
+        }
         patAddr = bank + t * 16 + row;
     } else {
         patAddr = ((ctrl_ & 0x08) << 9) + tile * 16 + row;
@@ -366,16 +384,22 @@ void PPU::evalSprites(int line) {
         int sy = oam_[i * 4];
         int row = line - sy;
         if (row < 0 || row >= height) continue;
-        if (spriteCount_ == 8) { overflow = true; break; }
+        if (spriteCount_ == 8) {
+            overflow = true;
+            break;
+        }
         uint8_t tile = oam_[i * 4 + 1];
         uint8_t attr = oam_[i * 4 + 2];
         int sx = oam_[i * 4 + 3];
-        if (attr & 0x80) row = height - 1 - row;    // vertical flip
+        if (attr & 0x80) row = height - 1 - row;   // vertical flip
         uint16_t patAddr;
         if (height == 16) {
             uint16_t bank = (tile & 1) << 12;
             uint8_t t = tile & 0xFE;
-            if (row >= 8) { t++; row -= 8; }
+            if (row >= 8) {
+                t++;
+                row -= 8;
+            }
             patAddr = bank + t * 16 + row;
         } else {
             patAddr = ((ctrl_ & 0x08) << 9) + tile * 16 + row;
@@ -447,7 +471,8 @@ static void buildBitSpread() {
     if (bitSpreadReady) return;
     for (int b = 0; b < 256; b++) {
         uint16_t w = 0;
-        for (int i = 0; i < 8; i++) if (b & (1 << i)) w |= (uint16_t)1 << (i * 2);
+        for (int i = 0; i < 8; i++)
+            if (b & (1 << i)) w |= (uint16_t)1 << (i * 2);
         bitSpread[b] = w;
     }
     bitSpreadReady = true;
@@ -469,8 +494,7 @@ static void buildBitSpread() {
 // Draw=false is the display-skip path: it keeps every CPU-observable effect
 // (sprite 0 hit above all) but writes no pixels, so the frontend can leave a
 // DMA transfer of the previous frame running across it.
-template <bool Draw>
-void NES_HOT PPU::renderScanline() {
+template <bool Draw> void NES_HOT PPU::renderScanline() {
     const int y = scanline_;
     Pixel* const out = framebuffer + y * 256;
 
@@ -504,7 +528,7 @@ void NES_HOT PPU::renderScanline() {
     }
 
     // --- background: walk tiles, expanding 8 pixels at a time ---
-    uint8_t bgPix[256];      // 2-bit pattern value per pixel (0 = transparent)
+    uint8_t bgPix[256];   // 2-bit pattern value per pixel (0 = transparent)
     if (showBg) {
         // v_ currently points at the first tile of this line.
         uint16_t v = v_;
@@ -538,7 +562,7 @@ void NES_HOT PPU::renderScanline() {
         }
 
         // Per-tile state the inner loop needs, filled by fetchTile().
-        uint16_t pat = 0;        // 8 lanes of 2-bit pattern, lane i = pixel i
+        uint16_t pat = 0;   // 8 lanes of 2-bit pattern, lane i = pixel i
         const Pixel* tileColor = bgPalette[0];   // this tile's row of the table
         const uint8_t* const chr = chrWindow_;
         auto fetchTile = [&]() {
@@ -566,8 +590,10 @@ void NES_HOT PPU::renderScanline() {
             pat = (uint16_t)(bitSpread[lo] | (uint16_t)(bitSpread[hi] << 1));
             if (Draw) tileColor = bgPalette[pal];
             // advance to the next tile exactly as incHoriz() would
-            if ((v & 0x1F) == 31) { v &= ~0x1F; v ^= 0x0400; }
-            else v++;
+            if ((v & 0x1F) == 31) {
+                v &= ~0x1F;
+                v ^= 0x0400;
+            } else v++;
         };
         // The lanes are consumed left to right, so each pixel is the top of a
         // running shift register rather than a variable shift by (7-n)*2 — the
@@ -592,10 +618,14 @@ void NES_HOT PPU::renderScanline() {
         while (px + 8 <= 256) {
             fetchTile();
             lanes = pat;
-            emit(lanes, px + 0); emit(lanes, px + 1);
-            emit(lanes, px + 2); emit(lanes, px + 3);
-            emit(lanes, px + 4); emit(lanes, px + 5);
-            emit(lanes, px + 6); emit(lanes, px + 7);
+            emit(lanes, px + 0);
+            emit(lanes, px + 1);
+            emit(lanes, px + 2);
+            emit(lanes, px + 3);
+            emit(lanes, px + 4);
+            emit(lanes, px + 5);
+            emit(lanes, px + 6);
+            emit(lanes, px + 7);
             px += 8;
         }
         // Tail: the fine-X shift leaves fx columns of one more tile visible.
@@ -645,8 +675,10 @@ void NES_HOT PPU::renderScanline() {
         if (rowTransparent) continue;
 
         // Clip the column span once instead of testing every pixel.
-        int c0 = clip - s.x; if (c0 < 0) c0 = 0;
-        int cEnd = 256 - s.x; if (cEnd > 8) cEnd = 8;
+        int c0 = clip - s.x;
+        if (c0 < 0) c0 = 0;
+        int cEnd = 256 - s.x;
+        if (cEnd > 8) cEnd = 8;
         for (int c = c0; c < cEnd; c++) {
             const int px = s.x + c;
             const int bit = (s.attr & 0x40) ? c : 7 - c;   // horizontal flip
@@ -659,7 +691,7 @@ void NES_HOT PPU::renderScanline() {
 
             const uint64_t ownBit = (uint64_t)1 << (px & 63);
             uint64_t& ownWord = written[px >> 6];
-            if (ownWord & ownBit) continue;      // a nearer sprite already claimed it
+            if (ownWord & ownBit) continue;   // a nearer sprite already claimed it
             ownWord |= ownBit;
             const bool behind = s.attr & 0x20;
             if (behind && bgPix[px]) continue;   // background has priority
@@ -678,7 +710,7 @@ void NES_HOT PPU::renderScanline() {
 // not worth it — measurement below put the win in the skip path, not here.
 template void PPU::renderScanline<true>();
 template void PPU::renderScanline<false>();
-#endif // NES_EMBEDDED
+#endif   // NES_EMBEDDED
 
 #ifdef NES_EMBEDDED
 // Advance `dots` PPU cycles.
@@ -712,9 +744,9 @@ void NES_HOT PPU::stepMany(int dots) {
             // and skip straight over the one in between. dot 257 (the
             // horizontal v<-t copy) was lost that way on nearly every line,
             // leaving the scroll bits stale after a $2006 write.
-            if (dot_ <= 256) next = 256;       // render + incVert + evalSprites
-            else if (dot_ <= 257) next = 257;  // horizontal v<-t
-            else if (dot_ <= 260) next = 260;  // mapper scanline IRQ
+            if (dot_ <= 256) next = 256;   // render + incVert + evalSprites
+            else if (dot_ <= 257) next = 257;   // horizontal v<-t
+            else if (dot_ <= 260) next = 260;   // mapper scanline IRQ
             else if (prerender && dot_ <= 304) next = dot_ < 280 ? 280 : dot_;
         }
         // Rendering off on a visible line: every dot 1..256 paints the backdrop,
@@ -738,7 +770,7 @@ void NES_HOT PPU::stepMany(int dots) {
         dots--;
     }
 }
-#endif // NES_EMBEDDED
+#endif   // NES_EMBEDDED
 
 void NES_HOT PPU::step() {
     bool rendering = renderingEnabled();
@@ -767,7 +799,10 @@ void NES_HOT PPU::step() {
             if (visible && dot_ >= 1 && dot_ <= 256) renderDot();
             fetchBg();
             // shift
-            bgPatLo_ <<= 1; bgPatHi_ <<= 1; bgAttrLo_ <<= 1; bgAttrHi_ <<= 1;
+            bgPatLo_ <<= 1;
+            bgPatHi_ <<= 1;
+            bgAttrLo_ <<= 1;
+            bgAttrHi_ <<= 1;
         }
         if (dot_ == 256) incVert();
 #endif
@@ -817,4 +852,4 @@ void NES_HOT PPU::step() {
     }
 }
 
-} // namespace nes
+}   // namespace nes

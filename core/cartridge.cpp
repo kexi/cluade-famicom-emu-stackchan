@@ -17,9 +17,7 @@ public:
     uint8_t ppuRead(uint16_t addr) override { return chr_[addr & 0x1FFF]; }
     const uint8_t* chrWindow() const override { return chr_.data(); }
 #ifdef NES_EMBEDDED
-    bool prgWindows(const uint8_t* win[4]) const override {
-        return fixedPrgWindows(win);
-    }
+    bool prgWindows(const uint8_t* win[4]) const override { return fixedPrgWindows(win); }
 #endif
 };
 
@@ -45,7 +43,10 @@ public:
         return prg_[((bank % prgBanks_) * 0x4000) + (addr & 0x3FFF)];
     }
     void cpuWrite(uint16_t addr, uint8_t v) override {
-        if (addr >= 0x6000 && addr < 0x8000) { prgRam_[addr - 0x6000] = v; return; }
+        if (addr >= 0x6000 && addr < 0x8000) {
+            prgRam_[addr - 0x6000] = v;
+            return;
+        }
         if (addr < 0x8000) return;
         if (v & 0x80) {
             shift_ = 0x10;
@@ -73,7 +74,9 @@ public:
         }
     }
     uint8_t ppuRead(uint16_t addr) override { return chr_[chrAddr(addr)]; }
-    void ppuWrite(uint16_t addr, uint8_t v) override { if (chrRam_) chr_[chrAddr(addr)] = v; }
+    void ppuWrite(uint16_t addr, uint8_t v) override {
+        if (chrRam_) chr_[chrAddr(addr)] = v;
+    }
 #ifdef NES_EMBEDDED
     bool prgWindows(const uint8_t* win[4]) const override {
         const bool bankable = prgBanks_ > 0;
@@ -179,15 +182,11 @@ public:
         // no mask: oversize CNROM (e.g. Convoy no Nazo, 64KB CHR) uses more than 2 bits
         if (addr >= 0x8000) bank_ = v % (int)(chr_.size() / 0x2000);
     }
-    uint8_t ppuRead(uint16_t addr) override {
-        return chr_[(size_t)bank_ * 0x2000 + (addr & 0x1FFF)];
-    }
+    uint8_t ppuRead(uint16_t addr) override { return chr_[(size_t)bank_ * 0x2000 + (addr & 0x1FFF)]; }
     const uint8_t* chrWindow() const override { return chr_.data() + (size_t)bank_ * 0x2000; }
 #ifdef NES_EMBEDDED
     // CNROM banks CHR only; PRG is fixed, so the same derivation as NROM.
-    bool prgWindows(const uint8_t* win[4]) const override {
-        return fixedPrgWindows(win);
-    }
+    bool prgWindows(const uint8_t* win[4]) const override { return fixedPrgWindows(win); }
 #endif
 private:
     int bank_ = 0;
@@ -216,7 +215,10 @@ public:
         return prg_[(bank % prgBanks8k_) * 0x2000 + (addr & 0x1FFF)];
     }
     void cpuWrite(uint16_t addr, uint8_t v) override {
-        if (addr >= 0x6000 && addr < 0x8000) { prgRam_[addr - 0x6000] = v; return; }
+        if (addr >= 0x6000 && addr < 0x8000) {
+            prgRam_[addr - 0x6000] = v;
+            return;
+        }
         if (addr < 0x8000) return;
         bool even = !(addr & 1);
         if (addr < 0xA000) {
@@ -231,12 +233,16 @@ public:
             if (even) irqLatch_ = v;
             else irqCounter_ = 0;   // reload on next clock
         } else {
-            if (even) { irqEnabled_ = false; irqPending_ = false; }
-            else irqEnabled_ = true;
+            if (even) {
+                irqEnabled_ = false;
+                irqPending_ = false;
+            } else irqEnabled_ = true;
         }
     }
     uint8_t ppuRead(uint16_t addr) override { return chr_[chrAddr(addr)]; }
-    void ppuWrite(uint16_t addr, uint8_t v) override { if (chrRam_) chr_[chrAddr(addr)] = v; }
+    void ppuWrite(uint16_t addr, uint8_t v) override {
+        if (chrRam_) chr_[chrAddr(addr)] = v;
+    }
     void scanline() override {
         if (irqCounter_ == 0) irqCounter_ = irqLatch_;
         else irqCounter_--;
@@ -261,6 +267,7 @@ public:
     bool hasIrq() const override { return true; }
     bool irqPending() const override { return irqPending_; }
     void irqClear() override { irqPending_ = false; }
+
 private:
     size_t chrAddr(uint16_t addr) {
         bool invert = bankSelect_ & 0x80;
@@ -285,8 +292,7 @@ private:
 // Adds three expansion sound channels (2 pulse + sawtooth) on the cartridge.
 class Mapper6502VRC6 : public Mapper {
 public:
-    Mapper6502VRC6(RomBuffer prg, RomBuffer chr, Mirroring m,
-                   bool battery, bool swapA0A1)
+    Mapper6502VRC6(RomBuffer prg, RomBuffer chr, Mirroring m, bool battery, bool swapA0A1)
         : Mapper(std::move(prg), std::move(chr), m, battery), swapA0A1_(swapA0A1) {
         prgBanks16_ = (int)(prg_.size() / 0x4000);
         prgBanks8_ = (int)(prg_.size() / 0x2000);
@@ -297,9 +303,9 @@ public:
         if (addr >= 0x6000 && addr < 0x8000) return prgRamEnable_ ? prgRam_[addr - 0x6000] : 0;
         if (addr < 0x8000) return 0;
         int bank;
-        if (addr < 0xC000)      bank = (prg16_ % (prgBanks16_ ? prgBanks16_ : 1)) * 2 + ((addr >> 13) & 1);
+        if (addr < 0xC000) bank = (prg16_ % (prgBanks16_ ? prgBanks16_ : 1)) * 2 + ((addr >> 13) & 1);
         else if (addr < 0xE000) bank = prg8_;
-        else                    bank = prgBanks8_ - 1;
+        else bank = prgBanks8_ - 1;
         return prg_[((size_t)(bank % prgBanks8_)) * 0x2000 + (addr & 0x1FFF)];
     }
 
@@ -317,8 +323,8 @@ public:
         const int banks16 = prgBanks16_ ? prgBanks16_ : 1;
         const int prg16Folded = (prg16_ % banks16) * 2;
         const int bank8k[4] = {
-            prg16Folded,        // $8000: (addr >> 13) & 1 == 0
-            prg16Folded + 1,    // $A000: (addr >> 13) & 1 == 1
+            prg16Folded,   // $8000: (addr >> 13) & 1 == 0
+            prg16Folded + 1,   // $A000: (addr >> 13) & 1 == 1
             prg8_,
             prgBanks8_ - 1,
         };
@@ -327,7 +333,10 @@ public:
 #endif
 
     void cpuWrite(uint16_t addr, uint8_t v) override {
-        if (addr >= 0x6000 && addr < 0x8000) { if (prgRamEnable_) prgRam_[addr - 0x6000] = v; return; }
+        if (addr >= 0x6000 && addr < 0x8000) {
+            if (prgRamEnable_) prgRam_[addr - 0x6000] = v;
+            return;
+        }
         if (addr < 0x8000) return;
         // VRC6b swaps the A0/A1 lines feeding the register decoder
         uint16_t reg = addr & 0xF000;
@@ -336,8 +345,13 @@ public:
 
         switch (reg) {
         case 0x8000: prg16_ = v & 0x0F; break;
-        case 0x9000: case 0xA000: case 0xB000: {
-            if (reg == 0xB000 && idx == 3) { writeBankMode(v); break; }
+        case 0x9000:
+        case 0xA000:
+        case 0xB000: {
+            if (reg == 0xB000 && idx == 3) {
+                writeBankMode(v);
+                break;
+            }
             audioWrite(reg, idx, v);
             break;
         }
@@ -350,7 +364,10 @@ public:
                 irqMode_ = v & 4;
                 irqEnable_ = v & 2;
                 irqEnableAfterAck_ = v & 1;
-                if (irqEnable_) { irqCounter_ = irqLatch_; irqPrescaler_ = 341; }
+                if (irqEnable_) {
+                    irqCounter_ = irqLatch_;
+                    irqPrescaler_ = 341;
+                }
                 irqPending_ = false;
             } else if (idx == 2) {
                 irqPending_ = false;
@@ -366,11 +383,12 @@ public:
         int slot = (addr >> 10) & 7;
         int bank;
         switch (chrMode_) {
-        case 0:  bank = chrReg_[slot]; break;                          // 8 x 1KB
-        case 1:  bank = (chrReg_[slot >> 1] << 1) | (slot & 1); break; // 4 x 2KB
-        default: bank = (slot < 4) ? chrReg_[slot]                     // 4 x 1KB + 2 x 2KB
-                                   : ((chrReg_[4 + ((slot - 4) >> 1)] << 1) | (slot & 1));
-                 break;
+        case 0: bank = chrReg_[slot]; break;   // 8 x 1KB
+        case 1: bank = (chrReg_[slot >> 1] << 1) | (slot & 1); break;   // 4 x 2KB
+        default:
+            bank = (slot < 4) ? chrReg_[slot]   // 4 x 1KB + 2 x 2KB
+                              : ((chrReg_[4 + ((slot - 4) >> 1)] << 1) | (slot & 1));
+            break;
         }
         return chr_[((size_t)(bank % (int)banks1k)) * 0x400 + (addr & 0x3FF)];
     }
@@ -379,9 +397,9 @@ public:
     void cpuCycle() override {
         clockAudio();
         if (!irqEnable_) return;
-        if (irqMode_) {                       // cycle mode
+        if (irqMode_) {   // cycle mode
             clockIrqCounter();
-        } else {                              // scanline mode
+        } else {   // scanline mode
             irqPrescaler_ -= 3;
             if (irqPrescaler_ <= 0) {
                 irqPrescaler_ += 341;
@@ -433,18 +451,21 @@ private:
     int sawOut() const { return saw_.enabled ? (saw_.accumulator >> 3) : 0; }
 
     void audioWrite(uint16_t reg, int idx, uint8_t v) {
-        if (reg == 0x9000 && idx == 3) {        // frequency control
+        if (reg == 0x9000 && idx == 3) {   // frequency control
             halt_ = v & 1;
             freqShift_ = (v & 4) ? 8 : ((v & 2) ? 4 : 0);
             return;
         }
-        if (reg == 0xB000) {                    // sawtooth
+        if (reg == 0xB000) {   // sawtooth
             if (idx == 0) saw_.rate = v & 0x3F;
             else if (idx == 1) saw_.freq = (saw_.freq & 0xF00) | v;
             else {
                 saw_.freq = (saw_.freq & 0x0FF) | ((v & 0x0F) << 8);
                 saw_.enabled = v & 0x80;
-                if (!saw_.enabled) { saw_.accumulator = 0; saw_.step = 0; }
+                if (!saw_.enabled) {
+                    saw_.accumulator = 0;
+                    saw_.step = 0;
+                }
             }
             return;
         }
@@ -477,19 +498,24 @@ private:
             saw_.timer = (saw_.freq >> freqShift_) + 1;
             saw_.step++;
             if (saw_.step & 1) saw_.accumulator += saw_.rate;
-            if (saw_.step >= 14) { saw_.step = 0; saw_.accumulator = 0; }
+            if (saw_.step >= 14) {
+                saw_.step = 0;
+                saw_.accumulator = 0;
+            }
         }
     }
 
     void clockIrqCounter() {
-        if (irqCounter_ == 0xFF) { irqCounter_ = irqLatch_; irqPending_ = true; }
-        else irqCounter_++;
+        if (irqCounter_ == 0xFF) {
+            irqCounter_ = irqLatch_;
+            irqPending_ = true;
+        } else irqCounter_++;
     }
 
     void writeBankMode(uint8_t v) {
         chrMode_ = v & 3;
         prgRamEnable_ = v & 0x80;
-        if (chrMode_ == 0) {           // CIRAM nametables, mirroring from bits 2-3
+        if (chrMode_ == 0) {   // CIRAM nametables, mirroring from bits 2-3
             switch ((v >> 2) & 3) {
             case 0: mirroring_ = Mirroring::Vertical; break;
             case 1: mirroring_ = Mirroring::Horizontal; break;
@@ -553,4 +579,4 @@ std::unique_ptr<Mapper> loadRom(const uint8_t* data, size_t size) {
     }
 }
 
-} // namespace nes
+}   // namespace nes

@@ -39,7 +39,7 @@ void CPU::reset() {
 // Addressing modes: each returns effective address; pageCrossed set for +1 cycle modes
 namespace {
 inline bool samePage(uint16_t a, uint16_t b) { return (a & 0xFF00) == (b & 0xFF00); }
-}
+}   // namespace
 
 void CPU::branch(bool cond, int& cycles) {
     int8_t off = (int8_t)read(pc++);
@@ -338,18 +338,24 @@ const CPU::OpFn CPU::OPS[256] = {
 // clang-format on
 
 int NES_HOT CPU::step() {
-    if (stall_ > 0) { int s = stall_; stall_ = 0; return s; }
+    if (stall_ > 0) {
+        int s = stall_;
+        stall_ = 0;
+        return s;
+    }
 
     if (nmiPending_) {
         nmiPending_ = false;
-        push(pc >> 8); push(pc & 0xFF);
+        push(pc >> 8);
+        push(pc & 0xFF);
         push(status(false));
         fI = true;
         pc = read16(0xFFFA);
         return 7;
     }
     if (irqLine_ && !fI) {
-        push(pc >> 8); push(pc & 0xFF);
+        push(pc >> 8);
+        push(pc & 0xFF);
         push(status(false));
         fI = true;
         pc = read16(0xFFFE);
@@ -367,4 +373,4 @@ int NES_HOT CPU::step() {
     return (this->*OPS[op])();
 }
 
-} // namespace nes
+}   // namespace nes
