@@ -1,0 +1,8 @@
+# git hook 定義。nix develop の shellHook が `lefthook install` を自動実行する
+# (flake.nix 参照) ので、手動セットアップは不要。
+pre-commit:
+  commands:
+    gitleaks:
+      # ステージ済みの差分だけを見る: 作業ツリーの secrets.h (gitignore 済み)
+      # など、コミットされないファイルで止めないため
+      run: gitleaks git --pre-commit --staged --redact --verbose
