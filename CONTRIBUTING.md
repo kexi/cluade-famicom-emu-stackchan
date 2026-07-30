@@ -1,82 +1,84 @@
 # Contributing
 
-開発ツールは nix flake で固定しています(clang / Emscripten / PlatformIO / uv / just / lefthook / gitleaks)。
-Python スクリプト (`tools/*.py`) は uv が PEP 723 メタデータに従って実行時にインタプリタと依存を解決します(uv 自体は flake で固定)。
-ツールを個別にインストールする必要はなく、環境の入り方は以下の2通りです。
+🌐 [日本語](CONTRIBUTING.ja.md) · [中文](CONTRIBUTING.zh.md)
 
-## 1. nix のインストール
+The development toolchain is pinned by a nix flake (clang / Emscripten / PlatformIO / uv / just / lefthook / gitleaks).
+Python scripts (`tools/*.py`) are run by uv, which resolves the interpreter and dependencies at run time from PEP 723 metadata (uv itself is pinned by the flake).
+There is no need to install tools individually; there are two ways to enter the environment.
 
-[nix](https://nixos.org) が必要です。未導入なら [Determinate Systems installer](https://install.determinate.systems/) が手軽です:
+## 1. Install nix
+
+[nix](https://nixos.org) is required. If you don't have it yet, the [Determinate Systems installer](https://install.determinate.systems/) is the easiest way:
 
 ```sh
 curl -fsSL https://install.determinate.systems/nix | sh -s -- install
 ```
 
-公式インストーラを使う場合は flakes を有効にしてください(`~/.config/nix/nix.conf`):
+If you use the official installer, enable flakes (`~/.config/nix/nix.conf`):
 
 ```
 experimental-features = nix-command flakes
 ```
 
-## 2A. direnv を使う(推奨)
+## 2A. With direnv (recommended)
 
-[direnv](https://direnv.net) を入れておくと、リポジトリに `cd` するだけで環境が整います。
-あわせて [nix-direnv](https://github.com/nix-community/nix-direnv) の導入を推奨します。
-direnv 標準の `use flake` は devshell をキャッシュせず GC root も張らないため、
-`nix-collect-garbage` のたびに環境が丸ごと再構築されます。nix-direnv はどちらも解決します。
+With [direnv](https://direnv.net) installed, just `cd` into the repository and the environment is ready.
+We also recommend [nix-direnv](https://github.com/nix-community/nix-direnv).
+direnv's built-in `use flake` neither caches the devshell nor registers a GC root,
+so every `nix-collect-garbage` rebuilds the whole environment from scratch. nix-direnv solves both.
 
 ```sh
-# インストール例 (nix でも brew でも可)
+# Install example (nix or brew both work)
 nix profile install nixpkgs#direnv nixpkgs#nix-direnv
 echo 'source $HOME/.nix-profile/share/nix-direnv/direnvrc' >> ~/.config/direnv/direnvrc
 
-# シェルへのフック (fish の場合。bash/zsh は direnv のドキュメント参照)
+# Hook into your shell (fish shown here; see the direnv docs for bash/zsh)
 echo 'direnv hook fish | source' >> ~/.config/fish/config.fish
 ```
 
-初回のみ、リポジトリ直下で許可が必要です:
+Only on first use, grant permission at the repository root:
 
 ```sh
 cd cluade-famicom-emu-stackchan
-direnv allow    # .envrc (use flake) を信頼する
+direnv allow    # trust .envrc (use flake)
 ```
 
-以後は `cd` するだけで devshell に入ります。flake.lock の更新時は自動で再評価されます。
+From then on, simply `cd` to enter the devshell. It re-evaluates automatically when flake.lock changes.
 
-## 2B. direnv なしで使う
+## 2B. Without direnv
 
-すべてのコマンドに `nix develop --command` を前置するか、シェルごと入ります:
+Prefix every command with `nix develop --command`, or enter the shell:
 
 ```sh
-nix develop                        # devshell に入る
-nix develop --command just build   # 単発実行
+nix develop                        # enter the devshell
+nix develop --command just build   # one-off run
 ```
 
-## devshell に入ると自動で行われること
+## What entering the devshell sets up automatically
 
-`flake.nix` の shellHook が以下を設定します。手動での準備は不要です:
+The shellHook in `flake.nix` takes care of the following — no manual preparation needed:
 
-- **pre-commit hook の設置** — `lefthook install` が自動実行され、コミット時に
-  [gitleaks](https://github.com/gitleaks/gitleaks) がステージ済み差分の秘密情報を
-  スキャンします(`lefthook.yml` 参照)。検出されるとコミットは中断されます
-- PlatformIO 用の esptool 依存を `PYTHONPATH` に追加
-- Emscripten のキャッシュを書き込み可能な場所 (`~/.cache/emscripten-*`) に複製
+- **Installs the pre-commit hook** — `lefthook install` runs automatically, and on each
+  commit [gitleaks](https://github.com/gitleaks/gitleaks) scans the staged diff for
+  secrets (see `lefthook.yml`). If anything is detected, the commit is aborted
+- Adds PlatformIO's esptool dependencies to `PYTHONPATH`
+- Copies the Emscripten cache to a writable location (`~/.cache/emscripten-*`)
 
-## 初回セットアップ
+## First-time setup
 
 ```sh
-just secrets     # WiFi 設定の雛形を作成 → m5stack/src/secrets.h を編集 (gitignore 済み)
-just fetch-rom   # デフォルト ROM (game.nes) を取得 (*.nes は gitignore 済み)
+just secrets     # create the WiFi config template → edit m5stack/src/secrets.h (gitignored)
+just fetch-rom   # fetch the default ROM (game.nes) (*.nes is gitignored)
 ```
 
-## よく使うタスク
+## Common tasks
 
-タスクランナーは [just](https://github.com/casey/just) です。一覧は `just --list` で確認できます。
-主要タスクの一覧表は [README の Reproducible toolchain 節](README.md#reproducible-toolchain-nix) にあります(表の重複管理を避けるためここには置きません)。
+The task runner is [just](https://github.com/casey/just). Run `just --list` to see all tasks.
+A table of the main tasks lives in the [Reproducible toolchain section of the README](README.md#reproducible-toolchain-nix) (kept there to avoid maintaining the table in two places).
 
-## ブランチ運用
+## Branch workflow
 
-`main` へ直接コミットせず、feature ブランチを切って PR を作成してください:
+Do not commit directly to `main`; create a feature branch and open a PR:
 
 ```sh
 git switch -c feature/<topic>
