@@ -58,6 +58,78 @@ check:
     clang++ -std=c++17 -fsyntax-only core/*.cpp
     clang++ -std=c++17 -DNES_EMBEDDED -fsyntax-only core/*.cpp
 
+# 参照ビルドと組み込みビルドの bit-exact 検証 (tools/verify_host.cpp)
+#
+# 3 系列を走らせて突き合わせる:
+#   (1) 参照ビルド      (フラグなし, 毎フレーム描画)
+#   (2) 組み込みビルド  (-DNES_EMBEDDED, 毎フレーム描画)
+#   (3) 組み込みビルド  (-DNES_EMBEDDED, 4 フレームに 1 回描画 = 実機の divisor 4)
+#
+# (1)vs(2) は「lockstep と CPU 先行 catch-up が同じ結果になるか」を、
+# (2)vs(3) は「描画を間引いても CPU から見える状態が変わらないか」を見る。
+#
+# 中間ファイルはリポジトリ外の一時ディレクトリに置く (mktemp -d)。ビルド成果物を
+# 作業ツリーに落とすと .gitignore の管理対象が増えるため
+verify frames='600':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -f m5stack/data/game.nes || ./m5stack/scripts/fetch_rom.sh
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    echo "building (clang++ -std=c++17 -O2)..."
+    clang++ -std=c++17 -O2 -o "$work/ref" tools/verify_host.cpp core/*.cpp
+    clang++ -std=c++17 -O2 -DNES_EMBEDDED -o "$work/emb" tools/verify_host.cpp core/*.cpp
+    echo "running {{frames}} frames x3..."
+    "$work/ref" m5stack/data/game.nes {{frames}} all   > "$work/1-ref-all.txt"
+    "$work/emb" m5stack/data/game.nes {{frames}} all   > "$work/2-emb-all.txt"
+    "$work/emb" m5stack/data/game.nes {{frames}} skip4 > "$work/3-emb-skip4.txt"
+    # 判定に使うのは各行の '#' より前 (STATE 列) だけ。'#' 以降は観測点依存の
+    # 参考列で、フレーム境界では原理的に一致しない (verify_host.cpp 冒頭を参照)
+    for f in 1-ref-all 2-emb-all 3-emb-skip4; do
+        sed 's/  #.*//' "$work/$f.txt" | grep -v '^#' > "$work/$f.state"
+    done
+    rc=0
+    echo
+    echo "=== (1) reference/all vs (2) embedded/all ==="
+    if diff -u "$work/1-ref-all.state" "$work/2-emb-all.state" > "$work/d12.txt"; then
+        echo "OK: identical on all {{frames}} frames"
+    else
+        echo "MISMATCH: $(grep -c '^-[0-9]' "$work/d12.txt" || true) differing frames"
+        head -40 "$work/d12.txt"
+        rc=1
+    fi
+    echo
+    echo "=== (2) embedded/all vs (3) embedded/skip4 ==="
+    # skip4 は描画しないフレームの fb が '-' になるので、fb 列を落とした残り
+    # (= CPU から観測できる状態) が全行一致することを見る
+    for f in 2-emb-all 3-emb-skip4; do
+        sed 's/ fb=[0-9A-F-]*//' "$work/$f.state" > "$work/$f.nofb"
+    done
+    if diff -u "$work/2-emb-all.nofb" "$work/3-emb-skip4.nofb" > "$work/d23.txt"; then
+        echo "OK: non-framebuffer state identical on all {{frames}} frames"
+    else
+        echo "MISMATCH: $(grep -c '^-[0-9]' "$work/d23.txt" || true) differing frames"
+        head -40 "$work/d23.txt"
+        rc=1
+    fi
+    # (3) が実際に描画したフレームは、その fb が (2) の同フレームと一致すること
+    join -j1 \
+        <(awk '{print $1, $NF}' "$work/2-emb-all.state") \
+        <(awk '$NF != "fb=-" {print $1, $NF}' "$work/3-emb-skip4.state") \
+        > "$work/fbjoin.txt"
+    drawn=$(wc -l < "$work/fbjoin.txt" | tr -d ' ')
+    bad=$(awk '$2 != $3' "$work/fbjoin.txt" | tee "$work/fbbad.txt" | wc -l | tr -d ' ')
+    if [ "$bad" -eq 0 ]; then
+        echo "OK: framebuffer matches on all $drawn drawn frames"
+    else
+        echo "MISMATCH: $bad of $drawn drawn frames differ"
+        head -20 "$work/fbbad.txt"
+        rc=1
+    fi
+    echo
+    if [ "$rc" -eq 0 ]; then echo "verify: PASS"; else echo "verify: FAIL"; fi
+    exit $rc
+
 # コードを整形 (C++ は .clang-format、Python は ruff.toml、JS は .oxfmtrc.json 準拠)
 #
 # oxfmt に web/*.js を明示するのは、ディレクトリを渡すと index.html まで
