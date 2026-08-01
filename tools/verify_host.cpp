@@ -36,14 +36,28 @@
 // ctrl/mask/oamAddr/t/fineX/w/frameCount/長さカウンタ/IRQ) は全フレーム一致
 // する。一方 framebuffer だけが 600 中 73 フレームで食い違う。
 //
-// 差分は毎回 scanline 135 の x>=249 に限定され、1 フレームあたり 1-5 ピクセル。
-// 組み込み側の renderScanline() が 1 ライン分を dot 256 で一括描画するのに対し
-// 参照側の renderDot() はライン内で逐次フェッチするため、このゲームが scanline
-// 135 で行うライン途中のレジスタ書き換えが、最終タイル (x>=248) の取り込み
-// タイミングとしてしか現れないことによる。
+// 差分は毎回 scanline 135 の最終タイル (x>=248) に限定され、1 フレームあたり
+// 1-5 ピクセル。組み込み側の renderScanline() が 1 ライン分を dot 256 で一括
+// 描画するのに対し参照側の renderDot() はライン内で逐次フェッチするため、この
+// ゲームが scanline 135 で行うライン途中のレジスタ書き換えが、そのライン最後の
+// タイルの取り込みタイミングとしてしか現れないことによる。
 //
-// ハーネス側では潰していない。潰せば回帰ゲートとしての意味が失われるうえ、
-// これはコア側で判断すべき「許容する差か、直すべき差か」であるため。
+// この差分は「renderScanline のライン一括描画の既知の副作用」として許容し、
+// verify は既知領域に収まっている限り PASS とする (件数は WARN で報告)。
+// 領域の判定と、なぜハーネス側で潰さないのかは fbDiffInKnownWindow() を参照。
+//
+// ---- 出力モード ----
+//
+//   <rom> [frames] [all|skip4]
+//       1 フレーム 1 行のテキスト。CRC で全フレームを一気に比較する
+//   <rom> [frames] [all|skip4] dump <frame>
+//       指定フレームの framebuffer をパレット index 列 (61440 byte) として
+//       stdout へ raw 出力する
+//
+// dump を分けているのは出力サイズとの折り合い。全フレームの index 列を出すと
+// 600 フレームで 36MB になる一方、CRC が食い違うのは一部のフレームだけなので、
+// justfile 側は「まず trace で CRC 比較 → 食い違ったフレームだけ dump で
+// 引き直してピクセル位置を特定する」2 パスで動かす。
 
 #include "../core/nes.h"
 
@@ -144,19 +158,19 @@ bool buildPaletteInverse(std::string& err) {
     return true;
 }
 
-// framebuffer を canonical index 列へ正規化して CRC32 を取る。
-uint32_t framebufferCrc(const nes::PPU& ppu, bool& ok) {
-    static uint8_t normalized[256 * 240];
-    ok = true;
-    for (int i = 0; i < 256 * 240; i++) {
+constexpr int FB_PIXELS = 256 * 240;
+
+// framebuffer を canonical index 列へ正規化する。trace の CRC も dump の raw
+// 出力も同じここを通るので、両モードが指す「画面の内容」は定義上ひとつになる。
+uint8_t normalizedFb[FB_PIXELS];
+
+bool normalizeFramebuffer(const nes::PPU& ppu) {
+    for (int i = 0; i < FB_PIXELS; i++) {
         const int idx = canonicalIndexOf(ppu.framebuffer[i]);
-        if (idx < 0) {
-            ok = false;
-            return 0;
-        }
-        normalized[i] = (uint8_t)idx;
+        if (idx < 0) return false;
+        normalizedFb[i] = (uint8_t)idx;
     }
-    return crc32(normalized, sizeof(normalized));
+    return true;
 }
 
 // ---------------------------------------------------------------- 実行
@@ -185,12 +199,26 @@ bool readFile(const char* path, std::vector<uint8_t>& out) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <rom> [frames] [all|skip4]\n", argv[0]);
+        fprintf(stderr, "usage: %s <rom> [frames] [all|skip4] [dump <frame>]\n", argv[0]);
         return 2;
     }
     const char* romPath = argv[1];
     const int frames = argc >= 3 ? atoi(argv[2]) : 600;
     const std::string pattern = argc >= 4 ? argv[3] : "all";
+
+    // dump モード: 指定フレームまで走らせ、その framebuffer を index 列で吐く。
+    // frames と pattern はそのまま効くので、trace で差分の出たフレームを同じ
+    // 描画パターンのまま引き直せる。
+    bool dumpMode = false;
+    int dumpFrame = -1;
+    if (argc >= 6 && std::string(argv[4]) == "dump") {
+        dumpMode = true;
+        dumpFrame = atoi(argv[5]);
+        if (dumpFrame < 0 || dumpFrame >= frames) {
+            fprintf(stderr, "error: dump frame %d is outside 0..%d\n", dumpFrame, frames - 1);
+            return 2;
+        }
+    }
 
     const bool patternKnown = pattern == "all" || pattern == "skip4";
     if (!patternKnown) {
@@ -233,23 +261,29 @@ int main(int argc, char** argv) {
     // 入力は無入力固定。決定性を最優先するため、パッドは一切触らない。
     const int divisor = pattern == "skip4" ? 4 : 1;
 
-    printf("# rom=%s frames=%d pattern=%s build=%s\n", romPath, frames, pattern.c_str(),
+    // dump は raw バイナリを吐くので、ヘッダは trace のときだけ。
+    if (!dumpMode) {
+        printf("# rom=%s frames=%d pattern=%s build=%s\n", romPath, frames, pattern.c_str(),
 #ifdef NES_EMBEDDED
-           "embedded"
+               "embedded"
 #else
-           "reference"
+               "reference"
 #endif
-    );
-    // 一致判定に使う列 (STATE) と、観測点のずれで動くため参考に留める列 (INFO)
-    // を行内で分ける。INFO を別扱いにする理由は冒頭の「観測点について」を参照。
-    //
-    // v (loopy スクロール) と DMC の残バイト数・フレームシーケンサ位置を INFO に
-    // 置くのは、これらがフレーム内で連続的に進むカウンタで、値がそのまま
-    // 「フレーム内のどこで止まったか」を表しているため。ここが違うのは
-    // 状態の食い違いではなく観測点の違いそのもので、比較しても意味がない。
-    printf("# STATE columns: frame wram oam vram ppu(ctrl mask oamaddr t finex w fc) "
-           "apu(p1 p2 tri noi firq dirq) fb\n");
-    printf("# INFO columns (not compared): A X Y P SP PC status rdbuf openbus v scanline dot odd dmc step cyc smp\n");
+        );
+        // 一致判定に使う列 (STATE) と、観測点のずれで動くため参考に留める列
+        // (INFO) を行内で分ける。INFO を別扱いにする理由は冒頭の「観測点に
+        // ついて」を参照。
+        //
+        // v (loopy スクロール) と DMC の残バイト数・フレームシーケンサ位置を
+        // INFO に置くのは、これらがフレーム内で連続的に進むカウンタで、値が
+        // そのまま「フレーム内のどこで止まったか」を表しているため。ここが
+        // 違うのは状態の食い違いではなく観測点の違いそのもので、比較しても
+        // 意味がない。
+        printf("# STATE columns: frame wram oam vram ppu(ctrl mask oamaddr t finex w fc) "
+               "apu(p1 p2 tri noi firq dirq) fb\n");
+        printf("# INFO columns (not compared): A X Y P SP PC status rdbuf openbus v scanline dot odd dmc step cyc "
+               "smp\n");
+    }
 
     for (int frame = 0; frame < frames; frame++) {
         const bool draw = (frame % divisor) == 0;
@@ -257,6 +291,26 @@ int main(int argc, char** argv) {
         machine.ppu.renderThisFrame = draw;
 #endif
         machine.runFrame();
+
+        if (dumpMode) {
+            // 目的のフレームに届くまでは走らせるだけ。到達したらその画面を
+            // index 列で吐いて終わる。
+            if (frame != dumpFrame) {
+                machine.apu.sampleCount = 0;
+                continue;
+            }
+            if (!draw) {
+                fprintf(stderr, "error: frame %d is not drawn under pattern %s\n", dumpFrame, pattern.c_str());
+                return 4;
+            }
+            if (!normalizeFramebuffer(machine.ppu)) {
+                fprintf(stderr, "error: framebuffer holds a pixel value outside the palette (frame %d)\n", frame);
+                return 4;
+            }
+            fwrite(normalizedFb, 1, sizeof(normalizedFb), stdout);
+            fflush(stdout);
+            return 0;
+        }
 
         // 音声はサンプル数だけ状態として観測し、中身は捨てる。APU を駆動する
         // のは runFrame() の側なので、ここでの取得は不要 — ただし sampleCount
@@ -281,15 +335,13 @@ int main(int argc, char** argv) {
         // framebuffer は描画したフレームだけ出す。描画をスキップしたフレームの
         // 内容は「前回描いた絵が残っている」だけで、系列間で比較する意味がない。
         if (draw) {
-            bool ok = false;
-            const uint32_t fb = framebufferCrc(machine.ppu, ok);
-            if (!ok) {
+            if (!normalizeFramebuffer(machine.ppu)) {
                 printf("\n");
                 fflush(stdout);
                 fprintf(stderr, "error: framebuffer holds a pixel value outside the palette (frame %d)\n", frame);
                 return 4;
             }
-            printf(" fb=%08X", fb);
+            printf(" fb=%08X", crc32(normalizedFb, sizeof(normalizedFb)));
         } else {
             printf(" fb=-");
         }

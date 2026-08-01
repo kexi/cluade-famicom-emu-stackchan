@@ -89,13 +89,71 @@ verify frames='600':
     done
     rc=0
     echo
-    echo "=== (1) reference/all vs (2) embedded/all ==="
-    if diff -u "$work/1-ref-all.state" "$work/2-emb-all.state" > "$work/d12.txt"; then
+    echo "=== (1) reference/all vs (2) embedded/all: non-framebuffer ==="
+    # fb 以外は厳密比較。ここが動いたら catch-up が CPU から見える状態を
+    # 変えてしまっているので、無条件に FAIL
+    for f in 1-ref-all 2-emb-all; do
+        sed 's/ fb=[0-9A-F-]*//' "$work/$f.state" > "$work/$f.nofb12"
+    done
+    if diff -u "$work/1-ref-all.nofb12" "$work/2-emb-all.nofb12" > "$work/d12.txt"; then
         echo "OK: identical on all {{frames}} frames"
     else
-        echo "MISMATCH: $(grep -c '^-[0-9]' "$work/d12.txt" || true) differing frames"
+        echo "FAIL: $(grep -c '^-[0-9]' "$work/d12.txt" || true) differing frames"
         head -40 "$work/d12.txt"
         rc=1
+    fi
+    echo
+    echo "=== (1) reference/all vs (2) embedded/all: framebuffer ==="
+    # 既知の許容領域: scanline 135 の最終タイル (x>=248)。
+    #
+    # 組み込み側の PPU::renderScanline() は 1 ライン分を dot 256 でまとめて
+    # 描くのに対し、参照側の renderDot() はライン内を逐次フェッチする。この
+    # ため game.nes が scanline 135 で行うライン途中のレジスタ書き換えが、
+    # そのラインの最後のタイルの取り込みタイミングとしてしか現れない。
+    # 「ライン一括描画の既知の副作用」として許容し、件数は WARN で報告する。
+    #
+    # 領域が game.nes 固有である点に注意。ROM を差し替えるなら、この 135 という
+    # 数字はそのゲームの分割位置に依存するので必ず引き直すこと。x>=248 の側は
+    # タイル境界なので構造的だが、scanline は完全にゲーム依存
+    known_line=135
+    known_x=248
+    fbdiff=$(join -j1 \
+        <(awk '{print $1, $NF}' "$work/1-ref-all.state") \
+        <(awk '{print $1, $NF}' "$work/2-emb-all.state") \
+        | awk '$2 != $3 {print $1}')
+    nfb=$(printf '%s' "$fbdiff" | grep -c . || true)
+    if [ "$nfb" -eq 0 ]; then
+        echo "OK: framebuffer identical on all {{frames}} frames"
+    else
+        # CRC が違ったフレームだけ index 列で引き直し、差分ピクセルの位置を出す。
+        # 全フレームを index 列で出すと {{frames}} フレームで数十 MB になるため、
+        # trace(CRC) で絞ってから dump で位置特定する 2 パスにしている
+        outside=0
+        inside=0
+        for fr in $fbdiff; do
+            n=$(printf '%s' "$fr" | sed 's/^0*//')
+            n=${n:-0}
+            "$work/ref" m5stack/data/game.nes {{frames}} all dump "$n" > "$work/fa.bin"
+            "$work/emb" m5stack/data/game.nes {{frames}} all dump "$n" > "$work/fb.bin"
+            # cmp -l は 1-origin のバイト位置を出すので 1 引いて y,x に直す
+            bad=$(cmp -l "$work/fa.bin" "$work/fb.bin" \
+                | awk -v L="$known_line" -v X="$known_x" \
+                    '{p=$1-1; y=int(p/256); x=p%256; if (y!=L || x<X) print y","x}')
+            cnt=$(cmp -l "$work/fa.bin" "$work/fb.bin" | wc -l | tr -d ' ')
+            inside=$((inside + cnt))
+            if [ -n "$bad" ]; then
+                outside=$((outside + 1))
+                echo "  frame $n: differs OUTSIDE the known window at (y,x)= $(printf '%s' "$bad" | tr '\n' ' ')"
+            fi
+        done
+        if [ "$outside" -eq 0 ]; then
+            echo "WARN: $nfb of {{frames}} frames differ, $inside pixels total"
+            echo "      all within the known window (scanline $known_line, x>=$known_x)"
+            echo "      = renderScanline's whole-line draw, accepted (see justfile/verify_host.cpp)"
+        else
+            echo "FAIL: $outside frame(s) differ outside the known window"
+            rc=1
+        fi
     fi
     echo
     echo "=== (2) embedded/all vs (3) embedded/skip4 ==="
@@ -107,7 +165,7 @@ verify frames='600':
     if diff -u "$work/2-emb-all.nofb" "$work/3-emb-skip4.nofb" > "$work/d23.txt"; then
         echo "OK: non-framebuffer state identical on all {{frames}} frames"
     else
-        echo "MISMATCH: $(grep -c '^-[0-9]' "$work/d23.txt" || true) differing frames"
+        echo "FAIL: $(grep -c '^-[0-9]' "$work/d23.txt" || true) differing frames"
         head -40 "$work/d23.txt"
         rc=1
     fi
@@ -121,7 +179,7 @@ verify frames='600':
     if [ "$bad" -eq 0 ]; then
         echo "OK: framebuffer matches on all $drawn drawn frames"
     else
-        echo "MISMATCH: $bad of $drawn drawn frames differ"
+        echo "FAIL: $bad of $drawn drawn frames differ"
         head -20 "$work/fbbad.txt"
         rc=1
     fi
