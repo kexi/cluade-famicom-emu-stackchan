@@ -59,19 +59,18 @@ check:
     clang++ -std=c++17 -DNES_EMBEDDED -fsyntax-only core/*.cpp
 
 # 参照ビルドと組み込みビルドの bit-exact 検証 (tools/verify_host.cpp)
-#
-# 3 系列を走らせて突き合わせる:
-#   (1) 参照ビルド      (フラグなし, 毎フレーム描画)
-#   (2) 組み込みビルド  (-DNES_EMBEDDED, 毎フレーム描画)
-#   (3) 組み込みビルド  (-DNES_EMBEDDED, 4 フレームに 1 回描画 = 実機の divisor 4)
-#
-# (1)vs(2) は「lockstep と CPU 先行 catch-up が同じ結果になるか」を、
-# (2)vs(3) は「描画を間引いても CPU から見える状態が変わらないか」を見る。
-#
-# 中間ファイルはリポジトリ外の一時ディレクトリに置く (mktemp -d)。ビルド成果物を
-# 作業ツリーに落とすと .gitignore の管理対象が増えるため
 verify frames='600':
     #!/usr/bin/env bash
+    # 3 系列を走らせて突き合わせる:
+    #   (1) 参照ビルド      (フラグなし, 毎フレーム描画)
+    #   (2) 組み込みビルド  (-DNES_EMBEDDED, 毎フレーム描画)
+    #   (3) 組み込みビルド  (-DNES_EMBEDDED, 4 フレームに 1 回描画 = 実機の divisor 4)
+    #
+    # (1)vs(2) は「lockstep と CPU 先行 catch-up が同じ結果になるか」を、
+    # (2)vs(3) は「描画を間引いても CPU から見える状態が変わらないか」を見る。
+    #
+    # 中間ファイルはリポジトリ外の一時ディレクトリに置く (mktemp -d)。ビルド
+    # 成果物を作業ツリーに落とすと .gitignore の管理対象が増えるため
     set -euo pipefail
     test -f m5stack/data/game.nes || ./m5stack/scripts/fetch_rom.sh
     work=$(mktemp -d)
