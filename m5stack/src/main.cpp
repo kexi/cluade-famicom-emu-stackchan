@@ -1051,30 +1051,30 @@ void loop() {
 
     // One band per loop iteration, draw frame or not. At divisor 4 the draw frame
     // kicks band 0 and the three skipped frames that follow kick bands 1-3, so a
-    // picture still completes within one divisor cycle and the panel refresh rate
-    // is what it always was — but the CPU only ever pays the kick.
+    // picture completes within one divisor cycle — but the CPU only ever pays the
+    // kick.
     //
     // The previous band is joined here, immediately before the next kick, rather
     // than at the top of the loop. Joining at the top left only ~0.4ms between
-    // kick and join (the input poll), so most of the band's 6.5ms of wire time
-    // was still owed and showed up as join=5.65ms. Joining here instead puts a
-    // whole loop iteration (~22ms at 44fps, ~16.6ms even at 60fps) between the
+    // kick and join (the input poll), so most of the band's wire time was still
+    // owed and showed up as a multi-millisecond join=. Joining here instead puts a
+    // whole loop iteration (~30ms at 33fps, ~16.6ms even at 60fps) between the
     // two, so the wire has long since drained and the join costs nothing.
     //
     // Why this is safe even though it leaves the last band in flight across a
     // repaint: on a draw frame the previous iteration kicked the final band (rows
-    // 200-239 at DISPLAY_DMA_ROWS=40), and runFrame() starts repainting ~0.5ms
+    // 180-239 at DISPLAY_DMA_ROWS=60), and runFrame() starts repainting ~0.5ms
     // later. The writer and the reader are separated in both space and time.
     // renderScanline writes strictly top-to-bottom (PPU::step draws line N at dot
-    // 256), so row 200 is not touched until 200/262 of the way through emulation
-    // — at the measured emuD=19.7ms that is kick+15.5ms, while the band's 40 rows
-    // finish on the wire at kick+4.1ms. Margin ~11.4ms.
+    // 256), so row 180 is not touched until 180/262 of the way through emulation
+    // — at the measured emuD=19.7ms that is kick+13.5ms, while the band's 60 rows
+    // finish on the wire at kick+6.15ms. Margin ~7.4ms.
     //
     // That margin shrinks as emulation gets faster, because the writer speeds up
-    // while the reader is fixed at the SPI clock. Break-even is emuD = 4.7ms.
-    // This is no longer left to a comment: the guard before runFrame() joins the
-    // band outright once the smoothed draw-frame time falls under
-    // DISPLAY_REPAINT_GUARD_MS.
+    // while the reader is fixed at the SPI clock. Break-even is emuD = 8.2ms; see
+    // the derivation at DISPLAY_REPAINT_GUARD_MS, which is set to twice it. This
+    // is not left to a comment: the guard before runFrame() joins the band
+    // outright once the smoothed draw-frame time falls under that threshold.
     //
     // Nothing else may touch M5.Display while a band is outstanding; the
     // boot-time showMessage() calls are all done by then, and haltWithError()

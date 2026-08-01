@@ -33,13 +33,16 @@ constexpr uint32_t SPI_WRITE_FREQ = 40000000;
 // being a "DMA" call. Handing it one sub-32KB band per frame means every push
 // fits a single transaction and returns as soon as the descriptor is armed.
 //
-// 40 rows = 20480 bytes at 256px x RGB565, comfortably inside the 32KB limit and
-// an exact divisor of 240, so all six bands are the same size. The band is not
-// sized to the 32KB ceiling (which would be 64 rows) because the segment count
-// doubles as the display divisor: at six segments the once-per-picture repaint
-// cost is amortised over six frames instead of four, which is worth more than
-// the marginally fewer kicks. Six kicks of ~124us each is still negligible.
-constexpr int DISPLAY_DMA_ROWS = 40;
+// 60 rows = 30720 bytes at 256px x RGB565, still inside the 32768-byte limit
+// (with ~2KB to spare) and an exact divisor of 240, so all four bands are the
+// same size and every one of them is a single hardware transaction — the whole
+// point of banding. 64 rows would sit exactly on the ceiling with no margin and
+// is not a divisor of 240; 48 would work too but gives five bands, and the
+// segment count doubles as the display divisor, so the band count is what sets
+// how often the panel is refreshed. Four bands means the once-per-picture
+// repaint is amortised over four frames instead of six: 50% more panel updates
+// for one extra kick's worth of nothing (~186us each at 60 rows).
+constexpr int DISPLAY_DMA_ROWS = 60;
 constexpr int DISPLAY_DMA_SEGMENTS = (NES_HEIGHT + DISPLAY_DMA_ROWS - 1) / DISPLAY_DMA_ROWS;
 
 // Display divisor: push every Nth emulated frame.
@@ -54,10 +57,10 @@ constexpr int DISPLAY_DMA_SEGMENTS = (NES_HEIGHT + DISPLAY_DMA_ROWS - 1) / DISPL
 // Fixed rather than adaptive: the band scheme made the draw frame cheap enough
 // that there is nothing left for a controller to trade away, and the floor and
 // the ceiling had converged on the same value anyway. At 60fps this yields a
-// 10Hz panel refresh.
-constexpr uint32_t DISPLAY_DIVISOR_MIN = 6;
-constexpr uint32_t DISPLAY_DIVISOR_MAX = 6;
-constexpr uint32_t DISPLAY_DIVISOR_INITIAL = 6;
+// 15Hz panel refresh; at the ~33fps this core actually manages, ~8Hz.
+constexpr uint32_t DISPLAY_DIVISOR_MIN = 4;
+constexpr uint32_t DISPLAY_DIVISOR_MAX = 4;
+constexpr uint32_t DISPLAY_DIVISOR_INITIAL = 4;
 static_assert(DISPLAY_DIVISOR_MIN >= (uint32_t)DISPLAY_DMA_SEGMENTS,
               "divisor floor must cover the band count, or a draw frame flushes bands inline");
 static_assert(DISPLAY_DIVISOR_INITIAL >= DISPLAY_DIVISOR_MIN && DISPLAY_DIVISOR_INITIAL <= DISPLAY_DIVISOR_MAX,
@@ -65,21 +68,31 @@ static_assert(DISPLAY_DIVISOR_INITIAL >= DISPLAY_DIVISOR_MIN && DISPLAY_DIVISOR_
 
 // Runtime guard on the repaint-versus-last-band race.
 //
-// A draw frame begins repainting while the final band (rows 200-239) may still
+// A draw frame begins repainting while the final band (rows 180-239) may still
 // be on the wire. That is safe only because the writer is slower than the
-// reader: renderScanline paints strictly top-to-bottom, so row 200 is not
-// touched until 200/262 of the way through emulation, while the band's 40 rows
-// clear the wire 4.10ms after the kick. Setting the two equal — allowing ~0.5ms
-// between the kick and the start of the repaint — puts break-even at an emulated
-// frame time of 4.71ms.
+// reader: renderScanline paints strictly top-to-bottom, so row 180 is not
+// touched until 180/262 of the way through emulation, while the band's 60 rows
+// clear the wire ~6.15ms after the kick (4.10ms measured at 40 rows, scaled by
+// 60/40 — the transfer is wire-clock bound, so it is linear in row count).
+// Setting the two equal — allowing ~0.5ms between the kick and the start of the
+// repaint — puts break-even at an emulated frame time of
 //
-// Measured emuD is ~19ms, so the margin is roughly 4x and the guard never fires.
-// It exists because that ratio is not enforced by anything else: a faster core,
-// a larger DISPLAY_DMA_ROWS or a higher SPI_WRITE_FREQ all erode it silently,
-// and the failure mode is a torn picture rather than anything that would show up
-// in a build. Tripping at 2x break-even leaves room for the EWMA to lag a sudden
-// speed-up without letting an actual race through.
-constexpr float DISPLAY_REPAINT_GUARD_MS = 9.42f;
+//   emuD_breakeven = (wire_ms - 0.5) * 262 / first_row_of_last_band
+//                  = (6.15 - 0.5) * 262 / 180 = 8.22ms
+//
+// and the guard trips at twice that. Recompute both when DISPLAY_DMA_ROWS or
+// SPI_WRITE_FREQ changes: wire_ms scales with the row count and inversely with
+// the clock, and first_row_of_last_band is NES_HEIGHT - DISPLAY_DMA_ROWS.
+//
+// Measured emuD is ~19ms, so the margin over the 16.45ms guard is only ~1.15x —
+// far tighter than the ~2x this had at 40 rows. The guard is now close enough to
+// fire on a genuinely fast frame, which costs a join (a stall of whatever wire
+// time is still owed) rather than a torn picture, and the EWMA's slow alpha
+// keeps a single quick frame from arming it. It exists because the writer/reader
+// ratio is not enforced by anything else: a faster core, a larger
+// DISPLAY_DMA_ROWS or a higher SPI_WRITE_FREQ all erode it silently, and the
+// failure mode is a torn picture rather than anything a build would catch.
+constexpr float DISPLAY_REPAINT_GUARD_MS = 16.45f;
 // Smoothing for the measured draw-frame emulation time the guard tests. Slower
 // than the audio servo's: this only has to track a lasting change in emulation
 // speed, and a single fast frame must not arm a guard that costs a stall.
