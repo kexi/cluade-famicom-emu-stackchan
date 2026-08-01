@@ -1033,7 +1033,18 @@ void loop() {
         // The first sample is taken whole: there is no prior average to blend it
         // into, and starting at the real value is what keeps the guard live from
         // the second picture onward instead of after a decay.
-        emuDrawMs = emuDrawSeeded ? emuDrawMs + DISPLAY_EMU_EWMA_ALPHA * (drawMs - emuDrawMs) : drawMs;
+        //
+        // Floored at the guard threshold, though. Why not seed with the raw value:
+        // the first draw frames run before the game has enabled rendering, so
+        // renderScanline does nothing and they measure a few milliseconds — well
+        // under the guard. Seeding from one of those arms the guard immediately,
+        // and the slow EWMA then needs ~100 draw frames (several seconds at
+        // divisor 4) to climb back out, during which every draw frame pays a
+        // joinBand stall for a race that is not happening. Starting at the
+        // threshold means the guard is disarmed until a measurement genuinely
+        // pulls the average below it, which is the state the guard is for.
+        const float seed = drawMs > DISPLAY_REPAINT_GUARD_MS ? drawMs : DISPLAY_REPAINT_GUARD_MS;
+        emuDrawMs = emuDrawSeeded ? emuDrawMs + DISPLAY_EMU_EWMA_ALPHA * (drawMs - emuDrawMs) : seed;
         emuDrawSeeded = true;
     }
 

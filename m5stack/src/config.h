@@ -70,29 +70,50 @@ static_assert(DISPLAY_DIVISOR_INITIAL >= DISPLAY_DIVISOR_MIN && DISPLAY_DIVISOR_
 //
 // A draw frame begins repainting while the final band (rows 180-239) may still
 // be on the wire. That is safe only because the writer is slower than the
-// reader: renderScanline paints strictly top-to-bottom, so row 180 is not
-// touched until 180/262 of the way through emulation, while the band's 60 rows
-// clear the wire ~6.15ms after the kick (4.10ms measured at 40 rows, scaled by
-// 60/40 — the transfer is wire-clock bound, so it is linear in row count).
-// Setting the two equal — allowing ~0.5ms between the kick and the start of the
-// repaint — puts break-even at an emulated frame time of
+// reader: renderScanline paints strictly top-to-bottom, so the last band's first
+// row is not touched until that fraction of the way through emulation, while the
+// band clears the wire earlier. Setting the two equal gives break-even; the guard
+// trips at a multiple of it.
 //
-//   emuD_breakeven = (wire_ms - 0.5) * 262 / first_row_of_last_band
-//                  = (6.15 - 0.5) * 262 / 180 = 8.22ms
+// The derivation below used to be a comment ending in a hand-computed 16.45f,
+// which meant DISPLAY_DMA_ROWS or SPI_WRITE_FREQ could move without the literal
+// following. It is now the expression itself, so the constant cannot go stale.
 //
-// and the guard trips at twice that. Recompute both when DISPLAY_DMA_ROWS or
-// SPI_WRITE_FREQ changes: wire_ms scales with the row count and inversely with
-// the clock, and first_row_of_last_band is NES_HEIGHT - DISPLAY_DMA_ROWS.
+// One band's wire time: the transfer is clock-bound, so it is simply the bits
+// pushed divided by the SPI clock, linear in the row count as the measurements
+// showed (4.10ms at 40 rows, 6.15ms at 60).
+constexpr float DISPLAY_BAND_WIRE_MS =
+    (float)NES_WIDTH * DISPLAY_DMA_ROWS * 2 /* bytes/px */ * 8 /* bits/byte */ * 1000.0f / (float)SPI_WRITE_FREQ;
+// Slack between the kick returning and the repaint reaching row 0. Measured at
+// roughly half a millisecond; subtracted from the wire time because that much of
+// the transfer is already done before the writer starts moving at all.
+constexpr float DISPLAY_KICK_TO_REPAINT_MS = 0.5f;
+// Emulated frame time at which the writer catches the reader. The writer covers
+// 262 scanlines' worth of time per frame but only has to reach the last band's
+// first row, hence the ratio.
+constexpr float DISPLAY_REPAINT_BREAK_EVEN_MS =
+    (DISPLAY_BAND_WIRE_MS - DISPLAY_KICK_TO_REPAINT_MS) * 262.0f / (float)(NES_HEIGHT - DISPLAY_DMA_ROWS);
+// Margin over break-even. 2x rather than something tighter because the quantity
+// being guarded is an EWMA of a noisy measurement, and the cost of firing early
+// (one join, i.e. a stall of whatever wire time is still owed) is far cheaper
+// than firing late (a torn picture).
+constexpr float DISPLAY_REPAINT_GUARD_MARGIN = 2.0f;
 //
-// Measured emuD is ~19ms, so the margin over the 16.45ms guard is only ~1.15x —
-// far tighter than the ~2x this had at 40 rows. The guard is now close enough to
-// fire on a genuinely fast frame, which costs a join (a stall of whatever wire
-// time is still owed) rather than a torn picture, and the EWMA's slow alpha
-// keeps a single quick frame from arming it. It exists because the writer/reader
-// ratio is not enforced by anything else: a faster core, a larger
-// DISPLAY_DMA_ROWS or a higher SPI_WRITE_FREQ all erode it silently, and the
-// failure mode is a torn picture rather than anything a build would catch.
-constexpr float DISPLAY_REPAINT_GUARD_MS = 16.45f;
+// At 60 rows / 40MHz this comes to wire=6.144ms, break-even=8.22ms, guard=16.4ms.
+// Measured emuD is ~19ms, so the margin over the guard is only ~1.15x — far
+// tighter than the ~2x this had at 40 rows. The guard is now close enough to fire
+// on a genuinely fast frame, which costs a join rather than a torn picture, and
+// the EWMA's slow alpha keeps a single quick frame from arming it. It exists
+// because the writer/reader ratio is not enforced by anything else: a faster
+// core, a larger DISPLAY_DMA_ROWS or a higher SPI_WRITE_FREQ all erode it
+// silently, and the failure mode is a torn picture rather than anything a build
+// would catch.
+constexpr float DISPLAY_REPAINT_GUARD_MS = DISPLAY_REPAINT_BREAK_EVEN_MS * DISPLAY_REPAINT_GUARD_MARGIN;
+// The derivation replaced a hand-computed 16.45f. Pin the result so a future
+// change to the inputs that lands somewhere unexpected is caught at build time
+// rather than becoming a torn picture on hardware.
+static_assert(DISPLAY_REPAINT_GUARD_MS > 16.0f && DISPLAY_REPAINT_GUARD_MS < 17.0f,
+              "repaint guard moved away from the ~16.4ms this display path was tuned for");
 // Smoothing for the measured draw-frame emulation time the guard tests. Slower
 // than the audio servo's: this only has to track a lasting change in emulation
 // speed, and a single fast frame must not arm a guard that costs a stall.
