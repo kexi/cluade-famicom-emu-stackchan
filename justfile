@@ -276,13 +276,13 @@ verify frames='600' scenario='':
 # oxfmt に web/*.js を明示するのは、ディレクトリを渡すと index.html まで
 # 整形対象に入るため (HTML の整形は今回の範囲外)
 format:
-    clang-format -i core/*.cpp core/*.h m5stack/src/*.cpp m5stack/src/*.h
+    clang-format -i core/*.cpp core/*.h m5stack/src/*.cpp m5stack/src/*.h tools/*.cpp
     ruff format tools/
     oxfmt 'web/*.js'
 
 # 整形漏れがないか検査 (差分があれば失敗)
 format-check:
-    clang-format --dry-run --Werror core/*.cpp core/*.h m5stack/src/*.cpp m5stack/src/*.h
+    clang-format --dry-run --Werror core/*.cpp core/*.h m5stack/src/*.cpp m5stack/src/*.h tools/*.cpp
     ruff format --check tools/
     oxfmt --check 'web/*.js'
 
@@ -311,4 +311,4 @@ tidy:
     isystem=$(echo | clang++ -std=c++17 -E -x c++ - -v 2>&1 \
         | sed -n '/^#include <\.\.\.>/,/^End of search/p' \
         | grep '^ /' | grep -v framework | sed 's/^ /-isystem /' | tr '\n' ' ')
-    clang-tidy --quiet core/*.cpp -- -std=c++17 $isystem
+    clang-tidy --quiet core/*.cpp tools/*.cpp -- -std=c++17 $isystem
