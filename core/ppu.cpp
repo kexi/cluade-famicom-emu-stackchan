@@ -788,6 +788,14 @@ void NES_HOT PPU::step() {
     bool visible = scanline_ < 240;
     bool prerender = scanline_ == 261;
 
+    // stepMany() の idleLine 高速パスは、この関数の構造に依存している: 「行 240 と
+    // 242-260 には仕事がない」という判断は、下のドット依存の分岐がすべて visible /
+    // prerender / scanline 241 のいずれかで閉じていることから来ている (stepMany の
+    // idleLine のコメントを参照)。
+    //
+    // その 3 条件の外側に新しいドット依存の処理を足すと、stepMany はその行をまるごと
+    // 1 回の step() に畳んでしまうので、足した処理は組み込みビルドでだけ黙って
+    // 飛ばされる。前提が壊れた場合は必ず stepMany 側の idleLine を更新すること。
     if ((visible || prerender) && rendering) {
 #ifdef NES_EMBEDDED
         // Batched path: do the whole line once, at the dot where the dot-accurate
