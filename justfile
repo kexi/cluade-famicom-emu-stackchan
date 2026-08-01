@@ -58,8 +58,36 @@ check:
     clang++ -std=c++17 -fsyntax-only core/*.cpp
     clang++ -std=c++17 -DNES_EMBEDDED -fsyntax-only core/*.cpp
 
+# 参照/組み込みビルドの bit-exact 検証を、操作シナリオ付きで走らせる
+#
+# シナリオは tools/scenario-sample.txt の書式 (フレーム番号 + ボタン)。
+# 無入力の verify がタイトル画面しか踏まないのに対し、実際にゲームを進めて
+# 背景スクロールとスプライトが動く状態で同じ 3 系列比較をかける。
+#
+# 注意: 既定のサンプルシナリオでは現状 FAIL する。これは回帰ではなく、
+# 無入力では踏めなかった既知の副作用が見えているもので、内訳は 2 つ:
+#
+#   1. fb: 600 中 4 フレーム (349/350/500/503) で、許容窓の外に差分が出る。
+#      形は「連続する 3-6 本のスキャンラインがまるごと 1 行ずれる」で、
+#      散らばったピクセル差ではない。組み込み側の renderScanline() が 1 ライン
+#      分を dot 256 で一括描画するのに対し参照側が逐次描くという、窓内の差分と
+#      同じ機構が、スクロール分割の境界で出たもの。窓 (scanline 135) が固定値
+#      なのに対しスクロール分割の位置は動くので、窓では拾えない
+#   2. state: frame 502 の wram だけが食い違う。これは観測点のずれ (参照は
+#      sl=241 dot=4、組み込みは dot=163 で止まる) によるもので、$0314-$0318 の
+#      5 バイトを書き換えている途中を別の地点で覗いているだけ。前後の frame
+#      501 / 503 では wram はバイト単位で完全一致するので desync ではない
+#
+# 窓を広げてこれらを飲み込ませてはいない。窓は「scanline 135 の最終タイル」と
+# いう狭く構造的な主張で、それを緩めると本物の desync を隠す側に倒れるため
+verify-scenario scenario='tools/scenario-sample.txt' frames='600':
+    @just verify {{frames}} {{scenario}}
+
 # 参照ビルドと組み込みビルドの bit-exact 検証 (tools/verify_host.cpp)
-verify frames='600':
+#
+# 第 2 引数にシナリオファイルを渡すと入力付きで走る (既定は無入力)。
+# 入力付きで走らせたいだけなら just verify-scenario のほうが読みやすい
+verify frames='600' scenario='':
     #!/usr/bin/env bash
     # 3 系列を走らせて突き合わせる:
     #   (1) 参照ビルド      (フラグなし, 毎フレーム描画)
@@ -73,15 +101,26 @@ verify frames='600':
     # 成果物を作業ツリーに落とすと .gitignore の管理対象が増えるため
     set -euo pipefail
     test -f m5stack/data/game.nes || ./m5stack/scripts/fetch_rom.sh
+    # シナリオは 3 系列すべてに同じものを渡す。片方だけに入力が入れば当然
+    # 食い違うので、ここで組み立てて使い回す
+    scen=()
+    if [ -n '{{scenario}}' ]; then
+        test -f '{{scenario}}' || { echo "no such scenario: {{scenario}}" >&2; exit 2; }
+        scen=(scenario '{{scenario}}')
+    fi
     work=$(mktemp -d)
     trap 'rm -rf "$work"' EXIT
     echo "building (clang++ -std=c++17 -O2)..."
     clang++ -std=c++17 -O2 -o "$work/ref" tools/verify_host.cpp core/*.cpp
     clang++ -std=c++17 -O2 -DNES_EMBEDDED -o "$work/emb" tools/verify_host.cpp core/*.cpp
-    echo "running {{frames}} frames x3..."
-    "$work/ref" m5stack/data/game.nes {{frames}} all   > "$work/1-ref-all.txt"
-    "$work/emb" m5stack/data/game.nes {{frames}} all   > "$work/2-emb-all.txt"
-    "$work/emb" m5stack/data/game.nes {{frames}} skip4 > "$work/3-emb-skip4.txt"
+    if [ -n '{{scenario}}' ]; then
+        echo "running {{frames}} frames x3 (scenario: {{scenario}})..."
+    else
+        echo "running {{frames}} frames x3 (no input)..."
+    fi
+    "$work/ref" m5stack/data/game.nes {{frames}} all   "${scen[@]}" > "$work/1-ref-all.txt"
+    "$work/emb" m5stack/data/game.nes {{frames}} all   "${scen[@]}" > "$work/2-emb-all.txt"
+    "$work/emb" m5stack/data/game.nes {{frames}} skip4 "${scen[@]}" > "$work/3-emb-skip4.txt"
     # 判定に使うのは各行の '#' より前 (STATE 列) だけ。'#' 以降は観測点依存の
     # 参考列で、フレーム境界では原理的に一致しない (verify_host.cpp 冒頭を参照)
     for f in 1-ref-all 2-emb-all 3-emb-skip4; do
@@ -127,31 +166,76 @@ verify frames='600':
     else
         # CRC が違ったフレームだけ index 列で引き直し、差分ピクセルの位置を出す。
         # 全フレームを index 列で出すと {{frames}} フレームで数十 MB になるため、
-        # trace(CRC) で絞ってから dump で位置特定する 2 パスにしている
-        outside=0
-        inside=0
-        for fr in $fbdiff; do
-            n=$(printf '%s' "$fr" | sed 's/^0*//')
-            n=${n:-0}
-            "$work/ref" m5stack/data/game.nes {{frames}} all dump "$n" > "$work/fa.bin"
-            "$work/emb" m5stack/data/game.nes {{frames}} all dump "$n" > "$work/fb.bin"
-            # cmp -l は 1-origin のバイト位置を出すので 1 引いて y,x に直す
-            bad=$(cmp -l "$work/fa.bin" "$work/fb.bin" \
-                | awk -v L="$known_line" -v X="$known_x" \
-                    '{p=$1-1; y=int(p/256); x=p%256; if (y!=L || x<X) print y","x}')
-            cnt=$(cmp -l "$work/fa.bin" "$work/fb.bin" | wc -l | tr -d ' ')
-            inside=$((inside + cnt))
-            if [ -n "$bad" ]; then
-                outside=$((outside + 1))
-                echo "  frame $n: differs OUTSIDE the known window at (y,x)= $(printf '%s' "$bad" | tr '\n' ' ')"
-            fi
-        done
-        if [ "$outside" -eq 0 ]; then
+        # trace(CRC) で絞ってから dump で位置特定する 2 パスにしている。
+        #
+        # dump は差分フレームをまとめて 1 回で吐く。1 フレームずつ呼ぶと
+        # powerOn からのフル再実行が差分フレーム数だけ繰り返され、73 フレーム
+        # 差分なら 73x2 回の再実行 = O(n^2) になっていた
+        framelist=$(printf '%s\n' $fbdiff | sed 's/^0*//' | sed 's/^$/0/' | paste -sd, -)
+        "$work/ref" m5stack/data/game.nes {{frames}} all dump "$framelist" "${scen[@]}" > "$work/fa.bin"
+        "$work/emb" m5stack/data/game.nes {{frames}} all dump "$framelist" "${scen[@]}" > "$work/fb.bin"
+        # 出力は 61440 バイト/フレームの固定長連結 (verify_host.cpp 冒頭)。
+        # フレームは昇順に並ぶので、i 番目のフレーム番号を配列で持っておけば
+        # バイト位置からフレームを引ける
+        framesorted=($(printf '%s\n' $fbdiff | sed 's/^0*//' | sed 's/^$/0/' | sort -n | uniq))
+        #
+        # cmp の exit code には一切依存しない。cmp は差分があれば exit 1 を返す
+        # のが正しい挙動で、set -euo pipefail の下ではそこでスクリプトが即死する。
+        # ここが従来 PASS していたのは nix の diffutils 3.12 の cmp が「出力先が
+        # パイプだと差分があっても exit 0 を返す」バグを持っていたからで、
+        # 正しい cmp に替わった瞬間に壊れる。出力だけを || true 付きで一度受け、
+        # 分類は awk に任せる
+        cmpout=$(cmp -l "$work/fa.bin" "$work/fb.bin" || true)
+        #
+        # cmp -l は 1-origin のバイト位置を出すので 1 引いて (frame, y, x) に直す。
+        # 窓内/窓外を分けて数え、窓外は「frame の scanline y に n ピクセル」の形に
+        # 畳んで出す。座標を 1 ピクセルずつ並べないのは、この差分が出るときは
+        # たいてい行単位でまとまって出る (ライン一括描画がずれるため) からで、
+        # 生座標を数千行流すより「どの行が何ピクセル」のほうが読める
+        classified=$(printf '%s\n' "$cmpout" | awk -v L="$known_line" -v X="$known_x" \
+            -v flist="$(printf '%s ' "${framesorted[@]}")" '
+            BEGIN { split(flist, fr, " ") }
+            NF == 0 { next }
+            {
+                p = $1 - 1
+                fi = int(p / 61440) + 1          # 何番目のダンプフレームか (1-origin)
+                q  = p % 61440
+                y  = int(q / 256); x = q % 256
+                if (y == L && x >= X) { inpix++; next }
+                outpix++
+                key = fr[fi]
+                if (!(key in seenf)) { seenf[key] = 1; order[++n] = key }
+                cell = key "/" y
+                if (!(cell in seenc)) { seenc[cell] = 1; lines[key] = lines[key] " " y }
+                cnt[cell]++
+                if (!(cell in minx) || x < minx[cell]) minx[cell] = x
+                if (!(cell in maxx) || x > maxx[cell]) maxx[cell] = x
+            }
+            END {
+                printf "inside=%d outside=%d outframes=%d\n", inpix + 0, outpix + 0, n + 0
+                for (i = 1; i <= n; i++) {
+                    key = order[i]
+                    ny = split(lines[key], ys, " ")
+                    s = ""
+                    for (j = 1; j <= ny; j++) {
+                        cell = key "/" ys[j]
+                        s = s sprintf(" y=%s(%dpx x=%d..%d)", ys[j], cnt[cell], minx[cell], maxx[cell])
+                    }
+                    printf "frame %s:%s\n", key, s
+                }
+            }')
+        counts=$(printf '%s\n' "$classified" | head -1)
+        inside=$(printf '%s' "$counts" | sed 's/.*inside=\([0-9]*\).*/\1/')
+        outpix=$(printf '%s' "$counts" | sed 's/.*outside=\([0-9]*\).*/\1/')
+        outframes=$(printf '%s' "$counts" | sed 's/.*outframes=\([0-9]*\).*/\1/')
+        if [ "$outframes" -eq 0 ]; then
             echo "WARN: $nfb of {{frames}} frames differ, $inside pixels total"
             echo "      all within the known window (scanline $known_line, x>=$known_x)"
-            echo "      = renderScanline's whole-line draw, accepted (see justfile/verify_host.cpp)"
+            echo "      = renderScanline's whole-line draw, accepted (see the known_line comment above)"
         else
-            echo "FAIL: $outside frame(s) differ outside the known window"
+            echo "FAIL: $outframes frame(s), $outpix pixel(s) differ outside the known window"
+            echo "      ($inside further pixel(s) are inside the window)"
+            printf '%s\n' "$classified" | tail -n +2 | head -40 | sed 's/^/  OUTSIDE: /'
             rc=1
         fi
     fi
@@ -210,8 +294,13 @@ lint-py:
 lint-js:
     oxlint --deny-warnings web/
 
-# コアの静的解析 (.clang-tidy 準拠)。m5stack/src は対象外 — ESP-IDF/Arduino の
-# ヘッダが必要で、PlatformIO の toolchain 抜きには単体でパースできない
+# コアと検証ハーネスの静的解析 (.clang-tidy 準拠)。m5stack/src は対象外 —
+# ESP-IDF/Arduino のヘッダが必要で、PlatformIO の toolchain 抜きには単体で
+# パースできない
+#
+# tools/*.cpp を入れているのは、ハーネスがコアと同じ「素の clang++ で通る」
+# 制約で書かれていて、core 向けの設定がそのまま通るため (実際に通した上で
+# 対象化している)
 #
 # nix の clang++ は libc++ の include パスをラッパ経由で注入するため、素の
 # clang-tidy には見えない。NIX_CFLAGS_COMPILE だけでは c++/v1 が欠けるので、
