@@ -118,9 +118,9 @@ verify frames='600' scenario='':
     else
         echo "running {{frames}} frames x3 (no input)..."
     fi
-    "$work/ref" m5stack/data/game.nes {{frames}} all   "${scen[@]}" > "$work/1-ref-all.txt"
-    "$work/emb" m5stack/data/game.nes {{frames}} all   "${scen[@]}" > "$work/2-emb-all.txt"
-    "$work/emb" m5stack/data/game.nes {{frames}} skip4 "${scen[@]}" > "$work/3-emb-skip4.txt"
+    "$work/ref" m5stack/data/game.nes {{frames}} all   "${scen[@]+"${scen[@]}"}" > "$work/1-ref-all.txt"
+    "$work/emb" m5stack/data/game.nes {{frames}} all   "${scen[@]+"${scen[@]}"}" > "$work/2-emb-all.txt"
+    "$work/emb" m5stack/data/game.nes {{frames}} skip4 "${scen[@]+"${scen[@]}"}" > "$work/3-emb-skip4.txt"
     # 判定に使うのは各行の '#' より前 (STATE 列) だけ。'#' 以降は観測点依存の
     # 参考列で、フレーム境界では原理的に一致しない (verify_host.cpp 冒頭を参照)
     for f in 1-ref-all 2-emb-all 3-emb-skip4; do
@@ -172,8 +172,8 @@ verify frames='600' scenario='':
         # powerOn からのフル再実行が差分フレーム数だけ繰り返され、73 フレーム
         # 差分なら 73x2 回の再実行 = O(n^2) になっていた
         framelist=$(printf '%s\n' $fbdiff | sed 's/^0*//' | sed 's/^$/0/' | paste -sd, -)
-        "$work/ref" m5stack/data/game.nes {{frames}} all dump "$framelist" "${scen[@]}" > "$work/fa.bin"
-        "$work/emb" m5stack/data/game.nes {{frames}} all dump "$framelist" "${scen[@]}" > "$work/fb.bin"
+        "$work/ref" m5stack/data/game.nes {{frames}} all dump "$framelist" "${scen[@]+"${scen[@]}"}" > "$work/fa.bin"
+        "$work/emb" m5stack/data/game.nes {{frames}} all dump "$framelist" "${scen[@]+"${scen[@]}"}" > "$work/fb.bin"
         # 出力は 61440 バイト/フレームの固定長連結 (verify_host.cpp 冒頭)。
         # フレームは昇順に並ぶので、i 番目のフレーム番号を配列で持っておけば
         # バイト位置からフレームを引ける
