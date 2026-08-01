@@ -21,7 +21,10 @@ out="$dir/game.nes"
 tmp="$out.tmp.$$"
 trap 'rm -f "$tmp"' EXIT
 
-curl -fL https://raw.githubusercontent.com/GOROman/calude-famicom-game/main/game.nes -o "$tmp"
+# タイムアウト付き: このスクリプトは just verify から自動で呼ばれるので、
+# 接続が刺さったまま返らないと検証がハングしたようにしか見えない
+curl -fL --connect-timeout 10 --max-time 60 \
+    https://raw.githubusercontent.com/GOROman/calude-famicom-game/main/game.nes -o "$tmp"
 
 # sha256sum (GNU/nix) と shasum -a 256 (macOS 標準) のどちらかがあればよい
 if command -v sha256sum >/dev/null 2>&1; then
