@@ -733,7 +733,18 @@ void NES_HOT PPU::stepMany(int dots) {
         // The next dot at or after dot_ that carries work. Everything strictly
         // before it is a pure counter increment and can be coalesced.
         int next = 340;   // last dot of the line: step() must run to wrap it
-        if (dot_ <= 1) {
+        // Post-render (240) and the vblank lines after the flag is set (242..260)
+        // reach none of step()'s work: every branch there is gated on visible,
+        // prerender, or scanline 241, and all three are false. Only the dot 340
+        // wrap is left, so the whole line coalesces into one step() call.
+        //
+        // Why not include 241 and 261: 241 dot 1 raises vblank and fires NMI (and
+        // ends the frame), 261 dot 1 clears the status flags. Both must still be
+        // landed on, so they stay with the general dot 1 case below.
+        const bool idleLine = scanline_ == 240 || (scanline_ >= 242 && scanline_ <= 260);
+        if (idleLine) {
+            next = 340;
+        } else if (dot_ <= 1) {
             // Dot 1 carries work on every line regardless of rendering state:
             // scanline 241 sets vblank (which is what ends the frame) and 261
             // clears the status flags. Skipping it stalls runFrame() forever.

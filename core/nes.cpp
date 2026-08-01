@@ -285,9 +285,10 @@ void NES_HOT NES::catchUp() {
     // the right delta as long as the batch itself is shorter than 2^32 cycles.
     profApuCycles += (uint32_t)(profPpuStart - profApuStart);
 #endif
-    // PPU: stepMany's dot-skipping proved unsafe (it desynchronises mid-frame
-    // register timing on synth.nes), so the PPU is still stepped per dot here.
-    // The win from batching is in the APU and in not re-entering runFrame's loop.
+    // PPU: stepMany coalesces the dots that carry no work and calls step() only
+    // on the ones that do. An earlier attempt at this did desynchronise mid-frame
+    // register timing, because it could skip onto a work dot instead of landing
+    // on it; the current selection lands on every one (see PPU::stepMany).
     ppu.stepMany(cycles * 3);
 #ifdef NES_PROFILE
     profPpuCycles += (uint32_t)(xthal_get_ccount() - profPpuStart);
