@@ -14,14 +14,6 @@ build:
 flash port='':
     cd m5stack && pio run -e m5stack-cores3 -t upload {{ if port == '' { '' } else { '--upload-port ' + port } }}
 
-# 計測ビルド (NES_PROFILE 入り。毎秒 apu=/ppu=/cpu= の内訳ログを出す)
-build-profile:
-    cd m5stack && pio run -e m5stack-cores3-profile
-
-# 計測ビルドを実機へ書き込み (内訳計測が要るときだけ使う。本番は just flash)
-flash-profile port='':
-    cd m5stack && pio run -e m5stack-cores3-profile -t upload {{ if port == '' { '' } else { '--upload-port ' + port } }}
-
 # シリアルモニタ (Ctrl+C で終了)
 monitor port='/dev/cu.usbmodem1101':
     cd m5stack && pio device monitor -b 115200 -p {{port}}
