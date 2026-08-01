@@ -344,10 +344,15 @@ public:
 #endif
     Pixel framebuffer[256 * 240] = {};
     const uint8_t* paletteRam() const { return palette_; }
-#ifdef NES_EMBEDDED
     // Read-only views of everything the CPU can observe, for the host-side test
     // that checks a render-skipped run stays identical to a fully drawn one.
     // Const accessors only, so they cannot perturb what they measure.
+    //
+    // Why not keep this behind NES_EMBEDDED with the render-skip it was written
+    // for: the test's whole point is to compare the embedded core against the
+    // lockstep reference, so the reference build has to expose the same readout
+    // or there is nothing to diff against. Const inline accessors over existing
+    // members cost the reference build nothing.
     struct DbgState {
         uint8_t ctrl, mask, status, oamAddr, readBuffer, openBus;
         uint16_t v, t;
@@ -363,7 +368,6 @@ public:
     }
     const uint8_t* dbgOam() const { return oam_; }
     const uint8_t* dbgVram() const { return vram_; }
-#endif
     // level of the PPU→CPU NMI output (true = asserted)
     bool nmiLine() const { return (ctrl_ & 0x80) && (status_ & 0x80); }
 
@@ -520,9 +524,10 @@ public:
     using SampleTimer = double;
 #endif
     void setSampleRate(double rate) { cyclesPerSample_ = (SampleTimer)(1789773.0 / rate); }
-#ifdef NES_EMBEDDED
     // Representative CPU-observable APU state for the render-skip equivalence
-    // test: the $4015 inputs plus the frame sequencer position.
+    // test: the $4015 inputs plus the frame sequencer position. Unguarded for the
+    // same reason as PPU::DbgState — the reference build is the thing being
+    // compared against, so it needs the identical readout.
     struct DbgState {
         int p1len, p2len, triLen, noiseLen, dmcBytes;
         int frameStep, frameCycles;
@@ -542,7 +547,6 @@ public:
                 oddCycle_,
                 sampleCount};
     }
-#endif
     float mix() const;   // mono sum; also used by the oscilloscope probe
     void mixStereo(float& l, float& r) const;
     void channelOutputs(float out[8]) const;
