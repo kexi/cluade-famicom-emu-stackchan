@@ -96,6 +96,7 @@
 #include <cstring>
 #include <exception>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -151,14 +152,17 @@ nes::Pixel palettePixel(int index) {
 }
 
 std::vector<nes::Pixel> canonicalPixels;   // canonical index -> pixel value
+// 逆引き。要素は 54 個しかないので線形探索でも「正しい」が、
+// normalizeFramebuffer() が 1 フレームあたり 61440 回ここを引き、それを 3 系列
+// x 600 フレーム繰り返すため、平均 27 回の比較が積もると検証全体の実行時間に
+// 効いてくる。定数時間の引きに替える。
+std::unordered_map<nes::Pixel, int> canonicalIndex;
 
-// ピクセル値 → canonical index。線形探索で足りるのは 54 要素しかないため。
-// 未知の値は正規化できないので -1 を返し、呼び出し側が異常終了する。
+// ピクセル値 → canonical index。未知の値は正規化できないので -1 を返し、
+// 呼び出し側が異常終了する。
 int canonicalIndexOf(nes::Pixel px) {
-    for (size_t k = 0; k < canonicalPixels.size(); k++) {
-        if (canonicalPixels[k] == px) return (int)k;
-    }
-    return -1;
+    const auto it = canonicalIndex.find(px);
+    return it == canonicalIndex.end() ? -1 : it->second;
 }
 
 // 逆マップを構築し、正規化が成立することを起動時に検査する。
@@ -170,9 +174,15 @@ int canonicalIndexOf(nes::Pixel px) {
 // 黙って通すと検証が骨抜きになるため、その場合は即エラー終了する。
 bool buildPaletteInverse(std::string& err) {
     canonicalPixels.clear();
+    canonicalIndex.clear();
     for (int i = 0; i < PALETTE_SIZE; i++) {
         const nes::Pixel px = palettePixel(i);
-        if (canonicalIndexOf(px) < 0) canonicalPixels.push_back(px);
+        // 重複は「最初に現れた index」に畳む。emplace は既存キーを上書きしない
+        // ので、この畳み方がそのまま表現できる。
+        if (canonicalIndexOf(px) < 0) {
+            canonicalIndex.emplace(px, (int)canonicalPixels.size());
+            canonicalPixels.push_back(px);
+        }
     }
 
     // NES パレット 64 色のうち相異なるのは 54 色 (0xFF000000 x10, 0xFFFFFEFF x2
@@ -221,6 +231,19 @@ struct PadEvent {
     uint8_t bits;
 };
 
+// 非負の 10 進整数だけを受ける。atoi を直に使わないのは、非数値を黙って 0 に
+// 変えてしまうため — シナリオの "abc 150" のような書き間違いが「frame 0」として
+// 通ると、意図と違う入力で検証が回ったうえに PASS まで見えてしまう。数値を
+// 受け取る箇所はすべてここを通し、拒否の方針を 1 つに揃える。
+bool parseNonNegativeInt(const std::string& tok, int& out) {
+    if (tok.empty() || tok.find_first_not_of("0123456789") != std::string::npos) return false;
+    // 桁数で溢れを弾く。10 桁を超えると int の範囲を出うるが、フレーム番号に
+    // その大きさが要る場面はないので、無条件に拒否で足りる。
+    if (tok.size() > 9) return false;
+    out = atoi(tok.c_str());
+    return true;
+}
+
 // config.h の NES_BTN_* と同じ並び。ここで再定義しているのは、config.h が
 // m5stack のビルド設定 (Arduino ヘッダ前提) であってホストから引けないため。
 // コア側の Controller::setButtons はビット位置を規定していないので、ずれたら
@@ -236,8 +259,22 @@ bool parseButtons(const std::string& spec, uint8_t& bits, std::string& err) {
     bits = 0;
     // 16 進のビット列。記号を覚えていなくても書けるし、UDP プロトコルの
     // ダンプをそのまま貼れる。
-    const bool isHex = spec.size() <= 2 && spec.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos;
-    if (isHex) {
+    //
+    // 記号名より先に判定するが、"A" と "B" は 16 進数字でもありボタン名でも
+    // ある。ここで hex を優先すると、シナリオに書いた A が 0x0A (= SELECT|DOWN)
+    // として黙って通り、書いた人の意図と違う入力で「検証が通った」ことになる。
+    // 名前が付いているトークンは常に名前として読む方を優先し、hex 解釈は
+    // ボタン名でないものに限る。
+    bool isButtonName = false;
+    for (const ButtonName& b : BUTTON_NAMES) {
+        if (spec == b.name) {
+            isButtonName = true;
+            break;
+        }
+    }
+    const bool hexDigitsOnly =
+        !spec.empty() && spec.size() <= 2 && spec.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos;
+    if (hexDigitsOnly && !isButtonName) {
         bits = (uint8_t)strtoul(spec.c_str(), nullptr, 16);
         return true;
     }
@@ -299,7 +336,14 @@ bool loadScenario(const char* path, int frames, std::vector<PadEvent>& out, std:
             break;
         }
         PadEvent ev{};
-        ev.frame = atoi(s.substr(b0, b1 - b0).c_str());
+        const std::string frameTok = s.substr(b0, b1 - b0);
+        if (!parseNonNegativeInt(frameTok, ev.frame)) {
+            char buf[192];
+            snprintf(buf, sizeof(buf), "%s:%d: frame field is not a number ('%s')", path, lineNo, frameTok.c_str());
+            err = buf;
+            ok = false;
+            break;
+        }
         std::string berr;
         if (!parseButtons(s.substr(b2, b3 - b2 + 1), ev.bits, berr)) {
             char buf[192];
@@ -360,7 +404,16 @@ int run(int argc, char** argv) {
         return 2;
     }
     const char* romPath = argv[1];
-    const int frames = argc >= 3 ? atoi(argv[2]) : 600;
+    // frames も他の数値引数と同じ拒否方針に揃える。atoi 直だと "abc" が 0 に
+    // なってループが一度も回らず、何も比較していないのに正常終了して見える。
+    // 0 も同じ理由で弾く (フレームを 1 つも走らせない検証に意味がない)。
+    int frames = 600;
+    if (argc >= 3) {
+        if (!parseNonNegativeInt(argv[2], frames) || frames <= 0) {
+            fprintf(stderr, "error: frames must be a positive number (got '%s')\n", argv[2]);
+            return 2;
+        }
+    }
     const std::string pattern = argc >= 4 ? argv[3] : "all";
 
     // dump / scenario は argv[4] 以降にキーワード + 値の対で並ぶ。位置引数では
@@ -396,12 +449,12 @@ int run(int argc, char** argv) {
         while (at <= value.size()) {
             const size_t comma = value.find(',', at);
             const std::string tok = value.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
-            if (tok.empty() || tok.find_first_not_of("0123456789") != std::string::npos) {
+            int fr = 0;
+            if (!parseNonNegativeInt(tok, fr)) {
                 fprintf(stderr, "error: dump frame list holds a non-number ('%s')\n", tok.c_str());
                 return 2;
             }
-            const int fr = atoi(tok.c_str());
-            if (fr < 0 || fr >= frames) {
+            if (fr >= frames) {
                 fprintf(stderr, "error: dump frame %d is outside 0..%d\n", fr, frames - 1);
                 return 2;
             }
