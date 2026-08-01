@@ -44,26 +44,57 @@
 //
 // この差分は「renderScanline のライン一括描画の既知の副作用」として許容し、
 // verify は既知領域に収まっている限り PASS とする (件数は WARN で報告)。
-// 領域の判定と、なぜハーネス側で潰さないのかは fbDiffInKnownWindow() を参照。
+//
+// 許容窓の座標 (scanline / x) とその判定は justfile の verify レシピが持つ
+// (known_line / known_x と、それを使う awk)。ハーネス側は窓を知らない: 窓は
+// ROM 固有の値で、ROM を差し替えれば引き直す対象だが、ハーネスは ROM に依存
+// しない道具として保ちたい。判定ロジックを二重に持たないよう、ここでは窓の
+// 存在だけを述べ、具体的な座標は justfile の該当箇所を参照すること。
 //
 // ---- 出力モード ----
 //
-//   <rom> [frames] [all|skip4]
+//   <rom> [frames] [all|skip4] [scenario <file>]
 //       1 フレーム 1 行のテキスト。CRC で全フレームを一気に比較する
-//   <rom> [frames] [all|skip4] dump <frame>
-//       指定フレームの framebuffer をパレット index 列 (61440 byte) として
-//       stdout へ raw 出力する
+//   <rom> [frames] [all|skip4] dump <frames> [scenario <file>]
+//       <frames> はカンマ区切りのフレーム番号リスト (例 3,76,120)。指定された
+//       フレームの framebuffer をパレット index 列 (61440 byte/フレーム) として
+//       与えた順ではなく昇順に連結して stdout へ raw 出力する
 //
 // dump を分けているのは出力サイズとの折り合い。全フレームの index 列を出すと
 // 600 フレームで 36MB になる一方、CRC が食い違うのは一部のフレームだけなので、
 // justfile 側は「まず trace で CRC 比較 → 食い違ったフレームだけ dump で
 // 引き直してピクセル位置を特定する」2 パスで動かす。
+//
+// dump が複数フレームを一度に受けるのは、1 フレームにつき powerOn からの
+// フル再実行を要求すると差分フレーム数 n に対して O(n^2) になるため。600
+// フレーム中 73 フレーム差分なら 73 回 x 2 ビルドの再実行になっていた。
+// リストで受けて 1 回の実行中に順次吐けば、ビルドごと 1 回で済む。
+//
+// 出力は「61440 バイト固定長 x 指定フレーム数」の連結。区切りもヘッダも入れて
+// いないのは、フレームあたりの長さが固定で自己記述的だから — 呼び出し側は
+// 昇順に並んだ i 番目のフレームを offset i*61440 で切り出せる。
+//
+// ---- 入力スクリプト ----
+//
+// 既定は無入力 (パッドを一切触らない) で、決定性を最優先する。scenario を
+// 渡した場合だけ、指定フレームからパッド状態を切り替える。書式は 1 行 1 イベント:
+//
+//   <frame> <buttons>
+//
+// <buttons> は A/B/SELECT/START/UP/DOWN/LEFT/RIGHT の記号を + で繋いだもの、
+// または 0 (全解放) か 0x なしの 16 進ビット列。'#' 以降は行コメント。
+// イベントはそのフレームの runFrame() の直前に適用され、次のイベントまで
+// 保持される — つまり「押しっぱなし」が既定で、離すには解放イベントを書く。
+// 記号で書けるようにしたのは、シナリオが人手で書かれ人手で読まれるため。
+// tools/scenario-sample.txt が実例。
 
 #include "../core/nes.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -179,6 +210,130 @@ uint8_t cpuStatusByte(const nes::CPU& cpu) {
                      (uint8_t)cpu.fC);
 }
 
+// ------------------------------------------------------- 入力スクリプト
+//
+// 「フレーム f からパッド状態 bits」を並べたもの。runFrame() の直前に、その
+// フレームに一致するイベントがあれば適用する。保持式 (次のイベントまで有効)
+// にしているのは、NES のパッドがラッチではなくレベルであるのと同じ理由 —
+// 「押している間」を表すのに毎フレーム行を書かせるのは非現実的。
+struct PadEvent {
+    int frame;
+    uint8_t bits;
+};
+
+// config.h の NES_BTN_* と同じ並び。ここで再定義しているのは、config.h が
+// m5stack のビルド設定 (Arduino ヘッダ前提) であってホストから引けないため。
+// コア側の Controller::setButtons はビット位置を規定していないので、ずれたら
+// シナリオの意味が変わる。web/main.js の PAD ビットとも同じ並び。
+struct ButtonName {
+    const char* name;
+    uint8_t bit;
+};
+constexpr ButtonName BUTTON_NAMES[] = {{"A", 0x01},    {"B", 0x02},    {"SELECT", 0x04}, {"START", 0x08}, {"UP", 0x10},
+                                       {"DOWN", 0x20}, {"LEFT", 0x40}, {"RIGHT", 0x80},  {"NONE", 0x00}};
+
+bool parseButtons(const std::string& spec, uint8_t& bits, std::string& err) {
+    bits = 0;
+    // 16 進のビット列。記号を覚えていなくても書けるし、UDP プロトコルの
+    // ダンプをそのまま貼れる。
+    const bool isHex = spec.size() <= 2 && spec.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos;
+    if (isHex) {
+        bits = (uint8_t)strtoul(spec.c_str(), nullptr, 16);
+        return true;
+    }
+    size_t at = 0;
+    while (at <= spec.size()) {
+        const size_t plus = spec.find('+', at);
+        const std::string tok = spec.substr(at, plus == std::string::npos ? std::string::npos : plus - at);
+        bool known = false;
+        for (const ButtonName& b : BUTTON_NAMES) {
+            if (tok == b.name) {
+                bits |= b.bit;
+                known = true;
+                break;
+            }
+        }
+        if (!known) {
+            err = "unknown button '" + tok + "'";
+            return false;
+        }
+        if (plus == std::string::npos) break;
+        at = plus + 1;
+    }
+    return true;
+}
+
+bool loadScenario(const char* path, int frames, std::vector<PadEvent>& out, std::string& err) {
+    FILE* f = fopen(path, "r");
+    if (!f) {
+        err = std::string("cannot read scenario: ") + path;
+        return false;
+    }
+    char line[256];
+    int lineNo = 0;
+    bool ok = true;
+    while (fgets(line, sizeof(line), f)) {
+        lineNo++;
+        std::string s(line);
+        const size_t hash = s.find('#');
+        if (hash != std::string::npos) s.resize(hash);
+        // 空白で 2 トークンに割る。sscanf ではなく手で割るのは、ボタン指定が
+        // 記号 + 記号の可変長で、書式指定に落とすと空白の扱いが曖昧になるため。
+        const size_t b0 = s.find_first_not_of(" \t\r\n");
+        if (b0 == std::string::npos) continue;
+        const size_t b1 = s.find_first_of(" \t\r\n", b0);
+        if (b1 == std::string::npos) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "%s:%d: expected '<frame> <buttons>'", path, lineNo);
+            err = buf;
+            ok = false;
+            break;
+        }
+        const size_t b2 = s.find_first_not_of(" \t\r\n", b1);
+        const size_t b3 = s.find_last_not_of(" \t\r\n");
+        if (b2 == std::string::npos) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "%s:%d: missing button field", path, lineNo);
+            err = buf;
+            ok = false;
+            break;
+        }
+        PadEvent ev{};
+        ev.frame = atoi(s.substr(b0, b1 - b0).c_str());
+        std::string berr;
+        if (!parseButtons(s.substr(b2, b3 - b2 + 1), ev.bits, berr)) {
+            char buf[192];
+            snprintf(buf, sizeof(buf), "%s:%d: %s", path, lineNo, berr.c_str());
+            err = buf;
+            ok = false;
+            break;
+        }
+        // 走らせるフレーム数の外を指すイベントは黙って無視されると、シナリオが
+        // 効いていないのに PASS したように見える。書き間違いとして弾く。
+        if (ev.frame < 0 || ev.frame >= frames) {
+            char buf[160];
+            snprintf(buf, sizeof(buf), "%s:%d: frame %d is outside 0..%d", path, lineNo, ev.frame, frames - 1);
+            err = buf;
+            ok = false;
+            break;
+        }
+        // 昇順であることを要求する。並べ替えて受け付けることもできるが、
+        // シナリオは時系列として読まれるものなので、順序が狂っているのは
+        // 書き間違いとみなすほうが安全。
+        if (!out.empty() && ev.frame < out.back().frame) {
+            char buf[160];
+            snprintf(buf, sizeof(buf), "%s:%d: frame %d goes backwards (previous was %d)", path, lineNo, ev.frame,
+                     out.back().frame);
+            err = buf;
+            ok = false;
+            break;
+        }
+        out.push_back(ev);
+    }
+    fclose(f);
+    return ok;
+}
+
 bool readFile(const char* path, std::vector<uint8_t>& out) {
     FILE* f = fopen(path, "rb");
     if (!f) return false;
@@ -195,29 +350,74 @@ bool readFile(const char* path, std::vector<uint8_t>& out) {
     return got == out.size();
 }
 
-}   // namespace
-
-int main(int argc, char** argv) {
+// 本体。main から切り出してあるのは、std::vector / std::string を使う以上
+// bad_alloc が抜けうるためで、main から例外が出ると terminate になって
+// 「何が起きたか」が残らない。下の main が受けてメッセージにする。
+int run(int argc, char** argv) {
+    const char* USAGE = "usage: %s <rom> [frames] [all|skip4] [dump <f0,f1,...>] [scenario <file>]\n";
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <rom> [frames] [all|skip4] [dump <frame>]\n", argv[0]);
+        fprintf(stderr, USAGE, argv[0]);
         return 2;
     }
     const char* romPath = argv[1];
     const int frames = argc >= 3 ? atoi(argv[2]) : 600;
     const std::string pattern = argc >= 4 ? argv[3] : "all";
 
-    // dump モード: 指定フレームまで走らせ、その framebuffer を index 列で吐く。
-    // frames と pattern はそのまま効くので、trace で差分の出たフレームを同じ
-    // 描画パターンのまま引き直せる。
+    // dump / scenario は argv[4] 以降にキーワード + 値の対で並ぶ。位置引数では
+    // なくキーワードにしているのは、どちらも省略可能で、両方指定する順番に
+    // 意味を持たせたくないため。
+    //
+    // 値の欠けたキーワードは黙って無視しない: 以前は `... all dump` が trace
+    // モードに落ちて「差分なし」を報告していた。呼び出し側のタイプミスが
+    // 検証の PASS に化けるので、エラー終了させる。
     bool dumpMode = false;
-    int dumpFrame = -1;
-    if (argc >= 6 && std::string(argv[4]) == "dump") {
-        dumpMode = true;
-        dumpFrame = atoi(argv[5]);
-        if (dumpFrame < 0 || dumpFrame >= frames) {
-            fprintf(stderr, "error: dump frame %d is outside 0..%d\n", dumpFrame, frames - 1);
+    std::vector<int> dumpFrames;
+    const char* scenarioPath = nullptr;
+    for (int i = 4; i < argc; i++) {
+        const std::string key = argv[i];
+        const bool needsValue = key == "dump" || key == "scenario";
+        if (!needsValue) {
+            fprintf(stderr, "error: unexpected argument '%s'\n", key.c_str());
+            fprintf(stderr, USAGE, argv[0]);
             return 2;
         }
+        if (i + 1 >= argc) {
+            fprintf(stderr, "error: '%s' needs a value\n", key.c_str());
+            fprintf(stderr, USAGE, argv[0]);
+            return 2;
+        }
+        const std::string value = argv[++i];
+        if (key == "scenario") {
+            scenarioPath = argv[i];
+            continue;
+        }
+        dumpMode = true;
+        size_t at = 0;
+        while (at <= value.size()) {
+            const size_t comma = value.find(',', at);
+            const std::string tok = value.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+            if (tok.empty() || tok.find_first_not_of("0123456789") != std::string::npos) {
+                fprintf(stderr, "error: dump frame list holds a non-number ('%s')\n", tok.c_str());
+                return 2;
+            }
+            const int fr = atoi(tok.c_str());
+            if (fr < 0 || fr >= frames) {
+                fprintf(stderr, "error: dump frame %d is outside 0..%d\n", fr, frames - 1);
+                return 2;
+            }
+            dumpFrames.push_back(fr);
+            if (comma == std::string::npos) break;
+            at = comma + 1;
+        }
+        // 実行は 1 パスなので、フレームは昇順でしか吐けない。呼び出し側が
+        // どんな順で並べても出力が昇順になるよう、ここで揃えて重複も潰す。
+        // 出力の順序規則は冒頭のコメントに明記してある。
+        std::sort(dumpFrames.begin(), dumpFrames.end());
+        dumpFrames.erase(std::unique(dumpFrames.begin(), dumpFrames.end()), dumpFrames.end());
+    }
+    if (dumpMode && dumpFrames.empty()) {
+        fprintf(stderr, "error: 'dump' needs at least one frame number\n");
+        return 2;
     }
 
     const bool patternKnown = pattern == "all" || pattern == "skip4";
@@ -241,6 +441,13 @@ int main(int argc, char** argv) {
         return 3;
     }
 
+    // ROM を読む前に読む: シナリオの書式エラーは、長い実行を始める前に出したい。
+    std::vector<PadEvent> scenario;
+    if (scenarioPath && !loadScenario(scenarioPath, frames, scenario, err)) {
+        fprintf(stderr, "error: %s\n", err.c_str());
+        return 3;
+    }
+
     std::vector<uint8_t> rom;
     if (!readFile(romPath, rom)) {
         fprintf(stderr, "error: cannot read ROM: %s\n", romPath);
@@ -258,7 +465,9 @@ int main(int argc, char** argv) {
     machine.apu.setSampleRate(44100.0);
     machine.powerOn();
 
-    // 入力は無入力固定。決定性を最優先するため、パッドは一切触らない。
+    // 既定は無入力。決定性を最優先するため、シナリオが無ければパッドは一切
+    // 触らない。シナリオがある場合もフレーム番号で駆動するので、実行は同じく
+    // 決定的 — 3 系列すべてに同じシナリオを渡す限り比較は成立する。
     const int divisor = pattern == "skip4" ? 4 : 1;
 
     // dump は raw バイナリを吐くので、ヘッダは trace のときだけ。
@@ -285,22 +494,32 @@ int main(int argc, char** argv) {
                "smp\n");
     }
 
+    size_t nextEvent = 0;
+    size_t nextDump = 0;
     for (int frame = 0; frame < frames; frame++) {
         const bool draw = (frame % divisor) == 0;
 #ifdef NES_EMBEDDED
         machine.ppu.renderThisFrame = draw;
 #endif
+        // パッドは runFrame() の前に据える。同じフレーム番号に複数行あっても
+        // 最後のものが効くので、書き足しでシナリオを直すときの挙動が素直。
+        while (nextEvent < scenario.size() && scenario[nextEvent].frame == frame) {
+            machine.pad[0].setButtons(scenario[nextEvent].bits);
+            nextEvent++;
+        }
         machine.runFrame();
 
         if (dumpMode) {
-            // 目的のフレームに届くまでは走らせるだけ。到達したらその画面を
-            // index 列で吐いて終わる。
-            if (frame != dumpFrame) {
+            // 目的のフレームに届くまでは走らせるだけ。dumpFrames は昇順なので
+            // 1 回の実行で全部を順に吐ける (冒頭「出力モード」の O(n^2) の話)。
+            const bool wanted = nextDump < dumpFrames.size() && dumpFrames[nextDump] == frame;
+            if (!wanted) {
                 machine.apu.sampleCount = 0;
                 continue;
             }
+            nextDump++;
             if (!draw) {
-                fprintf(stderr, "error: frame %d is not drawn under pattern %s\n", dumpFrame, pattern.c_str());
+                fprintf(stderr, "error: frame %d is not drawn under pattern %s\n", frame, pattern.c_str());
                 return 4;
             }
             if (!normalizeFramebuffer(machine.ppu)) {
@@ -308,8 +527,14 @@ int main(int argc, char** argv) {
                 return 4;
             }
             fwrite(normalizedFb, 1, sizeof(normalizedFb), stdout);
-            fflush(stdout);
-            return 0;
+            machine.apu.sampleCount = 0;
+            // 残りが無くなったらそこで終わる。最後の対象フレームより後ろを
+            // 走らせても出力は増えないので、時間だけ捨てることになる。
+            if (nextDump == dumpFrames.size()) {
+                fflush(stdout);
+                return 0;
+            }
+            continue;
         }
 
         // 音声はサンプル数だけ状態として観測し、中身は捨てる。APU を駆動する
@@ -359,4 +584,15 @@ int main(int argc, char** argv) {
 
     fflush(stdout);
     return 0;
+}
+
+}   // namespace
+
+int main(int argc, char** argv) {
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "error: %s\n", e.what());
+        return 5;
+    }
 }
