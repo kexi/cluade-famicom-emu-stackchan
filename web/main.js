@@ -1242,6 +1242,46 @@
     504: 'deviceNoAnswer',
   };
 
+  // Transfer verdicts keyed by the device's own RomStatus, mirroring
+  // ROM_STATUS_NAMES in serve_web.py. Distinct from SD_STATUS_KEYS: the two
+  // enums share small integers but mean different things, so 1 is a busy
+  // transfer here and a missing card there.
+  const ROM_STATUS_KEYS = {
+    1: 'deviceBusy',
+    2: 'deviceTooBig',
+    3: 'deviceFail',
+    5: 'deviceFail',
+    6: 'deviceFail',
+    7: 'sdUrlNotRom',
+    8: 'deviceUnsupported',
+    9: 'deviceFail',
+  };
+
+  // Pick the message for a failed /api/rom/url.
+  //
+  // Three unrelated things answer on this route — the download, the pre-flight
+  // iNES check and the device itself — and the HTTP code alone cannot tell them
+  // apart: 422 covers both a non-iNES download and a header the device rejected,
+  // and 504 covers both a fetch that timed out and a device that stayed silent.
+  // So the relay tags its pre-transfer failures stage:"download", and a device
+  // verdict is the one that carries a numeric `status` (see _rom_failure vs
+  // RomDownloadError in serve_web.py).
+  function sdUrlErrorKey(httpStatus, data) {
+    const failedBeforeSending = data && data.stage === 'download';
+    if (failedBeforeSending) {
+      // Nothing went over the wire, so none of these blame the CoreS3.
+      if (httpStatus === 422) return 'sdUrlNotRom';
+      if (httpStatus === 400) return 'sdUrlBad';
+      if (httpStatus === 413) return 'deviceTooBig';
+      return 'sdUrlDownloadFail';
+    }
+    const isDeviceVerdict = data && typeof data.status === 'number';
+    if (isDeviceVerdict) return ROM_STATUS_KEYS[data.status] || 'deviceFail';
+    // Untagged and statusless: the transfer stage failed without a verdict —
+    // a silent device (504) or a relay-side send error.
+    return DEVICE_ROM_ERRORS[httpStatus] || 'sdUrlFail';
+  }
+
   // Consume the relay's NDJSON stream, handing each complete line to `onLine`.
   //
   // Split here rather than accumulating the whole body: the point of asking for
@@ -1664,12 +1704,7 @@
       );
       const data = await res.json().catch(() => null);
       if (!res.ok) {
-        // 422 here means the download was not an iNES image — a stale link
-        // serving an HTML error page is the usual cause, so say that rather
-        // than blaming the device.
-        if (res.status === 422) sdStatusEl.textContent = t('sdUrlNotRom');
-        else if (data && typeof data.status === 'number') sdStatusEl.textContent = sdStatusMessage(data.status);
-        else sdStatusEl.textContent = t('sdUrlFail');
+        sdStatusEl.textContent = t(sdUrlErrorKey(res.status, data));
         return;
       }
       if (data && data.sd && data.sd.status !== 0) {

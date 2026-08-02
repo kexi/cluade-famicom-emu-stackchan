@@ -1101,7 +1101,12 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             data = fetch_rom_url(url)
         except RomDownloadError as exc:
-            self._reply(exc.code, {"error": str(exc)})
+            # Tagged "download" because the HTTP code alone cannot say who
+            # failed: a fetch that timed out and a device that never answered
+            # both surface as 504 with only an error string, and 422 covers both
+            # a non-iNES download and a header the device itself rejected. The
+            # page needs that split to avoid blaming the CoreS3 for a dead link.
+            self._reply(exc.code, {"error": str(exc), "stage": "download"})
             return
 
         self._deliver_rom(query, host, data, swap, save_name, load)
