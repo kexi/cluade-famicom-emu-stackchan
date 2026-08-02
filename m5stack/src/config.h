@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 // ------------------------------------------------------------------ display
@@ -410,3 +411,27 @@ constexpr uint32_t SD_SAVE_MARGIN_BYTES = 64 * 1024;
 // FAT layer disappears against the transfer, small enough to sit on the loop
 // task's stack budget without a heap allocation.
 constexpr size_t SD_IO_CHUNK = 4096;
+
+// ------------------------------------------------------------------- menu
+// The ROM picker shown at boot and on a BtnC hold. Drawn with ordinary display
+// primitives rather than the band DMA path: no picture is being emulated while
+// it is up, so there is nothing to hide the transfer under and the blocking
+// push is both simpler and safe next to the SD accesses the menu makes.
+//
+// 24px rows at text size 2 (16px glyphs) leaves 8px of leading, which is what
+// makes a row comfortably tappable on a 320x240 panel without a hit box that
+// disagrees with what is drawn.
+constexpr int MENU_ROW_H = 24;
+constexpr int MENU_TOP_Y = 30;   // below the title line
+constexpr int MENU_VISIBLE_ROWS = 7;
+static_assert(MENU_TOP_Y + MENU_VISIBLE_ROWS * MENU_ROW_H <= 220,
+              "menu rows must leave room for the footer guide at the bottom of the panel");
+// D-pad auto-repeat while a direction is held: the first repeat waits, the rest
+// come quickly. Same shape as every console menu, and the numbers are the usual
+// ones — short enough that a 60-entry card is not a chore, long enough that a
+// deliberate single step does not double-fire.
+constexpr uint32_t MENU_REPEAT_DELAY_MS = 400;
+constexpr uint32_t MENU_REPEAT_MS = 120;
+// Poll period while the menu is up. ~60Hz, so touch and pad feel the same as in
+// game, and slow enough to leave core 1 mostly idle for the UDP replies.
+constexpr uint32_t MENU_TICK_MS = 16;

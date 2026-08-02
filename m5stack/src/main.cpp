@@ -16,8 +16,16 @@
 #include "../../core/nes.h"
 #include "config.h"
 #include "grove_input.h"
+#include "menu.h"
 #include "sd_rom.h"
 #include "secrets.h"
+
+// What the frame loop is currently doing. The two modes are mutually exclusive
+// owners of the panel and the speaker: Game drives them through the band DMA
+// path and the audio ring, Menu through ordinary blocking primitives with both
+// idle. stopVideoAudio() / startGame() are the handover in each direction.
+enum class AppMode : uint8_t { Menu, Game };
+static AppMode g_mode = AppMode::Game;
 
 // Statically allocated in internal SRAM (not PSRAM): ppu.framebuffer is handed
 // to pushImageDMA, and the LCD DMA engine cannot read from PSRAM reliably.
@@ -36,6 +44,10 @@ static std::atomic<uint32_t> g_lastRxMs{0};
 static std::atomic<uint64_t> g_pinMask{PIN_MASK_ALL_OK};
 // Set by the UDP task, consumed once at a frame boundary by the emulation loop.
 static std::atomic<bool> g_resetRequested{false};
+// Set by the BtnC hold, consumed at a frame boundary. Plain rather than atomic
+// would work — it is written and read on core 1 only — but it is latched the
+// same way as the rest so a future sender on core 0 needs no change here.
+static std::atomic<bool> g_menuRequested{false};
 // Debug snapshot request: the flag plus where to send the answer. Latched the
 // same way as the other controls so the snapshot is taken between frames, when
 // the CPU state is coherent, rather than mid-instruction from the UDP task.
@@ -410,6 +422,10 @@ static bool connectWifi() {
 }
 
 static void joinBand();
+// Defined with the rest of the mode handover, below the audio and display state
+// they touch; declared here because setup() picks the starting mode.
+static void startGame();
+static void enterMenu();
 
 static void haltWithError(const char* text) {
     // A band may still be in flight: applyRomRequest() can reach here mid-frame,
@@ -466,11 +482,12 @@ void setup() {
     // has no bands outstanding by construction, so this is the one place where
     // the ordering costs nothing to guarantee.
     sdRomInit();
+    int sdRomsFound = 0;
     if (sdRomMounted()) {
         static SdRomEntry entries[SD_ROM_MAX_FILES];
-        const int found = sdRomScan(entries, SD_ROM_MAX_FILES);
-        Serial.printf("SD: %d ROM(s) in %s\n", found, SD_ROMS_DIR);
-        for (int i = 0; i < found; i++) {
+        sdRomsFound = sdRomScan(entries, SD_ROM_MAX_FILES);
+        Serial.printf("SD: %d ROM(s) in %s\n", sdRomsFound, SD_ROMS_DIR);
+        for (int i = 0; i < sdRomsFound; i++) {
             Serial.printf("SD:   %s (%u bytes)\n", entries[i].name, (unsigned)entries[i].size);
         }
     }
@@ -492,21 +509,25 @@ void setup() {
     g_nes.apu.setSampleRate(AUDIO_SAMPLE_RATE);
     g_nes.powerOn();
 
-    // Prime the speaker queue with silence so the first real chunks arrive with
-    // margin instead of racing an already-empty hardware buffer.
-    for (int i = 0; i < 2; i++) {
-        memset(g_chunk[g_chunkIndex], 0, sizeof(g_chunk[0]));
-        M5.Speaker.playRaw(g_chunk[g_chunkIndex], AUDIO_CHUNK_SAMPLES, AUDIO_SAMPLE_RATE, false, 1, SPEAKER_CHANNEL);
-        g_chunkIndex = (g_chunkIndex + 1) % AUDIO_CHUNK_SLOTS;
-    }
-
     // NB: no startWrite() here. Holding the bus open across the whole run leaves
     // the panel's address window owned by whatever ran last, so pushes land at
     // the wrong offset; pushImageDMA sets the window itself per call.
     Serial.printf("DISPLAY: %dx%d rot=%d push=(%d,%d,%d,%d)\n", M5.Display.width(), M5.Display.height(),
                   M5.Display.getRotation(), SCREEN_X_OFFSET, 0, NES_WIDTH, NES_HEIGHT);
 
-    M5.Display.fillScreen(TFT_BLACK);
+    // The picker only earns the boot delay when there is something on the card
+    // to pick. With no card, or an empty /roms, the only choice it could offer
+    // is the built-in image that was just loaded, so a device without an SD
+    // card boots exactly as it always has — straight into the game.
+    const bool haveChoice = sdRomsFound > 0;
+    if (haveChoice) {
+        enterMenu();
+        // Left up to the picker: it draws the whole panel, and a WiFi warning in
+        // the footer would land under the guide line it draws there.
+        return;
+    }
+
+    startGame();
     if (!g_wifiConnected) {
         M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
         showMessage("WiFi: failed", 228, 1);
@@ -518,12 +539,19 @@ void setup() {
 // Buttons that live on the CoreS3 itself: the three touch zones below the
 // screen. Start/Select have no home on the Grove units (the joystick's centre
 // press doubles as Start, but Select needs somewhere), and a long-press on the
-// right zone is the RESET button for standalone play.
+// right zone opens the ROM picker for standalone play.
+//
+// That hold used to be RESET. It was reassigned because the picker is the only
+// standalone way to reach a different cart, while RESET is still reachable —
+// over UDP type 2 from the browser, and from the picker itself by choosing the
+// running ROM again, which is a power-on rather than a reset but gets the user
+// to the same place. A device with no other button to spare has to spend the
+// one it has on the thing that cannot be done another way.
 static uint8_t touchButtonBits() {
     uint8_t bits = 0;
     if (M5.BtnA.isPressed()) bits |= NES_BTN_SELECT;
     if (M5.BtnB.isPressed()) bits |= NES_BTN_START;
-    if (M5.BtnC.wasHold()) g_resetRequested.store(true, std::memory_order_relaxed);
+    if (M5.BtnC.wasHold()) g_menuRequested.store(true, std::memory_order_relaxed);
     return bits;
 }
 
@@ -957,6 +985,122 @@ static void stopVideoAudio() {
     g_dcY1 = 0.0f;
 }
 
+// Hand the panel and the speaker back to the frame loop.
+//
+// The silence priming moved here from setup(): it is a property of *starting a
+// game*, and after a menu the speaker queue is as empty as it is at boot, so
+// the first real chunks would race the hardware buffer exactly the same way.
+static void startGame() {
+    // Prime the speaker queue with silence so the first real chunks arrive with
+    // margin instead of racing an already-empty hardware buffer.
+    for (int i = 0; i < 2; i++) {
+        memset(g_chunk[g_chunkIndex], 0, sizeof(g_chunk[0]));
+        M5.Speaker.playRaw(g_chunk[g_chunkIndex], AUDIO_CHUNK_SAMPLES, AUDIO_SAMPLE_RATE, false, 1, SPEAKER_CHANNEL);
+        g_chunkIndex = (g_chunkIndex + 1) % AUDIO_CHUNK_SLOTS;
+    }
+    // The menu owns the whole panel, including the columns either side of the
+    // 256px picture, so it has to be cleared here rather than left for the first
+    // band to overwrite — which it never would.
+    M5.Display.fillScreen(TFT_BLACK);
+    // The frames right after a launch are a boot sequence, not the steady state
+    // the guard's average was built from.
+    invalidateEmuDrawPace();
+    g_mode = AppMode::Game;
+}
+
+// Leave the game and put the picker up.
+static void enterMenu() {
+    stopVideoAudio();
+    menuEnter();
+    g_mode = AppMode::Menu;
+}
+
+// Read a ROM off the card into staging and install it.
+//
+// Staging is shared with the UDP receive path, so g_stagingBusy is held for the
+// whole read-plus-install: a BEGIN that arrived between the read and the install
+// would otherwise overwrite the image while installRom() is walking it.
+static SdStatus launchSdRom(const char* name) {
+    if (!ensureStagingBuffer()) return SdStatus::IoError;
+    // A transfer already published to us owns the buffer. Reporting Busy rather
+    // than waiting keeps the menu responsive and gives the PC side something it
+    // can retry on.
+    const bool udpOwnsStaging = g_romApplyRequested.load(std::memory_order_acquire);
+    if (udpOwnsStaging) return SdStatus::Busy;
+
+    g_stagingBusy.store(true, std::memory_order_release);
+    size_t size = 0;
+    SdStatus status = sdRomLoad(name, g_romBuf, ROM_MAX_SIZE, &size);
+    if (status == SdStatus::Ok) {
+        // Checked before installing so an unsupported mapper is reported as such
+        // instead of surfacing as a generic load failure after the current cart
+        // has already been dropped.
+        const uint8_t header = romHeaderStatus(g_romBuf);
+        if (header != UDP_ROM_STATUS_OK) status = SdStatus::BadRom;
+        // No swap: a ROM chosen from the picker is a fresh power-on, which is
+        // what putting a different cartridge in means. ROM_FLAG_SWAP exists for
+        // the browser's live cart-swap experiment, not for this.
+        else if (!installRom(g_romBuf, (uint32_t)size, false)) status = SdStatus::BadRom;
+    }
+    g_stagingBusy.store(false, std::memory_order_release);
+    Serial.printf("SD: launch %s -> %s\n", name, sdStatusText(status));
+    return status;
+}
+
+// One frame of the picker. Returns once the mode has been decided, so the
+// caller's only job is to stop emulating while this is up.
+static void menuLoop() {
+    M5.update();
+    // The Grove pad and the UDP pad both drive the picker, so a user with a
+    // joystick plugged in never has to reach for the touch strip.
+    const uint32_t sinceRx = millis() - g_lastRxMs.load(std::memory_order_relaxed);
+    const bool udpStale = sinceRx > INPUT_TIMEOUT_MS;
+    const uint8_t udpBits = udpStale ? 0 : g_padBits[0].load(std::memory_order_relaxed);
+    uint8_t nav = udpBits | groveInputBits();
+    if (M5.BtnB.isPressed()) nav |= NES_BTN_START;
+
+    // A hold on BtnC while the picker is up means "never mind": go back to
+    // whatever was already loaded rather than making the user pick it again.
+    const bool resumeRequested = M5.BtnC.wasHold();
+    if (resumeRequested) {
+        g_menuRequested.store(false, std::memory_order_relaxed);
+        startGame();
+        return;
+    }
+
+    const MenuResult result = menuTick(nav);
+    if (result.action == MenuResult::Action::None) {
+        // Type 4 and type 5 keep working while the picker is up, and both stage
+        // into the same buffer this mode reads from, so they are serviced on the
+        // same frame boundary they would be in Game.
+        applyRomRequest();
+        applyVolumeRequest();
+        delay(MENU_TICK_MS);
+        return;
+    }
+
+    if (result.action == MenuResult::Action::LaunchEmbedded) {
+        const size_t embeddedSize = (size_t)(rom_end - rom_start);
+        const bool ok = installRom(rom_start, (uint32_t)embeddedSize, false);
+        if (!ok) {
+            menuShowError("built-in ROM failed");
+            return;
+        }
+        startGame();
+        return;
+    }
+
+    const SdStatus status = launchSdRom(result.sdName);
+    if (status != SdStatus::Ok) {
+        // Stay in the picker: the previous cart is still loaded, so the user can
+        // read the reason and choose again rather than being dropped into a game
+        // they did not ask for.
+        menuShowError(sdStatusText(status));
+        return;
+    }
+    startGame();
+}
+
 // Servo the playback rate to what the emulator actually produces.
 //
 // Two terms, because neither is sufficient alone. The smoothed production rate
@@ -1037,6 +1181,15 @@ static uint32_t updatePlaybackRate(uint32_t current, int produced, int64_t frame
 }
 
 void loop() {
+    // Handled before anything else, and with an early return, because the rest
+    // of this function is the Game mode: it emulates a frame, kicks a band and
+    // paces to 60Hz, none of which mean anything while the picker owns the panel.
+    const bool inMenu = g_mode == AppMode::Menu;
+    if (inMenu) {
+        menuLoop();
+        return;
+    }
+
     static int64_t nextFrameUs = esp_timer_get_time();
     // Wall-clock length of the previous loop iteration, measured at the top so
     // it naturally includes the pacing sleep and the early-return taken when a
@@ -1083,6 +1236,14 @@ void loop() {
     applyInput();
     applyPinChanges();
     applyResetRequest();
+    // Before the ROM handler and the emulation below, so the frame that opens
+    // the picker does not also run a frame of the game whose audio and video
+    // stopVideoAudio() has just torn down.
+    const bool menuRequested = g_menuRequested.exchange(false, std::memory_order_relaxed);
+    if (menuRequested) {
+        enterMenu();
+        return;
+    }
     applyRomRequest();
     applyVolumeRequest();
     updateWaveCapture();
