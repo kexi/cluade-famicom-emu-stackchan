@@ -150,7 +150,12 @@ void sdRomCleanupParts() {
     // Collected before deleting rather than removed while walking: the FAT
     // driver's directory iterator is invalidated by a remove() on the directory
     // it is walking, so deleting in place skips entries.
-    char doomed[SD_ROM_MAX_FILES][SD_ROM_NAME_MAX];
+    //
+    // static rather than automatic: 4KB out of the Arduino loop task's 8KB
+    // stack, on top of what the SD/FAT driver needs underneath, is more than the
+    // frame is worth. Safe because sdRomInit() calls this once from setup() and
+    // nothing re-enters it.
+    static char doomed[SD_ROM_MAX_FILES][SD_ROM_NAME_MAX];
     int count = 0;
     for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
         const char* name = f.name();
@@ -423,8 +428,21 @@ void sdRomSanitizeName(const char* in, char* out, size_t cap) {
     if (backslash) in = backslash + 1;
 
     // Reserve room for a ".nes" that may have to be appended below, so forcing
-    // the extension can never be the thing that truncates.
-    const size_t bodyCap = cap > 5 ? cap - 5 : 1;
+    // the extension can never be the thing that truncates — but skip the
+    // reservation for a name that already carries the suffix and fits whole.
+    // '.', 'n', 'e' and 's' all survive the byte filter unchanged, so such a
+    // name still ends in ".nes" after copying and needs no room reserved.
+    // Charging it the reservation anyway is what truncated a 59-to-63 byte name
+    // into one that then failed sdRomNameValid()'s round-trip and was skipped by
+    // the listing, despite being a name the card and the header both allow. A
+    // .nes name too long to fit still gets the reservation, because truncating
+    // it mid-body leaves a suffix that has to be re-appended.
+    const bool suffixFits = endsWithNes(in) && strlen(in) < cap;
+    const size_t reserve = suffixFits ? 0 : 4;
+    // +1 because the loop below stops at n + 1 == bodyCap, leaving room for the
+    // terminator: a bodyCap of cap therefore admits cap - 1 bytes, which is the
+    // whole name a caller passing SD_ROM_NAME_MAX expects to be able to store.
+    const size_t bodyCap = cap > reserve ? cap - reserve : 1;
     size_t n = 0;
     for (const char* p = in; *p && n + 1 < bodyCap; p++) {
         const char c = *p;

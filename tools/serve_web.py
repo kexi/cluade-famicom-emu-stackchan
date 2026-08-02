@@ -783,9 +783,17 @@ class PinRelay:
         self.seq = (self.seq + 1) & 0xFFFF
         packet = build_sd_request(seq, op, *names)
 
+        # DELETE and RENAME change the card, and the firmware keeps no per-seq
+        # result cache, so a retransmission after a lost ACK re-runs the op: the
+        # second DELETE of a file the first one removed answers NOT_FOUND, and
+        # the second RENAME answers EXISTS. Retrying would turn a success into a
+        # reported failure. LIST and LOAD are idempotent and keep their retries.
+        idempotent = op in (SD_OP_LIST, SD_OP_LOAD)
+        attempts = SD_RETRIES if idempotent else 1
+
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            for _ in range(SD_RETRIES):
+            for _ in range(attempts):
                 sock.sendto(packet, (host, self.device_port))
                 if op == SD_OP_LIST:
                     listing = self._sd_collect_list(sock, seq)
@@ -793,7 +801,14 @@ class PinRelay:
                     listing = self._sd_await_ack(sock, seq, op)
                 if listing is not None:
                     return listing
-            raise SdCommandError(None, "device did not answer")
+            if idempotent:
+                raise SdCommandError(None, "device did not answer")
+            # Sent once and unanswered: the op may well have run. Saying so is
+            # the honest answer, and it is what lets the page tell the user to
+            # look at the listing instead of asserting a failure.
+            raise SdCommandError(
+                None, "no result from the device; the operation may have run"
+            )
         finally:
             sock.close()
 
@@ -1102,8 +1117,11 @@ class Handler(SimpleHTTPRequestHandler):
         """Answer a refused or unanswered SD command, mirroring _rom_failure."""
         if exc.status is None:
             # 504 for the same reason the ROM path uses it: the request went out,
-            # the device just never answered.
-            self._reply(504, {"error": str(exc)})
+            # the device just never answered. `unknown` rides along so the page
+            # can distinguish this from a refusal — for DELETE and RENAME the op
+            # is sent once and never retried, so silence means the card state is
+            # genuinely undetermined, not that nothing happened.
+            self._reply(504, {"error": str(exc), "unknown": True})
             return
         self._reply(
             SD_STATUS_HTTP.get(exc.status, 502),

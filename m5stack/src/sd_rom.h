@@ -80,6 +80,10 @@ SdStatus sdRomRename(const char* from, const char* to);
 // every byte outside [A-Za-z0-9._-] becomes '_', a ".nes" suffix is forced, and
 // an empty result becomes "rom.nes". Only the basename survives, which is what
 // makes path traversal structurally impossible — see the note in sd_rom.cpp.
+//
+// The result is at most `cap - 1` bytes either way: a name already ending in
+// ".nes" is copied whole up to that limit, and one that needs the suffix has its
+// body cut short first so the append still fits.
 void sdRomSanitizeName(const char* in, char* out, size_t cap);
 
 // Delete leftover "<name>.part" files. Called from sdRomInit(); exposed so a

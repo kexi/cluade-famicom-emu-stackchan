@@ -124,7 +124,12 @@ static bool g_wifiConnected = false;
 
 // Transfer state, owned entirely by the UDP task. Kept at file scope only so the
 // packet handler can be split out of udpTask's loop for readability.
-static bool g_romActive = false;   // a BEGIN has been accepted and not yet finished
+// Written only by the UDP task, but read by core 1's staging claim, so it is
+// atomic. Left with the default (seq_cst) operators everywhere: launchSdRom()
+// needs its claim store and this load to sit in one total order, and
+// acquire/release would not give that — they only order each core's own writes
+// against its own reads, which is exactly not what a two-flag handshake needs.
+static std::atomic<bool> g_romActive{false};   // a BEGIN has been accepted and not yet finished
 static uint16_t g_romSession = 0;
 static uint32_t g_romExpectedSize = 0;
 static uint32_t g_romExpectedCrc = 0;
@@ -188,7 +193,13 @@ static void sendRomAck(int sock, const sockaddr_in& to, uint8_t op, uint16_t ses
 // to be answered for an image read off the SD card, which never passes through
 // staging on the UDP task's schedule. Keeping one implementation is what stops
 // the two paths from disagreeing about which mappers this build supports.
-static uint8_t romHeaderStatus(const uint8_t* buf) {
+static uint8_t romHeaderStatus(const uint8_t* buf, uint32_t size) {
+    // Takes the size rather than trusting the caller to have checked it: BEGIN
+    // accepts any total from 1 byte up, so a 3-byte transfer reaches END and
+    // would otherwise have its mapper number read out of never-written staging.
+    const bool tooShortForHeader = size < 16;
+    if (tooShortForHeader) return UDP_ROM_STATUS_BAD_HEADER;
+
     const bool magicOk = buf[0] == 'N' && buf[1] == 'E' && buf[2] == 'S' && buf[3] == 0x1A;
     if (!magicOk) return UDP_ROM_STATUS_BAD_HEADER;
 
@@ -226,7 +237,10 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
     // equally while core 1 is filling it from the SD card. Taking a new transfer
     // in either window would overwrite the image out from under it.
     const bool applyPending = g_romApplyRequested.load(std::memory_order_acquire);
-    const bool loopOwnsStaging = g_stagingBusy.load(std::memory_order_acquire);
+    // seq_cst, unlike the acquire above: this load is the UDP half of
+    // launchSdRom()'s claim handshake, and only a total order over both flags
+    // stops the two cores from each deciding the buffer is theirs.
+    const bool loopOwnsStaging = g_stagingBusy.load(std::memory_order_seq_cst);
     if (applyPending || loopOwnsStaging) {
         sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_BUSY);
         return;
@@ -351,7 +365,7 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
             sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_CRC);
             return;
         }
-        const uint8_t headerStatus = romHeaderStatus(g_romBuf);
+        const uint8_t headerStatus = romHeaderStatus(g_romBuf, g_romReceived);
         const bool unloadable = headerStatus != UDP_ROM_STATUS_OK;
         if (unloadable) {
             g_romActive = false;
@@ -1201,20 +1215,33 @@ static void enterMenu() {
 // would otherwise overwrite the image while installRom() is walking it.
 static SdStatus launchSdRom(const char* name) {
     if (!ensureStagingBuffer()) return SdStatus::IoError;
-    // A transfer already published to us owns the buffer. Reporting Busy rather
-    // than waiting keeps the menu responsive and gives the PC side something it
-    // can retry on.
-    const bool udpOwnsStaging = g_romApplyRequested.load(std::memory_order_acquire);
-    if (udpOwnsStaging) return SdStatus::Busy;
+    // Claim first, then re-check. Checking before claiming leaves a window: a
+    // BEGIN that passed its own g_stagingBusy test just before the store below
+    // would start filling g_romBuf while sdRomLoad() is reading into it, and the
+    // installed image would be a splice of both transfers.
+    //
+    // Why not acquire/release: the pairing here is store-then-load on one flag
+    // against store-then-load on another, and release/acquire orders neither
+    // core's store ahead of its own subsequent load. Only a single total order
+    // over the four operations rules out both cores concluding they won, which
+    // is what seq_cst buys. g_romActive covers a transfer that is mid-flight but
+    // has not published yet, which g_romApplyRequested alone would miss.
+    g_stagingBusy.store(true, std::memory_order_seq_cst);
+    const bool udpOwnsStaging = g_romApplyRequested.load(std::memory_order_seq_cst) || g_romActive.load();
+    if (udpOwnsStaging) {
+        // Reporting Busy rather than waiting keeps the menu responsive and gives
+        // the PC side something it can retry on.
+        g_stagingBusy.store(false, std::memory_order_release);
+        return SdStatus::Busy;
+    }
 
-    g_stagingBusy.store(true, std::memory_order_release);
     size_t size = 0;
     SdStatus status = sdRomLoad(name, g_romBuf, ROM_MAX_SIZE, &size);
     if (status == SdStatus::Ok) {
         // Checked before installing so an unsupported mapper is reported as such
         // instead of surfacing as a generic load failure after the current cart
         // has already been dropped.
-        const uint8_t header = romHeaderStatus(g_romBuf);
+        const uint8_t header = romHeaderStatus(g_romBuf, (uint32_t)size);
         if (header != UDP_ROM_STATUS_OK) status = SdStatus::BadRom;
         // No swap: a ROM chosen from the picker is a fresh power-on, which is
         // what putting a different cartridge in means. ROM_FLAG_SWAP exists for

@@ -98,6 +98,11 @@
     set('sd-url-btn', 'sdUrlSend');
     const sdUrlEl = document.getElementById('sd-url');
     if (sdUrlEl) sdUrlEl.placeholder = t('sdUrlPlaceholder');
+    // The field's only visible label is the placeholder, which is not an
+    // accessible name and disappears on the first keystroke; #sd-save-label
+    // belongs to the checkbox beside it.
+    const sdSaveNameEl = document.getElementById('sd-save-name');
+    if (sdSaveNameEl) sdSaveNameEl.setAttribute('aria-label', t('sdSaveName'));
     // The listing carries its own translated labels per row, so it has to be
     // rebuilt rather than relabelled in place.
     if (typeof renderSdList === 'function') renderSdList();
@@ -1277,6 +1282,10 @@
     // fall back to the loaded cart's own name rather than sending a 400.
     const wantsSave = sdSaveCheck.checked;
     const saveName = wantsSave ? sdSaveName.value.trim() || defaultSdName() : '';
+    if (wantsSave && sdNameTooLong(saveName)) {
+      statusEl.textContent = t('sdNameTooLong');
+      return;
+    }
     if (wantsSave && !isValidSdName(saveName)) {
       statusEl.textContent = t('sdBadName');
       return;
@@ -1328,6 +1337,15 @@
       // not the thing that failed, so the message has to name the SD status
       // rather than fall through to "failed to send".
       if (verdict && verdict.sd) {
+        // A null status is the relay saying the save event never arrived, not
+        // that the card refused the image: the transfer did land, so the write
+        // may well have succeeded. Refresh so the listing answers what the
+        // device would not.
+        if (verdict.sd.status == null) {
+          statusEl.textContent = t('sdSaveUnknown');
+          refreshSdList();
+          return;
+        }
         statusEl.textContent = sdStatusMessage(verdict.sd.status);
         return;
       }
@@ -1385,9 +1403,18 @@
   // in .nes, with no path separators. Checked here so a bad name is caught
   // before the transfer rather than after the whole image has gone over.
   function isValidSdName(name) {
-    if (!name || name.length > 63) return false;
+    if (!name) return false;
     if (name.includes('/') || name.includes('\\')) return false;
     return /\.nes$/i.test(name);
+  }
+
+  // Bytes, not characters: the length byte on the wire, SD_NAME_MAX in the relay
+  // and SD_ROM_NAME_MAX on the device all count UTF-8 bytes. A 30-character
+  // Japanese name is 90 bytes, so a `.length` check would let it through and the
+  // relay would answer 400 with no numeric status — a generic failure message
+  // for the one problem the user could have fixed themselves.
+  function sdNameTooLong(name) {
+    return new TextEncoder().encode(name || '').length > 63;
   }
 
   // The PRG side names the cart, matching updateSwapInfo(): with a mixed
@@ -1420,6 +1447,22 @@
     });
     const data = await res.json().catch(() => null);
     if (res.ok) return data;
+    // The relay flags an unanswered DELETE or RENAME rather than retrying it —
+    // the firmware caches no result per seq, so a retransmission would re-run
+    // the op and report NOT_FOUND or EXISTS for something that succeeded.
+    // Silence therefore means undetermined, and saying "failed" would be wrong.
+    if (data && data.unknown) {
+      sdStatusEl.textContent = t('sdSaveUnknown');
+      refreshSdList();
+      return null;
+    }
+    if (data && typeof data.error === 'string' && / too long$/.test(data.error)) {
+      // The relay refuses an over-long name with no numeric status, which would
+      // otherwise fall through to the generic sdFail and hide the one thing the
+      // user can act on.
+      sdStatusEl.textContent = t('sdNameTooLong');
+      return null;
+    }
     sdStatusEl.textContent = data && typeof data.status === 'number' ? sdStatusMessage(data.status) : t('sdFail');
     return null;
   }
@@ -1513,6 +1556,10 @@
     if (next === null) return;
     const to = next.trim();
     if (to === name) return;
+    if (sdNameTooLong(to)) {
+      sdStatusEl.textContent = t('sdNameTooLong');
+      return;
+    }
     if (!isValidSdName(to)) {
       sdStatusEl.textContent = t('sdBadName');
       return;
@@ -1561,6 +1608,10 @@
     }
     const wantsSave = sdSaveCheck.checked;
     const saveName = wantsSave ? sdSaveName.value.trim() : '';
+    if (wantsSave && sdNameTooLong(saveName)) {
+      sdStatusEl.textContent = t('sdNameTooLong');
+      return;
+    }
     if (wantsSave && !isValidSdName(saveName)) {
       sdStatusEl.textContent = t('sdBadName');
       return;
@@ -1588,7 +1639,13 @@
         return;
       }
       if (data && data.sd && data.sd.status !== 0) {
-        sdStatusEl.textContent = sdStatusMessage(data.sd.status);
+        // Same split as sendRomToDevice: `!== 0` is true for null too, and null
+        // means "no save result" rather than a refusal. The unknown case
+        // refreshes explicitly, because returning from inside the try skips the
+        // refreshSdList() at the end of the function.
+        const unknown = data.sd.status == null;
+        sdStatusEl.textContent = unknown ? t('sdSaveUnknown') : sdStatusMessage(data.sd.status);
+        if (unknown) refreshSdList();
         return;
       }
       sdStatusEl.textContent = wantsSave ? t('sdSaved', { name: saveName }) : t('deviceSent');

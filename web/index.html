@@ -1104,7 +1104,11 @@
   </div>
   <div id="sd-save-row" hidden>
     <label id="sd-save-label"><input type="checkbox" id="sd-save-check"><span id="lbl-sd-save">SDカードにも保存</span></label>
-    <input type="text" id="sd-save-name" placeholder="game.nes" spellcheck="false" maxlength="63" disabled>
+    <!-- No maxlength: the limit is 63 UTF-8 bytes and the attribute counts UTF-16
+         code units, so it would let a 30-character Japanese name (90 bytes) past
+         while cutting a 64-character ASCII one the device would have accepted.
+         sdNameTooLong() in main.js does the byte check and names the problem. -->
+    <input type="text" id="sd-save-name" placeholder="game.nes" spellcheck="false" disabled>
     <label id="sd-noload-label"><input type="checkbox" id="sd-noload-check" disabled><span id="lbl-sd-noload">保存のみ (起動しない)</span></label>
   </div>
   <div id="sd-panel" hidden>
