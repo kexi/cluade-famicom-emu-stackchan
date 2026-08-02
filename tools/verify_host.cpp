@@ -151,19 +151,35 @@ nes::Pixel palettePixel(int index) {
 #endif
 }
 
-std::vector<nes::Pixel> canonicalPixels;   // canonical index -> pixel value
 // 逆引き。要素は 54 個しかないので線形探索でも「正しい」が、
 // normalizeFramebuffer() が 1 フレームあたり 61440 回ここを引き、それを 3 系列
 // x 600 フレーム繰り返すため、平均 27 回の比較が積もると検証全体の実行時間に
 // 効いてくる。定数時間の引きに替える。
+//
+// 組み込みビルドでは Pixel = uint16 なので、値域そのものを添字にした直接引き
+// 表が張れる (65536 要素 x int = 256KB)。ハッシュの計算もバケット参照も要らず、
+// 1 回の配列読みで済む。参照ビルドの Pixel = uint32 では 16GB になって成立
+// しないので、そちらは unordered_map のまま。
+//
+// どちらの実装も「未知の値は -1」「重複は最初に現れた index に畳む」という
+// 同じ規則を守る — 表は -1 で埋めてから、まだ -1 の位置にだけ書き込む。
+#ifdef NES_EMBEDDED
+constexpr size_t PIXEL_TABLE_SIZE = 1u << 16;
+std::vector<int> canonicalIndex;   // pixel value -> canonical index, -1 = unknown
+
+int canonicalIndexOf(nes::Pixel px) { return canonicalIndex[px]; }
+#else
 std::unordered_map<nes::Pixel, int> canonicalIndex;
 
-// ピクセル値 → canonical index。未知の値は正規化できないので -1 を返し、
-// 呼び出し側が異常終了する。
 int canonicalIndexOf(nes::Pixel px) {
     const auto it = canonicalIndex.find(px);
     return it == canonicalIndex.end() ? -1 : it->second;
 }
+#endif
+
+// canonical index の総数 (= 相異なるピクセル値の個数)。表と map で「入って
+// いる個数」の数え方が違うので、両方が同じ意味で更新する 1 つの数に持たせる。
+int canonicalCount = 0;
 
 // 逆マップを構築し、正規化が成立することを起動時に検査する。
 //
@@ -173,25 +189,33 @@ int canonicalIndexOf(nes::Pixel px) {
 // 情報が落ち、両者の CRC 比較は「差が出ないこと」を保証しなくなる。
 // 黙って通すと検証が骨抜きになるため、その場合は即エラー終了する。
 bool buildPaletteInverse(std::string& err) {
-    canonicalPixels.clear();
+#ifdef NES_EMBEDDED
+    canonicalIndex.assign(PIXEL_TABLE_SIZE, -1);
+#else
     canonicalIndex.clear();
+#endif
+    canonicalCount = 0;
     for (int i = 0; i < PALETTE_SIZE; i++) {
         const nes::Pixel px = palettePixel(i);
-        // 重複は「最初に現れた index」に畳む。emplace は既存キーを上書きしない
-        // ので、この畳み方がそのまま表現できる。
+        // 重複は「最初に現れた index」に畳む。まだ引けない値のときだけ書くので、
+        // 表でも map でも同じ畳み方になる。
         if (canonicalIndexOf(px) < 0) {
-            canonicalIndex.emplace(px, (int)canonicalPixels.size());
-            canonicalPixels.push_back(px);
+#ifdef NES_EMBEDDED
+            canonicalIndex[px] = canonicalCount;
+#else
+            canonicalIndex.emplace(px, canonicalCount);
+#endif
+            canonicalCount++;
         }
     }
 
     // NES パレット 64 色のうち相異なるのは 54 色 (0xFF000000 x10, 0xFFFFFEFF x2
     // が重複)。RGB565 でもこの数が保たれることが、丸めによる衝突が起きていない
     // ことの必要十分な確認になる。
-    constexpr size_t EXPECTED_DISTINCT = 54;
-    if (canonicalPixels.size() != EXPECTED_DISTINCT) {
+    constexpr int EXPECTED_DISTINCT = 54;
+    if (canonicalCount != EXPECTED_DISTINCT) {
         char buf[160];
-        snprintf(buf, sizeof(buf), "palette collision: %zu distinct pixel values, expected %zu", canonicalPixels.size(),
+        snprintf(buf, sizeof(buf), "palette collision: %d distinct pixel values, expected %d", canonicalCount,
                  EXPECTED_DISTINCT);
         err = buf;
         return false;
