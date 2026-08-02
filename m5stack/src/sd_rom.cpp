@@ -160,7 +160,18 @@ void sdRomCleanupParts() {
     // frame is worth. Safe despite being shared: both callers (sdRomInit() from
     // setup(), and the scan's remount path at a frame boundary) run on core 1
     // and this function neither recurses nor yields, so no two walks overlap.
-    static char doomed[SD_ROM_MAX_FILES][SD_ROM_NAME_MAX];
+    //
+    // Sized for a full-length ROM name *plus* its suffix, not SD_ROM_NAME_MAX:
+    // the entries walked here are "<name>.part" / "<name>.bak", so a name at the
+    // 63-byte limit produces a 68-byte entry. Charging them SD_ROM_NAME_MAX made
+    // every such entry look "too long" and fall out of the sweep, which left the
+    // .bak of the longest names sitting on the card forever — the ROM they back
+    // up never coming back after a power cut, which is the one failure the .bak
+    // exists to prevent.
+    static const size_t SUFFIX_MAX =
+        sizeof(SD_PART_SUFFIX) > sizeof(SD_BAK_SUFFIX) ? sizeof(SD_PART_SUFFIX) : sizeof(SD_BAK_SUFFIX);
+    static const size_t DOOMED_NAME_MAX = SD_ROM_NAME_MAX + SUFFIX_MAX;
+    static char doomed[SD_ROM_MAX_FILES][DOOMED_NAME_MAX];
     // Parallel to `doomed`: true for a ".bak", which is restored rather than
     // deleted. Kept as a flag array instead of a second pass over the directory
     // so the whole sweep still costs one walk.
@@ -171,14 +182,14 @@ void sdRomCleanupParts() {
         // into the File's own storage, which close() releases, so reading it
         // afterwards is a use-after-free that happens to survive on some driver
         // versions and returns garbage on others.
-        char name[SD_ROM_NAME_MAX];
+        char name[DOOMED_NAME_MAX];
         const char* raw = f.name();
         const char* slash = strrchr(raw, '/');
         if (slash) raw = slash + 1;
-        const bool nameFits = strlen(raw) < (size_t)SD_ROM_NAME_MAX;
+        const bool nameFits = strlen(raw) < DOOMED_NAME_MAX;
         if (nameFits) {
-            strncpy(name, raw, SD_ROM_NAME_MAX - 1);
-            name[SD_ROM_NAME_MAX - 1] = '\0';
+            strncpy(name, raw, DOOMED_NAME_MAX - 1);
+            name[DOOMED_NAME_MAX - 1] = '\0';
         } else {
             name[0] = '\0';
         }
@@ -187,15 +198,15 @@ void sdRomCleanupParts() {
         f.close();
         if (skip) continue;
         if (count >= SD_ROM_MAX_FILES) break;
-        strncpy(doomed[count], name, SD_ROM_NAME_MAX - 1);
-        doomed[count][SD_ROM_NAME_MAX - 1] = '\0';
+        strncpy(doomed[count], name, DOOMED_NAME_MAX - 1);
+        doomed[count][DOOMED_NAME_MAX - 1] = '\0';
         isBak[count] = bak;
         count++;
     }
     dir.close();
 
     for (int i = 0; i < count; i++) {
-        char path[SD_ROM_NAME_MAX + sizeof(SD_ROMS_DIR) + 2];
+        char path[DOOMED_NAME_MAX + sizeof(SD_ROMS_DIR) + 2];
         sdRomPath(doomed[i], path, sizeof(path));
         if (!isBak[i]) {
             SD.remove(path);
@@ -208,11 +219,23 @@ void sdRomCleanupParts() {
         // complete copy on the card, so it goes back under its own name —
         // deleting it here is what would turn a survivable interruption into
         // the data loss the .bak exists to prevent.
-        char restored[SD_ROM_NAME_MAX];
-        strncpy(restored, doomed[i], SD_ROM_NAME_MAX - 1);
-        restored[SD_ROM_NAME_MAX - 1] = '\0';
+        char restored[DOOMED_NAME_MAX];
+        strncpy(restored, doomed[i], DOOMED_NAME_MAX - 1);
+        restored[DOOMED_NAME_MAX - 1] = '\0';
         restored[strlen(restored) - strlen(SD_BAK_SUFFIX)] = '\0';
-        char finalPath[SD_ROM_NAME_MAX + sizeof(SD_ROMS_DIR) + 2];
+        // Now that the buffer admits names longer than SD_ROM_NAME_MAX, the
+        // stripped result is checked before it is used as a destination: only a
+        // name this firmware would itself hand out is a name it may create. A
+        // ".bak" whose body is oversized or unrepresentable was never written by
+        // sdRomSave(), so restoring it would put a file on the card that the
+        // listing then refuses to show and no caller can open — worse than
+        // leaving the .bak in place, where it is at least visibly debris.
+        const bool restorable = sdRomNameValid(restored);
+        if (!restorable) {
+            Serial.printf("SD: leaving %s (restored name not representable)\n", doomed[i]);
+            continue;
+        }
+        char finalPath[DOOMED_NAME_MAX + sizeof(SD_ROMS_DIR) + 2];
         sdRomPath(restored, finalPath, sizeof(finalPath));
         // The new image landing is what makes the .bak redundant, so a .bak
         // sitting next to an existing final name means the save did complete and
@@ -418,6 +441,17 @@ SdStatus sdRomSave(const char* name, const uint8_t* buf, size_t size) {
     if (!sdRomNameValid(name)) return SdStatus::BadName;
     if (size == 0 || size > ROM_MAX_SIZE) return SdStatus::TooBig;
     if (!g_mounted && !sdRomRemount()) return SdStatus::NotMounted;
+
+    // sdRomInit() creates this at boot, but a save can also run on a card that
+    // was inserted afterwards and came back through the remount above — that
+    // path never passes through the boot-time mkdir, so on a fresh card the
+    // .part open below would fail into a bare IoError with the real cause (no
+    // directory) invisible to the user.
+    const bool dirMissing = !SD.exists(SD_ROMS_DIR);
+    if (dirMissing && !SD.mkdir(SD_ROMS_DIR)) {
+        Serial.printf("SD: cannot create %s\n", SD_ROMS_DIR);
+        return recoverAfterIoFailure() ? SdStatus::IoError : SdStatus::NotMounted;
+    }
 
     // Checked before a single byte is written, so the failure mode for a full
     // card is a clean rejection rather than a half-written .part that then has

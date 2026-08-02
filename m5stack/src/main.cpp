@@ -931,6 +931,10 @@ static void applyRomRequest() {
     const bool requested = g_romApplyRequested.load(std::memory_order_acquire);
     if (!requested) return;
 
+    // Ok when nothing was asked of the card, so the install condition below can
+    // be read without a second "was a save even wanted" test.
+    SdStatus saveStatus = SdStatus::Ok;
+
     // Saved before installing, for two reasons. The image is still exactly what
     // the sender verified — installRom() does not modify staging, but a future
     // change to it must not be able to alter what lands on the card. And a
@@ -946,7 +950,7 @@ static void applyRomRequest() {
         // knows the name it will find on the card is not the one it asked for,
         // and can offer the user the corrected one instead of guessing later.
         const bool nameMangled = strcmp(clean, g_romSaveName) != 0;
-        const SdStatus status = nameMangled ? SdStatus::BadName : sdRomSave(clean, g_romBuf, g_romSize);
+        saveStatus = nameMangled ? SdStatus::BadName : sdRomSave(clean, g_romBuf, g_romSize);
         // A separate datagram, because the END ACK went out from the UDP task
         // the moment the CRC checked — holding that ACK until the card write
         // finished would stall the sender across a ~1-2s write.
@@ -959,17 +963,25 @@ static void applyRomRequest() {
             event[3] = UDP_TYPE_ROM;
             event[4] = g_romSession & 0xFF;
             event[5] = g_romSession >> 8;
-            event[6] = (uint8_t)status;
+            event[6] = (uint8_t)saveStatus;
             ::sendto(g_udpSock, event, sizeof(event), 0, (const sockaddr*)&g_romSaveReplyTo, sizeof(g_romSaveReplyTo));
         }
-        Serial.printf("ROM: save '%s' -> %s\n", g_romSaveName, sdStatusText(status));
+        Serial.printf("ROM: save '%s' -> %s\n", g_romSaveName, sdStatusText(saveStatus));
     }
 
     // "Add to my library" rather than "play this now": the running game keeps
     // going, and the picker (if it is up) picks the new file up on its next
-    // scan. A failed save still skips the install — the sender asked for a file,
-    // not for a cart swap, and interrupting the game would be a surprise.
-    const bool installWanted = (g_romFlags & ROM_FLAG_NO_LOAD) == 0;
+    // scan. A NO_LOAD transfer therefore never installs — the sender asked for a
+    // file, not for a cart swap, and interrupting the game would be a surprise.
+    //
+    // A save that was asked for and failed skips the install for the same
+    // reason. The request was "put this on the card and play it"; delivering
+    // only the second half stops the game the user was playing and hands them a
+    // cart that is not on the card either, so the next reboot has neither. Doing
+    // nothing leaves the running game alone, and the save event above has
+    // already told the sender why.
+    const bool saveFailed = saveStatus != SdStatus::Ok;
+    const bool installWanted = (g_romFlags & ROM_FLAG_NO_LOAD) == 0 && !saveFailed;
     if (installWanted) installRom(g_romBuf, g_romSize, (g_romFlags & ROM_FLAG_SWAP) != 0);
 
     // Cleared last: until this store the UDP task treats the buffer as ours and
@@ -1259,6 +1271,18 @@ static void stopVideoAudio() {
 // game*, and after a menu the speaker queue is as empty as it is at boot, so
 // the first real chunks would race the hardware buffer exactly the same way.
 static void startGame() {
+    // Drop any menu request that arrived while the picker was up. Type 2 latches
+    // on core 0 whatever the mode is, so a HOME pressed during browsing (or a
+    // duplicate of the one that opened the picker) is still set here, and the
+    // very next loop() would read it and throw the user straight back out of the
+    // game they just chose.
+    //
+    // Cleared here rather than in menuLoop() because this is the single point
+    // every launch passes through — the picker alone has five (BtnC resume, a
+    // type 5 LOAD, an install-flagged push, the built-in ROM, a picked row), and
+    // the resume path was the only one that had remembered to do it.
+    g_menuRequested.store(false, std::memory_order_relaxed);
+
     // Prime the speaker queue with silence so the first real chunks arrive with
     // margin instead of racing an already-empty hardware buffer.
     for (int i = 0; i < 2; i++) {
@@ -1477,7 +1501,8 @@ static void menuLoop() {
     // whatever was already loaded rather than making the user pick it again.
     const bool resumeRequested = M5.BtnC.wasHold();
     if (resumeRequested) {
-        g_menuRequested.store(false, std::memory_order_relaxed);
+        // The latch clear this used to do itself now lives in startGame(), which
+        // every launch path shares.
         startGame();
         return;
     }

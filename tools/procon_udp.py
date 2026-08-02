@@ -83,6 +83,30 @@ BUTTON_MAP = {
     7: NES_START,  # plus
 }
 
+# HOME is deliberately absent from this map, so the SDL backend cannot open the
+# menu the way the hidapi one does.
+#
+# Why not just add an index: the available evidence contradicts itself, and none
+# of it was gathered by pressing HOME. The map above is a raw
+# `pygame.joystick.Joystick` layout, not SDL_GameController's. SDL 2.28's HIDAPI
+# Switch driver would put HOME at 5 (it passes the GameController enum straight
+# through as the raw index, with A=0 and minus=4), while the two macOS IOKit rows
+# in SDL_GameControllerDB put it at 9 and at 12. The verified entries above
+# (minus=6, plus=7) match none of the three.
+#
+# The pad here reports buttons=20 / hats=0, which is the HIDAPI driver's
+# signature — yet that driver's layout disagrees with the very entries this table
+# was built from on real hardware. Until someone presses HOME and reads the index
+# back, that conflict is unresolved, and the index also shifts between USB and
+# Bluetooth (distinct GUIDs) and across controller firmware. Worse, 12 collides
+# with the D-pad on the builds that report it as buttons 11-14 just below.
+#
+# A wrong guess costs more than the missing feature: the misread button is one a
+# player holds during normal play, so it would drop them out of a running game at
+# random. A HOME that only works over USB is a documented limitation; a D-pad
+# press that quits to the menu is a bug nobody would connect to this table. Use
+# --backend hid for HOME, or open the picker with a long press on BtnC.
+#
 # Some SDL builds expose the D-pad as buttons 11-14 instead of a hat.
 # Used only when the device reports no hats at all.
 DPAD_BUTTON_MAP = {
@@ -679,6 +703,9 @@ def run_loop(sender, rate_hz, backend="auto"):
             f"hats={joystick.get_numhats()} axes={joystick.get_numaxes()}"
         )
         print("バックエンド: SDL (pygame)")
+        print(
+            "注意     : HOME でのメニュー呼び出しは USB (--backend hid) のみ対応です。"
+        )
     print(f"宛先     : {sender.host}:{sender.port}")
     print(f"レート   : {rate_hz} Hz")
     print("Ctrl-C で終了します。")

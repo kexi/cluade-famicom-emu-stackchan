@@ -359,6 +359,13 @@ constexpr uint8_t ROM_FLAG_SWAP = 0x01;
 // BEGIN byte [7] bit 1: also write the image to the SD card under the name
 // carried in the BEGIN's optional tail (see UDP_ROM_BEGIN_NAMED_SIZE). Without
 // a name the flag is ignored — there would be nothing to call the file.
+//
+// The save is sequenced *before* the install and gates it: when this flag is
+// set and the write fails, the image is not installed either, so the running
+// game keeps going. The request is "put this on the card and play it", and
+// honouring only the second half would stop the current game for a cart that
+// is not on the card — leaving the user with neither after a reboot. The
+// failure is reported in the separate save event (UDP_ROM_SAVE_EVENT_SIZE).
 constexpr uint8_t ROM_FLAG_SAVE_SD = 0x02;
 // BEGIN byte [7] bit 2: do not install the image, only save it. Lets the
 // browser fill the card without interrupting whatever is running, which is the
