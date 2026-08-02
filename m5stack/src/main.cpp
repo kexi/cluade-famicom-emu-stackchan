@@ -89,6 +89,20 @@ static char g_romSaveName[SD_ROM_NAME_MAX] = {};
 // the time core 1 writes the card.
 static sockaddr_in g_romSaveReplyTo = {};
 
+// What one applyRomRequest() call did, for a caller that has to react to it.
+//
+// Three fields rather than a single "should I start the game" bool because the
+// picker needs to tell the two failure shapes apart: nothing pending at all is
+// not an error, while a push that was pending and did not install has a reason
+// worth putting on screen. `installed` is the only safe basis for a launch —
+// deriving it from the flags at the call site is exactly the bug this replaced,
+// since NO_LOAD is clear on a save-and-play push whose save failed.
+struct RomApplyResult {
+    bool handled = false;   // a staged image was serviced by this call
+    bool installed = false;   // ...and a cart is now loaded from it
+    SdStatus saveStatus = SdStatus::Ok;   // Ok when the card was not asked for anything
+};
+
 // A type 5 request, latched by the UDP task and serviced by the frame loop.
 //
 // The payload is copied out of the datagram rather than pointed into it: the
@@ -927,13 +941,21 @@ static bool installRom(const uint8_t* data, uint32_t size, bool wantSwap) {
 // stages the image mid-frame, and swapping the mapper out from under a running
 // instruction would fault. The acquire load pairs with the UDP task's release
 // store, so every staged byte is visible here.
-static void applyRomRequest() {
+//
+// Reports what the push actually did, because "a ROM was waiting" and "a cart is
+// now loaded" are different questions and only this function can answer the
+// second: the caller cannot re-derive it from the flags, since a save that was
+// asked for and failed suppresses the install below. The picker needs the
+// difference to decide whether to start the game or stay up with the reason.
+static RomApplyResult applyRomRequest() {
+    RomApplyResult result = {};
     const bool requested = g_romApplyRequested.load(std::memory_order_acquire);
-    if (!requested) return;
+    if (!requested) return result;
+    result.handled = true;
 
     // Ok when nothing was asked of the card, so the install condition below can
     // be read without a second "was a save even wanted" test.
-    SdStatus saveStatus = SdStatus::Ok;
+    SdStatus& saveStatus = result.saveStatus;
 
     // Saved before installing, for two reasons. The image is still exactly what
     // the sender verified — installRom() does not modify staging, but a future
@@ -982,12 +1004,13 @@ static void applyRomRequest() {
     // already told the sender why.
     const bool saveFailed = saveStatus != SdStatus::Ok;
     const bool installWanted = (g_romFlags & ROM_FLAG_NO_LOAD) == 0 && !saveFailed;
-    if (installWanted) installRom(g_romBuf, g_romSize, (g_romFlags & ROM_FLAG_SWAP) != 0);
+    if (installWanted) result.installed = installRom(g_romBuf, g_romSize, (g_romFlags & ROM_FLAG_SWAP) != 0);
 
     // Cleared last: until this store the UDP task treats the buffer as ours and
     // refuses new transfers. Clearing it earlier would let a BEGIN overwrite the
     // image we are still reading.
     g_romApplyRequested.store(false, std::memory_order_release);
+    return result;
 }
 
 // Answer a debug snapshot request, if one is pending.
@@ -1512,9 +1535,7 @@ static void menuLoop() {
         // Type 4 and type 5 keep working while the picker is up, and both stage
         // into the same buffer this mode reads from, so they are serviced on the
         // same frame boundary they would be in Game.
-        const bool romPushed = g_romApplyRequested.load(std::memory_order_acquire);
-        const bool pushWantsPlay = romPushed && (g_romFlags & ROM_FLAG_NO_LOAD) == 0;
-        applyRomRequest();
+        const RomApplyResult push = applyRomRequest();
         applySdRequest();
         applyVolumeRequest();
         // A type 5 LOAD starts the game from inside applySdRequest(), so the
@@ -1525,13 +1546,35 @@ static void menuLoop() {
         // A ROM sent with the install flag is a "play this now", so honour it
         // from the picker as well: the browser's send button should not behave
         // differently depending on whether the user happens to be browsing.
-        if (pushWantsPlay) {
+        //
+        // Keyed on what the push actually installed, not on the flags it carried:
+        // a save-and-play whose card write failed installs nothing, and starting
+        // the game anyway would drop the user into the *previous* cart with no
+        // hint that the ROM they just sent went nowhere.
+        if (push.installed) {
             startGame();
+            return;
+        }
+        // The save the sender asked for is the only reason a push can be handled
+        // without installing while NO_LOAD is clear, so it is also the only case
+        // with something to explain. Shown here rather than in applyRomRequest()
+        // because the status line belongs to the picker: in Game mode the same
+        // failure is reported over UDP alone and the running cart is untouched.
+        const bool pushWantedPlay = push.handled && (g_romFlags & ROM_FLAG_NO_LOAD) == 0;
+        if (pushWantedPlay) {
+            // Two ways to get here, and the save status only describes one of
+            // them: a card write that failed, or an image the core refused
+            // (unsupported mapper, or no SRAM left for its banks). Ok therefore
+            // means the install itself was what failed.
+            const bool saveFailed = push.saveStatus != SdStatus::Ok;
+            // Returns without the redraw below, which would overwrite the status
+            // line with menuEnter()'s default hint on this very frame.
+            menuShowError(saveFailed ? sdStatusText(push.saveStatus) : "ROM load failed");
             return;
         }
         // A save-only push (or an SD delete/rename) changed what the listing
         // should show, so redraw it rather than leaving a stale row on screen.
-        const bool listingStale = romPushed || g_sdListingChanged;
+        const bool listingStale = push.handled || g_sdListingChanged;
         if (listingStale) {
             g_sdListingChanged = false;
             menuEnter();

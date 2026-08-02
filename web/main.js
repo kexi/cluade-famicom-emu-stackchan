@@ -1287,7 +1287,9 @@
       return;
     }
     if (wantsSave && !isValidSdName(saveName)) {
-      statusEl.textContent = t('sdBadName');
+      // Names the spelling that would work rather than only refusing: the user
+      // typed something the device will not take, and the fix is mechanical.
+      statusEl.textContent = t('sdNameInvalid', { name: sanitiseSdName(saveName) });
       return;
     }
     swapDeviceBtn.disabled = true;
@@ -1399,13 +1401,41 @@
     return t(SD_STATUS_KEYS[status] || 'sdFail');
   }
 
-  // Mirrors sanitiseRomName() on the device: it accepts a bare filename ending
-  // in .nes, with no path separators. Checked here so a bad name is caught
-  // before the transfer rather than after the whole image has gone over.
+  // Port of sdRomSanitizeName() in m5stack/src/sd_rom.cpp: basename only, every
+  // byte outside [A-Za-z0-9._-] folded to '_', and a lower-case .nes forced on.
+  //
+  // Duplicated rather than asked of the device, because the point is to answer
+  // before the transfer: the firmware rejects a name it had to change, and it
+  // can only say so after the whole image has already gone over the wire.
+  // Keeping the rule in one place would mean a round trip per keystroke.
+  function sanitiseSdName(name) {
+    // Both separators, as on the device: a Windows browser hands us backslashes
+    // in File.name and only the last path element may reach the card.
+    const base = (name || '').replace(/^.*[\\/]/, '');
+    // One '_' per *byte*, not per character: the device walks UTF-8 and folds
+    // each byte it does not recognise, so a 3-byte kana becomes three
+    // underscores there. Folding per character instead would suggest a name the
+    // device would answer BadName to in turn.
+    const body = [...base]
+      .map((ch) => (/[A-Za-z0-9._-]/.test(ch) ? ch : '_'.repeat(new TextEncoder().encode(ch).length)))
+      .join('');
+    // '.' and '..' pass the character filter but mean something to the
+    // filesystem, so the device replaces them wholesale — and so must this, or
+    // the round-trip below would call them valid.
+    const dotEntry = body === '' || body === '.' || body === '..';
+    if (dotEntry) return 'rom.nes';
+    // Case-normalised rather than accepted: a FAT volume treats GAME.NES and
+    // game.nes as one file, so the device stores only the lower-case spelling.
+    if (/\.nes$/i.test(body)) return body.slice(0, -4) + '.nes';
+    return body + '.nes';
+  }
+
+  // The device rejects any name its sanitiser had to change (BadName) instead of
+  // silently saving under the cleaned spelling, so "valid" here is exactly "the
+  // sanitiser is a no-op" — the same round-trip sdRomNameValid() runs.
   function isValidSdName(name) {
     if (!name) return false;
-    if (name.includes('/') || name.includes('\\')) return false;
-    return /\.nes$/i.test(name);
+    return sanitiseSdName(name) === name;
   }
 
   // Bytes, not characters: the length byte on the wire, SD_NAME_MAX in the relay
@@ -1421,8 +1451,10 @@
   // "nikoichi" cartridge the mapper comes from PRG, so its name is the one that
   // describes what will actually run.
   function defaultSdName() {
-    const base = ((cartPrg && cartPrg.name) || 'game.nes').replace(/^.*[\\/]/, '');
-    return /\.nes$/i.test(base) ? base : base + '.nes';
+    // Sanitised, not merely suffixed: a local file is routinely called
+    // "Super Mario (J).nes", and proposing that name unchanged sent the whole
+    // image over only for the device to answer BadName.
+    return sanitiseSdName((cartPrg && cartPrg.name) || 'game.nes');
   }
 
   function formatBytes(n) {
@@ -1561,7 +1593,7 @@
       return;
     }
     if (!isValidSdName(to)) {
-      sdStatusEl.textContent = t('sdBadName');
+      sdStatusEl.textContent = t('sdNameInvalid', { name: sanitiseSdName(to) });
       return;
     }
     setSdBusy(true);
@@ -1613,7 +1645,9 @@
       return;
     }
     if (wantsSave && !isValidSdName(saveName)) {
-      sdStatusEl.textContent = t('sdBadName');
+      // An empty box has nothing to suggest — unlike the send-cart path there is
+      // no loaded cart to borrow a name from, so it stays the generic refusal.
+      sdStatusEl.textContent = saveName ? t('sdNameInvalid', { name: sanitiseSdName(saveName) }) : t('sdBadName');
       return;
     }
     setSdBusy(true);
