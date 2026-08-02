@@ -24,11 +24,16 @@ static constexpr uint8_t SI12T_REG_CTRL2 = 0x09;
 static constexpr uint8_t SI12T_REG_REF_RST1 = 0x0A;   // 0x0A-0x0F が ch 有効化
 static constexpr uint8_t SI12T_REG_OUTPUT1 = 0x10;   // 3 ゾーンぶんが 2bit ずつ
 
-// 感度設定値。BSP の既定 (SI12T_Type_High, Level_4 = 0xCC) から 2 段階上げて
-// ある: 実機で撫でてもゾーンの反応が渋く「反応が悪い」となったため。High
-// タイプは上位ニブルが 0x8 + レベル、それを 2ch ぶん同じ値で 1 バイトに
-// 詰める仕様なので同じニブルが 2 つ並ぶ。最大は 0xFF (Level_7)。
-static constexpr uint8_t SI12T_SENSITIVITY_VALUE = 0xEE;
+// 感度設定値。BSP が TouchSensor_Class::begin() で使う
+// (SI12T_Type_High, SI12T_Sensitivity_Level_4) の組がこの 0xCC に当たる。
+// High タイプは上位ニブルが 0x8 + レベル、それを 2ch ぶん同じ値で 1 バイトに
+// 詰める仕様なので 0xC が 2 つ並ぶ。
+//
+// 0xEE (Level_6) も試したが、感度過剰で 1 ゾーンが常時無反応になった (実機の
+// 生値ログで確認。オートキャリブレーションに飽和チャネルとして殺される挙動)。
+// 「反応が悪い」への対処は感度ではなく必要距離 (HEAD_TOUCH_TRAVEL_TO_MENU)
+// 側で行うこと。
+static constexpr uint8_t SI12T_SENSITIVITY_VALUE = 0xCC;
 // CTRL1: Auto モード / FTC=01 / 割り込みは Middle+High / レスポンス 4。
 static constexpr uint8_t SI12T_CTRL1_VALUE = 0x22;
 // CTRL2: S/W リセットを一度立ててから通常動作 + スリープ有効に落とす。
@@ -143,18 +148,43 @@ bool headTouchSwiped() {
         g_lastZone = -1;
     }
 
-    // このポーリングで新しく触れられたゾーン (立ち上がりエッジ) を拾う。
+    // このポーリングでの立ち上がり (新しく触れた) と立ち下がり (離れた) を拾う。
     int rose = -1;
     int roseCount = 0;
+    bool fell[ZONE_COUNT] = {};
     for (int i = 0; i < ZONE_COUNT; i++) {
         const bool isRising = zone[i] && !g_prevZone[i];
         if (isRising) {
             rose = i;
             roseCount++;
         }
+        fell[i] = !zone[i] && g_prevZone[i];
         g_prevZone[i] = zone[i];
     }
-    if (roseCount == 0) return false;
+
+    // 「あるゾーンが離れ、その隣がまだ触れられている」のも移動の証拠。指が
+    // 2 ゾーンにまたがったまま滑る自然な撫で (z0 → z0+z1 → z1 → 離す) は
+    // 立ち上がりが 1 回しか出ないため (実機ログで確認)、降りも数えないと
+    // ひと撫でが距離 1 で終わってしまう。単発タップは隣が残らないので 0。
+    for (int f = 0; f < ZONE_COUNT; f++) {
+        if (!fell[f]) continue;
+        const bool leftNeighborHeld = f > 0 && zone[f - 1];
+        const bool rightNeighborHeld = f + 1 < ZONE_COUNT && zone[f + 1];
+        if (leftNeighborHeld || rightNeighborHeld) {
+            g_travel++;
+            g_lastMoveMs = now;
+            Serial.printf("HEAD: travel %d/%d\n", g_travel, HEAD_TOUCH_TRAVEL_TO_MENU);
+        }
+    }
+
+    if (roseCount == 0) {
+        const bool reached = g_travel >= HEAD_TOUCH_TRAVEL_TO_MENU;
+        if (!reached) return false;
+        g_travel = 0;
+        g_lastZone = -1;
+        Serial.println("HEAD: pet -> menu");
+        return true;
+    }
 
     // 複数ゾーンが同時に立つのは、指が境界をまたいで接地した瞬間 (2 ゾーン)
     // か、掌などの面接触 (3 ゾーン)。前者は撫で始めとして正当なので起点だけ
@@ -170,14 +200,15 @@ bool headTouchSwiped() {
     // 隣のゾーンへ移った時だけ距離が伸びる。離れたゾーンへの跳び (一度離して
     // 別の場所に置き直した) は移動ではないので、起点を置き直すだけにする。
     const bool moved = g_lastZone >= 0 && (rose - g_lastZone == 1 || g_lastZone - rose == 1);
-    if (moved) g_travel++;
+    if (moved) {
+        g_travel++;
+        Serial.printf("HEAD: travel %d/%d\n", g_travel, HEAD_TOUCH_TRAVEL_TO_MENU);
+    }
     g_lastZone = rose;
     g_lastMoveMs = now;
-    if (!moved || g_travel < HEAD_TOUCH_TRAVEL_TO_MENU) {
-        if (moved) Serial.printf("HEAD: travel %d/%d\n", g_travel, HEAD_TOUCH_TRAVEL_TO_MENU);
-        return false;
-    }
 
+    // 立ち上がり・降りのどちら由来でも、規定距離に達したここで発火する。
+    if (g_travel < HEAD_TOUCH_TRAVEL_TO_MENU) return false;
     g_travel = 0;
     g_lastZone = -1;
     Serial.println("HEAD: pet -> menu");
