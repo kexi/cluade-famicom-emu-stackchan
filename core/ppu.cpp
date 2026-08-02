@@ -57,6 +57,10 @@ void PPU::reset() {
     oddFrame_ = false;
     frameReady = false;
     frameCount = 0;
+    // False, not true: after reset $2001 is zero, so nothing is drawn until the
+    // game enables rendering. Reporting the first frame as fully rendered would
+    // hand a consumer a claim the frame does not back up.
+    frameFullyRendered_ = false;
 #ifdef NES_EMBEDDED
     invalidateSpriteCandidates();   // OAM survives reset, so a stale list could not
 #endif
@@ -867,6 +871,28 @@ void NES_HOT PPU::step() {
     }
     if (prerender && dot_ == 1) {
         status_ &= ~(0x80 | 0x40 | 0x20);
+    }
+
+    // Frame-level "was the whole visible region drawn" accumulator, sampled once
+    // per line at the line's last dot. The pre-render line arms it for the frame
+    // about to start; each visible line then clears it if rendering was off as
+    // that line finished. By scanline 241 dot 1 — where frameReady is raised, and
+    // where the frontend reads it — lines 0..239 have all been folded in.
+    //
+    // Why the last dot rather than the first: it is the one dot every line is
+    // guaranteed to land on in both builds. stepMany() coalesces idle dots and
+    // floors its skip target at 340 precisely so the scanline wrap below is never
+    // jumped, which makes dot 340 the single reliable per-line hook; a dot-1 hook
+    // would be skipped on the lines stepMany() fast-paths.
+    //
+    // Why sample at the end of the line rather than tracking every $2001 write:
+    // the question is whether renderScanline drew this line, and that is decided
+    // by the rendering state the line's draw actually saw — dot 256 in the batched
+    // path, the 1..256 span in the dot-accurate one. A late-in-hblank write that
+    // only takes effect on the next line must not retroactively mark this one.
+    if (dot_ == 340) {
+        if (prerender) frameFullyRendered_ = true;
+        else if (visible) frameFullyRendered_ &= rendering;
     }
 
     dot_++;

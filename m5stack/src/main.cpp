@@ -1014,25 +1014,41 @@ void loop() {
     // runFrame() below. Independent of PERF_LOG, which is a diagnostic and may be
     // compiled out.
     //
-    // Only frames that actually rendered are averaged, and the guard only applies
-    // while rendering is on. Both halves are the same observation: the race being
-    // guarded is renderScanline overwriting rows the DMA is still reading, and
-    // with $2001 rendering disabled renderScanline paints nothing, so there is no
-    // writer to race and nothing the measurement would describe.
+    // The guard is armed by default and only stood down on positive evidence:
+    // a seeded, representative average that is at or above the threshold. That
+    // asymmetry is deliberate — skipping the join is the unsafe direction, so it
+    // has to be earned, while paying it costs at most one band's wire time.
     //
-    // Why not the previous floor-the-seed approach: it only covered the *first*
-    // sample. A run with rendering off lasts as long as the game leaves it off —
-    // menus, screen transitions, the whole boot sequence — and every frame in it
-    // measures 2-3ms. From the second such frame on, those samples entered the
-    // EWMA unfiltered, and at alpha 0.05 a single one pulls a 16.45ms average
-    // down by ~0.7ms; a few dozen drag it clean through the threshold. The guard
-    // then armed on the way out, and each draw frame paid a joinBand stall for a
-    // race that could not happen. Filtering the samples fixes it at the source
-    // rather than papering over the first one.
+    // Why not gate on renderingOn() as an earlier revision did: with rendering
+    // off, renderScanline paints nothing, but ppu.cpp still writes the backdrop
+    // colour into all 256 pixels of every visible line whenever renderThisFrame
+    // is set. A rendering-off draw frame therefore *does* repaint the whole
+    // framebuffer — and does it in 2-3ms instead of 16, which is the fastest any
+    // writer ever runs and so the closest anything gets to overtaking the DMA.
+    // Gating the guard on rendering removed the protection from exactly the
+    // frames that need it most. The instantaneous read was doubly wrong: $2001
+    // changes mid-frame, so one boundary sample cannot characterise a frame at
+    // all.
+    //
+    // The sample filter keeps its purpose, but asks the frame-level question via
+    // frameFullyRendered() instead: only a frame whose visible region was drawn
+    // in full is a representative "how long does a repaint take" measurement.
+    // Why filter at all: a rendering-off run lasts as long as the game leaves it
+    // off — menus, screen transitions, the whole boot sequence — and every frame
+    // in it measures 2-3ms. Unfiltered, at alpha 0.05 a single one pulls a
+    // 16.45ms average down by ~0.7ms and a few dozen drag it through the
+    // threshold, so the average would stop describing the drawing frames it is
+    // supposed to bound.
+    //
+    // Unseeded counts as armed. Until a representative sample exists there is no
+    // evidence either way, and the honest price of that is a joinBand stall on
+    // each draw frame during boot: bounded (one band's wire time per picture),
+    // paid only until the first fully-rendered draw frame lands, and cheap next
+    // to a torn picture.
     static float emuDrawMs = 0.0f;
     static bool emuDrawSeeded = false;
-    const bool rendering = g_nes.ppu.renderingOn();
-    const bool repaintRacesBand = drawThisFrame && rendering && emuDrawSeeded && emuDrawMs < DISPLAY_REPAINT_GUARD_MS;
+    const bool guardStoodDown = emuDrawSeeded && emuDrawMs >= DISPLAY_REPAINT_GUARD_MS;
+    const bool repaintRacesBand = drawThisFrame && !guardStoodDown;
     if (repaintRacesBand) joinBand();
     const int64_t flushEndUs = esp_timer_get_time();
     g_nes.runFrame();
@@ -1042,17 +1058,18 @@ void loop() {
     // repaint, and a skipped frame is much cheaper, so mixing the two in would
     // understate the writer's pace and arm the guard needlessly.
     //
-    // And only frames that rendered. The EWMA is meant to answer "how long does a
-    // repaint take", so a frame during which renderScanline painted nothing is
-    // not a slow or fast instance of that — it is not an instance of it at all.
-    // Rendering is re-read here rather than reused from before runFrame(): the
-    // frame just measured is the one that matters, and the game may have written
-    // $2001 during it.
-    const bool renderedThisFrame = g_nes.ppu.renderingOn();
-    if (drawThisFrame && renderedThisFrame) {
+    // And only frames whose visible region was drawn end to end. The EWMA is meant
+    // to answer "how long does a full repaint take", so a frame that spent some or
+    // all of its lines filling backdrop instead of drawing is not a slow or fast
+    // instance of that — it is not an instance of it at all.
+    //
+    // Read after runFrame() because the flag describes the frame that just ran,
+    // and it stays stable through vblank once scanline 241 has been reached.
+    const bool fullyRendered = g_nes.ppu.frameFullyRendered();
+    if (drawThisFrame && fullyRendered) {
         const float drawMs = (float)(emuEndUs - flushEndUs) / 1000.0f;
         // The first sample is taken whole: there is no prior average to blend it
-        // into, and starting at the real value is what keeps the guard live from
+        // into, and starting at the real value is what stands the guard down from
         // the second picture onward instead of after a decay. No floor is needed
         // now that samples are filtered — the boot frames that made the raw value
         // untrustworthy are exactly the ones that no longer reach here.
