@@ -62,6 +62,13 @@ report_mismatch() {
 }
 
 if [ "${1:-}" = "--check" ]; then
+    # --check takes no operand. Ignoring a trailing word silently would let a
+    # typo'd flag ("--check --fetch") run as a plain --check and report success
+    # for something the caller did not ask for.
+    if [ $# -gt 1 ]; then
+        echo "fetch_rom: unknown argument '$2' (--check takes no arguments)" >&2
+        exit 2
+    fi
     test -f "$out" || {
         echo "fetch_rom: $out does not exist; run ./m5stack/scripts/fetch_rom.sh" >&2
         exit 1

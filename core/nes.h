@@ -380,6 +380,26 @@ public:
     // a question that is meaningful for it too. A const inline read of an
     // existing member costs that build nothing.
     bool renderingOn() const { return renderingEnabled(); }
+    // Whether rendering stayed enabled across the whole visible region of the
+    // frame that just ended — i.e. whether every one of lines 0..239 was drawn by
+    // renderScanline rather than filled with the backdrop colour.
+    //
+    // Why not renderingOn() for that question: $2001 is a register the game
+    // rewrites mid-frame (status bars, screen-off VRAM updates), so an
+    // instantaneous read at the frame boundary describes one dot, not the frame.
+    // A frontend timing "how long does a repaint take" needs to know the sample
+    // it just took is representative of a full render, and only a flag
+    // accumulated over the frame can answer that.
+    //
+    // Armed at the end of the pre-render line, then ANDed once per visible line
+    // with whether rendering stayed on across that line's entire draw span (dots
+    // 1..256, where both builds write the framebuffer). A line whose rendering was
+    // toggled part-way through the span counts as not fully rendered — the
+    // conservative side, since dropping a sample only costs a join. It is final by
+    // the time vblank starts and stays stable for the whole vblank the frontend
+    // reads it in. Pure observation: nothing in the core branches on it, so both
+    // builds produce byte-identical framebuffers and state with or without it.
+    bool frameFullyRendered() const { return frameFullyRendered_; }
     // level of the PPU→CPU NMI output (true = asserted)
     bool nmiLine() const { return (ctrl_ & 0x80) && (status_ & 0x80); }
 
@@ -400,6 +420,14 @@ private:
 
     int scanline_ = 261, dot_ = 0;
     bool oddFrame_ = false;
+    // Accumulator behind frameFullyRendered(); see the accessor for what it means.
+    // Starts false so the very first frame is only reported as fully rendered once
+    // a pre-render line has actually armed it.
+    bool frameFullyRendered_ = false;
+    // Per-line half of the same accumulator: whether rendering stayed on across
+    // the current line's whole draw span (dots 1..256). Folded into
+    // frameFullyRendered_ at the end of each visible line and re-armed there.
+    bool lineFullyRendered_ = true;
 
 #ifdef NES_EMBEDDED
     // Cached mapper->chrWindow(); refreshed whenever the cart may have switched

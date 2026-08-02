@@ -515,6 +515,31 @@ static void applyPinChanges() {
     Serial.printf("PINS: %016llx\n", (unsigned long long)wanted);
 }
 
+// Smoothed emulation time of fully-rendered draw frames, and whether it holds a
+// real sample yet. Read by the repaint guard in loop() — see the long comment
+// there for what it stands for and why it is filtered.
+//
+// At file scope rather than function-local statics inside loop() so reset and ROM
+// swap can invalidate it. The evidence describes one cart running one scene; a
+// different cart, or the same one restarted, is a different writer whose pace has
+// not been measured yet.
+static float g_emuDrawMs = 0.0f;
+static bool g_emuDrawSeeded = false;
+
+// Forget the measured emulation pace. Called whenever the thing being measured is
+// replaced, so the guard falls back to its armed default until a fresh
+// fully-rendered draw frame re-seeds it.
+//
+// Why not keep the old average across a reset: it was gathered from a game that
+// had booted into steady state, and the frames right after a reset are the boot
+// sequence again — fast, mostly rendering-off, and exactly the ones the guard
+// exists to protect. Carrying the old evidence forward would stand the guard down
+// across that window on the strength of measurements that no longer apply.
+static void invalidateEmuDrawPace() {
+    g_emuDrawMs = 0.0f;
+    g_emuDrawSeeded = false;
+}
+
 // The RESET button, as the browser's connector UI presses it. Runs after the pin
 // state is applied so a "reseat and reset" arrives in the same order it happens
 // on a real console: contacts restored first, then the reset vector fetched.
@@ -523,6 +548,7 @@ static void applyResetRequest() {
     const bool requested = g_resetRequested.exchange(false, std::memory_order_relaxed);
     if (!requested) return;
     g_nes.reset();
+    invalidateEmuDrawPace();
     Serial.println("RESET: console reset");
 }
 
@@ -587,6 +613,13 @@ static void applyRomRequest() {
         }
         if (!restored) haltWithError("ROM load failed");
     }
+
+    // Unconditionally, on every path that got this far. A successful load is
+    // obviously a new writer; a failed one either left the old cart running (swap
+    // path) or fell back to the embedded image, and in the failure case the frames
+    // around it were spent allocating rather than emulating. None of those are
+    // described by the average built before this point.
+    invalidateEmuDrawPace();
 
     if (ok) Serial.printf("ROM: applied %u bytes%s\n", (unsigned)g_romSize, wantSwap ? " (no reset)" : "");
     else Serial.printf("ROM: failed %u bytes\n", (unsigned)g_romSize);
@@ -1014,25 +1047,86 @@ void loop() {
     // runFrame() below. Independent of PERF_LOG, which is a diagnostic and may be
     // compiled out.
     //
-    // Only frames that actually rendered are averaged, and the guard only applies
-    // while rendering is on. Both halves are the same observation: the race being
-    // guarded is renderScanline overwriting rows the DMA is still reading, and
-    // with $2001 rendering disabled renderScanline paints nothing, so there is no
-    // writer to race and nothing the measurement would describe.
+    // The guard is armed by default and only stood down on positive evidence.
+    // That asymmetry is deliberate — skipping the join is the unsafe direction, so
+    // it has to be earned, while paying it costs at most one band's wire time.
     //
-    // Why not the previous floor-the-seed approach: it only covered the *first*
-    // sample. A run with rendering off lasts as long as the game leaves it off —
-    // menus, screen transitions, the whole boot sequence — and every frame in it
-    // measures 2-3ms. From the second such frame on, those samples entered the
-    // EWMA unfiltered, and at alpha 0.05 a single one pulls a 16.45ms average
-    // down by ~0.7ms; a few dozen drag it clean through the threshold. The guard
-    // then armed on the way out, and each draw frame paid a joinBand stall for a
-    // race that could not happen. Filtering the samples fixes it at the source
-    // rather than papering over the first one.
-    static float emuDrawMs = 0.0f;
-    static bool emuDrawSeeded = false;
-    const bool rendering = g_nes.ppu.renderingOn();
-    const bool repaintRacesBand = drawThisFrame && rendering && emuDrawSeeded && emuDrawMs < DISPLAY_REPAINT_GUARD_MS;
+    // Standing it down takes three things, because the average and the frame about
+    // to run have to be talking about the same writer:
+    //
+    //   1. a seeded average at or above the threshold,
+    //   2. the previous frame having been fully rendered, and
+    //   3. rendering being on right now, as this frame starts.
+    //
+    // Condition 2 is what keeps the evidence in its domain. The average is built
+    // only from fully-rendered frames (see the filter below), so on its own it
+    // says nothing about a rendering-off frame — and those are the *fast* ones,
+    // 2-3ms against 16. Without it, a game that reaches steady state and then
+    // switches rendering off would carry a 16.45ms average into the first
+    // rendering-off draw frame and skip the join there: evidence from the slowest
+    // writer licensing the fastest one. The previous frame's flag is used as the
+    // predictor for the next frame's writer profile — not exact, but rendering
+    // state persists across frame boundaries far more often than it flips, and
+    // being wrong costs one join rather than a torn picture.
+    //
+    // Condition 3 closes the one transition condition 2 cannot see. A game that
+    // disables $2001 during vblank leaves frameFullyRendered() true — correctly,
+    // the visible region it describes *was* drawn in full — so on the very next
+    // draw frame conditions 1 and 2 both hold while the writer has already become
+    // the fast backdrop fill. Reading the register at the top of the frame catches
+    // exactly that case.
+    //
+    // Why an instantaneous read is legitimate here when an earlier revision was
+    // rightly rejected for using one: direction. That revision read renderingOn()
+    // and *skipped* the guard when it was false — off meant "no writer to race",
+    // which was wrong twice over (ppu.cpp still fills the backdrop across all 256
+    // pixels of every visible line whenever renderThisFrame is set, and does it
+    // faster than anything else). Here the same read only ever *arms* the guard:
+    // off means join. A one-dot sample still cannot characterise a whole frame,
+    // but it does not have to — it is a conservative trigger, and the only way it
+    // can be wrong is by joining when it need not have.
+    //
+    // What that leaves uncovered: rendering on at the frame's start and switched
+    // off part-way through the visible region. The guard stands down and the frame
+    // becomes a partial backdrop fill, so it runs faster than a full repaint. It
+    // is still safe on static margin — the writes are paced by emulation, not by
+    // the fill, so even that frame takes at least emuS (~12.6ms) and reaches the
+    // first row behind the in-flight band (row 180) at ~8.6ms, against ~6.7ms of
+    // wire time. Accepted rather than chased: covering it would need a mid-frame
+    // hook on $2001 writes, and the margin is real without one.
+    //
+    // The sample filter asks the frame-level question via frameFullyRendered():
+    // only a frame whose visible region was drawn in full is a representative
+    // "how long does a repaint take" measurement. Why filter at all: a
+    // rendering-off run lasts as long as the game leaves it off — menus, screen
+    // transitions, the whole boot sequence — and every frame in it measures 2-3ms.
+    // Unfiltered, at alpha 0.05 a single one pulls a 16.45ms average down by
+    // ~0.7ms and a few dozen drag it through the threshold, so the average would
+    // stop describing the drawing frames it is supposed to bound.
+    //
+    // Unseeded counts as armed. Until a representative sample exists there is no
+    // evidence either way, and the honest price of that is a joinBand stall on
+    // each draw frame during boot: bounded (one band's wire time per picture),
+    // paid only until the first fully-rendered draw frame lands, and cheap next
+    // to a torn picture. reset and ROM swap clear the seed for the same reason.
+    //
+    // Net behaviour:
+    //
+    //   boot / unseeded              join   (no evidence yet)
+    //   after reset or ROM swap      join   (evidence discarded)
+    //   on->off, first draw frame    join   (condition 3: caught at the register)
+    //   rendering-off draw frame     join   (conditions 2 and 3 both fail)
+    //   off->on, first draw frame    join   (condition 2: prev frame not full)
+    //   steady, emulation slow       skip   (all three conditions met)
+    //   steady, emulation fast       join   (writer may overtake the DMA)
+    //   skipped (non-draw) frame     n/a    (framebuffer untouched)
+    static bool prevFrameFullyRendered = false;
+    // Sampled before runFrame() so it describes the frame about to run, not the
+    // one after it.
+    const bool renderingAtFrameStart = g_nes.ppu.renderingOn();
+    const bool paceApplies = g_emuDrawSeeded && prevFrameFullyRendered && renderingAtFrameStart;
+    const bool guardStoodDown = paceApplies && g_emuDrawMs >= DISPLAY_REPAINT_GUARD_MS;
+    const bool repaintRacesBand = drawThisFrame && !guardStoodDown;
     if (repaintRacesBand) joinBand();
     const int64_t flushEndUs = esp_timer_get_time();
     g_nes.runFrame();
@@ -1042,23 +1136,29 @@ void loop() {
     // repaint, and a skipped frame is much cheaper, so mixing the two in would
     // understate the writer's pace and arm the guard needlessly.
     //
-    // And only frames that rendered. The EWMA is meant to answer "how long does a
-    // repaint take", so a frame during which renderScanline painted nothing is
-    // not a slow or fast instance of that — it is not an instance of it at all.
-    // Rendering is re-read here rather than reused from before runFrame(): the
-    // frame just measured is the one that matters, and the game may have written
-    // $2001 during it.
-    const bool renderedThisFrame = g_nes.ppu.renderingOn();
-    if (drawThisFrame && renderedThisFrame) {
+    // And only frames whose visible region was drawn end to end. The EWMA is meant
+    // to answer "how long does a full repaint take", so a frame that spent some or
+    // all of its lines filling backdrop instead of drawing is not a slow or fast
+    // instance of that — it is not an instance of it at all.
+    //
+    // Read after runFrame() because the flag describes the frame that just ran,
+    // and it stays stable through vblank once scanline 241 has been reached.
+    const bool fullyRendered = g_nes.ppu.frameFullyRendered();
+    if (drawThisFrame && fullyRendered) {
         const float drawMs = (float)(emuEndUs - flushEndUs) / 1000.0f;
         // The first sample is taken whole: there is no prior average to blend it
-        // into, and starting at the real value is what keeps the guard live from
+        // into, and starting at the real value is what stands the guard down from
         // the second picture onward instead of after a decay. No floor is needed
         // now that samples are filtered — the boot frames that made the raw value
         // untrustworthy are exactly the ones that no longer reach here.
-        emuDrawMs = emuDrawSeeded ? emuDrawMs + DISPLAY_EMU_EWMA_ALPHA * (drawMs - emuDrawMs) : drawMs;
-        emuDrawSeeded = true;
+        g_emuDrawMs = g_emuDrawSeeded ? g_emuDrawMs + DISPLAY_EMU_EWMA_ALPHA * (drawMs - g_emuDrawMs) : drawMs;
+        g_emuDrawSeeded = true;
     }
+    // Carried to the next iteration as the predictor for that frame's writer.
+    // Every frame updates it, draw or not: a skipped frame still ran the emulator
+    // and still tells us what the PPU was doing, and the next draw frame is better
+    // served by the most recent answer than by one from several frames back.
+    prevFrameFullyRendered = fullyRendered;
 
     // Answered here, not with the other applyXxx handlers: the scope rows are
     // decimated from apu.sampleCount, which describes the frame that just ran and
