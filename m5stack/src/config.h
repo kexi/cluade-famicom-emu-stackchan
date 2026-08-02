@@ -514,7 +514,7 @@ constexpr int DUAL_BTN_PIN_RED = 17;   // red button   -> NES A
 
 // -------------------------------------------------------------- head touch
 // M5Stack 公式 StackChan の頭頂部タッチセンサー (Si12T)。3 ゾーンを前後に
-// なぞるとゲーム中でも ROM 選択メニューに戻る。
+// 2 回なぞる (なでなで) とゲーム中でも ROM 選択メニューに戻る。
 //
 // Grove と違ってポーリングは core 1 の loop から直接行う: 読むのは 1 バイトの
 // レジスタ 1 つだけで、タスクと atomic を 1 組増やすほどの仕事ではない。
@@ -524,6 +524,11 @@ constexpr int DUAL_BTN_PIN_RED = 17;   // red button   -> NES A
 // この周期で量子化されるので、周期が下限を超えると本物のスワイプまで
 // 「速すぎる」側に丸められて取りこぼす。
 constexpr uint32_t HEAD_TOUCH_POLL_MS = 33;
+// メニューを開くのに要求する「なぞり」の回数と、1 回目からの猶予。1 回で開くと
+// 抱え上げたときなどの偶発的な一撫でで即ゲームが中断してしまうので、なでなで
+// (往復) を要求する。2 回目がこの窓に収まらなければ 1 回目からやり直し。
+constexpr int HEAD_TOUCH_STROKES_TO_MENU = 2;
+constexpr uint32_t HEAD_TOUCH_STROKE_PAIR_MS = 2000;
 
 // NES pad bit layout (matches Pad::setButtons and the UDP protocol).
 constexpr uint8_t NES_BTN_A = 0x01;

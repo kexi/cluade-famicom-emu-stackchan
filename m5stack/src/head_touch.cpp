@@ -56,6 +56,10 @@ static uint32_t g_touchStartMs[ZONE_COUNT] = {};
 // 同じ役割で、撫でた指がまだ乗っている間の再発火を止める。
 static bool g_inGesture = false;
 static uint32_t g_lastPollMs = 0;
+// なぞり回数のカウント。HEAD_TOUCH_STROKES_TO_MENU 回目で発火し、前回のなぞり
+// から HEAD_TOUCH_STROKE_PAIR_MS 空いたら 1 回目から数え直す。
+static int g_strokeCount = 0;
+static uint32_t g_lastStrokeMs = 0;
 
 static bool writeReg(uint8_t reg, uint8_t value) {
     return M5.In_I2C.writeRegister8(SI12T_ADDR, reg, value, SI12T_I2C_FREQ);
@@ -183,6 +187,19 @@ bool headTouchSwiped() {
     const bool swiped = detectSwipe();
     if (!swiped) return false;
     g_inGesture = true;
-    Serial.println("HEAD: swipe -> menu");
+
+    // 1 回のスワイプでは開かない: 窓の内に規定回数なぞられて初めて発火する。
+    // 窓を過ぎた古いなぞりは数え直し — 「2 回目が遅すぎた」は誤爆ではなく
+    // 単発のなぞりが 2 つあっただけ、と解釈する。
+    const bool expired = g_strokeCount > 0 && now - g_lastStrokeMs > HEAD_TOUCH_STROKE_PAIR_MS;
+    if (expired) g_strokeCount = 0;
+    g_strokeCount++;
+    g_lastStrokeMs = now;
+    if (g_strokeCount < HEAD_TOUCH_STROKES_TO_MENU) {
+        Serial.printf("HEAD: stroke %d/%d\n", g_strokeCount, HEAD_TOUCH_STROKES_TO_MENU);
+        return false;
+    }
+    g_strokeCount = 0;
+    Serial.println("HEAD: stroke -> menu");
     return true;
 }
