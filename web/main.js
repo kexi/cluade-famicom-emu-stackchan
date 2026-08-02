@@ -1536,12 +1536,111 @@
   // Declared here rather than beside the rattle handlers because the grounding
   // test below reads it, and that runs from the very first setExpKey().
   let expRattling = false;
+  // --- the point features: the only places the key can actually touch metal ---
+  //
+  // Why the blade outline is NOT the contact test. On the real connector the
+  // mating face is a flat insulating tongue, and every socket contact is
+  // recessed at the bottom of a funnelled hole in it. A flat edge laid across
+  // that face therefore touches PLASTIC: it bridges the holes without reaching
+  // anything conductive. Metal is only met where some part of the key drops
+  // INTO a funnel, and on a key the parts that can drop in are the sharp ones —
+  // the two corners of the tip, and the peaks of the warding cuts along the
+  // bitted edge. Everything else is a flat land that rides on the insulator.
+  //
+  // So contact is a point-in-circle test on a handful of features, not an
+  // overlap test on the whole tip. The old rectangle-vs-ring test let a flat
+  // blade short every hole it spanned, which is what made five-pin shorts
+  // trivially easy; a real key has to be worked until a tooth happens to fall
+  // into the hole you want.
+  //
+  // Features are defined in the blade's own frame, in the same units as
+  // EXP_BLADE_HALF / EXP_BLADE_HALF_H, then carried through the existing
+  // (x, y, theta) transform. `along` runs the length of the cross-section,
+  // `across` its thickness; the bitted edge is the +across face.
+  //
+  // Tooth positions are deliberately UNEVEN. A real bitting is cut to a code,
+  // not a comb, and even spacing made the model degenerate: every tooth lined
+  // up with the pin pitch at once, so the flat-blade behaviour came straight
+  // back at particular angles. These fractions are of the half-length, ordered
+  // from the tip's left corner towards its right.
+  const EXP_TOOTH_ALONG_FRAC = [-0.58, -0.14, 0.31, 0.72];
+  // How far a tooth peak stands proud of the blade's flat land. The peaks are
+  // the contact points, so this is what decides whether a tooth can reach into
+  // a funnel while the land beside it rides the surface.
+  const EXP_TOOTH_RISE = EXP_BLADE_HALF_H * 0.55;
+  // The tip corners: the two sharpest points on the key, and the ones that do
+  // most of the work in practice. They sit at the ends of the cross-section, on
+  // the bitted face, matching the drawn chamfer's outer vertices.
+  //
+  // Each entry is {along, across} in blade-local px. This one table is the hit
+  // test AND the source of the drawn silhouette — expBladeTeethPath() below
+  // builds the on-screen polygon from exactly these numbers, so a peak that
+  // looks like it has dropped into a hole is a peak the model agrees has.
+  const EXP_BLADE_FEATURES = [
+    { along: -EXP_BLADE_HALF, across: EXP_BLADE_HALF_H, kind: 'corner' },
+    { along: EXP_BLADE_HALF, across: EXP_BLADE_HALF_H, kind: 'corner' },
+    ...EXP_TOOTH_ALONG_FRAC.map((f) => ({
+      along: f * EXP_BLADE_HALF,
+      across: EXP_BLADE_HALF_H + EXP_TOOTH_RISE,
+      kind: 'tooth',
+    })),
+  ];
+  // A feature's position in port coordinates, for the current (x, y, angle).
+  function expFeaturePos(f) {
+    const rad = (expKeyAngle * Math.PI) / 180;
+    const ux = Math.cos(rad);
+    const uy = Math.sin(rad);
+    return {
+      x: expKeyX + f.along * ux - f.across * uy,
+      y: expKeyY + f.along * uy + f.across * ux,
+    };
+  }
   // Lay the drawn bar out from the hit-test constants, so the rectangle on
   // screen is the rectangle being intersected.
   expBladeMark.style.setProperty('--blade-w', EXP_BLADE_HALF * 2 + 'px');
   expBladeMark.style.setProperty('--blade-h', EXP_BLADE_HALF_H * 2 + 'px');
   expBladeMark.style.setProperty('--blade-x', -EXP_BLADE_HALF + 'px');
   expBladeMark.style.setProperty('--blade-y', -EXP_BLADE_HALF_H + 'px');
+  // The drawn silhouette, generated from EXP_BLADE_FEATURES so the teeth on
+  // screen ARE the teeth being tested. Built as a clip-path polygon in the
+  // element's own box, whose origin is the blade's top-left corner: local
+  // (along, across) maps to (along + HALF, across + HALF_H + RISE) once the box
+  // has been grown by RISE to make room for the peaks.
+  function expBladeTeethPath() {
+    const w = EXP_BLADE_HALF * 2;
+    const h = EXP_BLADE_HALF_H * 2 + EXP_TOOTH_RISE;
+    const toBox = (along, across) => [along + EXP_BLADE_HALF, across + EXP_BLADE_HALF_H];
+    const pts = [];
+    // top (unbitted) edge, left to right — a plain flat back
+    pts.push(toBox(-EXP_BLADE_HALF, -EXP_BLADE_HALF_H));
+    pts.push(toBox(EXP_BLADE_HALF, -EXP_BLADE_HALF_H));
+    // down the right end to the bitted face
+    pts.push(toBox(EXP_BLADE_HALF, EXP_BLADE_HALF_H));
+    // back along the bitted edge right-to-left, rising to each tooth peak and
+    // dropping to the land between them
+    const teeth = EXP_BLADE_FEATURES.filter((f) => f.kind === 'tooth')
+      .slice()
+      .sort((a, b) => b.along - a.along);
+    const halfBase = EXP_BLADE_HALF * 0.1; // half-width of a tooth at its base
+    for (const t of teeth) {
+      pts.push(toBox(t.along + halfBase, EXP_BLADE_HALF_H));
+      pts.push(toBox(t.along, t.across)); // the peak = the contact point
+      pts.push(toBox(t.along - halfBase, EXP_BLADE_HALF_H));
+    }
+    pts.push(toBox(-EXP_BLADE_HALF, EXP_BLADE_HALF_H));
+    const poly = pts.map(([x, y]) => `${x.toFixed(2)}px ${y.toFixed(2)}px`).join(', ');
+    return { poly: `polygon(${poly})`, w, h };
+  }
+  {
+    const { poly, w, h } = expBladeTeethPath();
+    expBladeMark.style.setProperty('--blade-poly', poly);
+    // The drawn box has to be tall enough to contain the peaks; the extra
+    // height is all on the bitted side, so the box's top stays put.
+    expBladeMark.style.setProperty('--blade-draw-w', w + 'px');
+    expBladeMark.style.setProperty('--blade-draw-h', h + 'px');
+    expBladeMark.style.setProperty('--blade-draw-x', -EXP_BLADE_HALF + 'px');
+    expBladeMark.style.setProperty('--blade-draw-y', -EXP_BLADE_HALF_H + 'px');
+  }
   // Decoration that makes the tip read as a KEY rather than a bar lying on the
   // port: the bow seen end-on behind it, the warding grooves across its face,
   // and a crosshair marking the point you drag. All three are sized off the
@@ -1556,29 +1655,18 @@
     d.id = id;
     expBladeMark.appendChild(d);
   }
-  // Distance from a point to the blade rectangle: rotate the point into the
-  // bar's own frame, where the rectangle is axis-aligned, then take the usual
-  // clamped box distance. Zero means the point is inside the bar.
-  function expBladeDistance(px, py) {
-    const rad = (expKeyAngle * Math.PI) / 180;
-    const ux = Math.cos(rad); // unit vector along the blade cross-section
-    const uy = Math.sin(rad);
-    const dx = px - expKeyX;
-    const dy = py - expKeyY;
-    const along = dx * ux + dy * uy; // coordinate along the bar
-    const across = -dx * uy + dy * ux; // coordinate across its thickness
-    const outAlong = Math.max(0, Math.abs(along) - EXP_BLADE_HALF);
-    const outAcross = Math.max(0, Math.abs(across) - EXP_BLADE_HALF_H);
-    return Math.hypot(outAlong, outAcross);
-  }
+  // Which pins the key is actually shorting: a pin is contacted when one of the
+  // blade's point features has dropped inside that hole's funnel. Point-in-
+  // circle, not rectangle-vs-circle — see EXP_BLADE_FEATURES for why the blade
+  // outline is the wrong test.
   function expBridgedPins() {
     if (!expInserted) return []; // out of the socket: nothing can be bridged
+    const feats = EXP_BLADE_FEATURES.map(expFeaturePos);
     const hit = [];
     for (let pin = 1; pin <= 15; pin++) {
       const p = expPinPos(pin);
-      // rectangle-vs-circle: they meet when the box distance is within the radius
-      const touching = expBladeDistance(p.x, p.y) <= EXP_HOLE_RADIUS;
-      if (touching) hit.push(pin);
+      const inFunnel = feats.some((f) => Math.hypot(f.x - p.x, f.y - p.y) <= EXP_HOLE_RADIUS);
+      if (inFunnel) hit.push(pin);
     }
     return hit;
   }

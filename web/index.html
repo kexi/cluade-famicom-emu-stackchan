@@ -453,7 +453,7 @@
     width: var(--exp-w);
     height: 192px;  /* 48 * 4 */
     flex-shrink: 0;
-    cursor: move;        /* drag in both axes = where the key goes in */
+    cursor: grab;        /* drag in both axes = where the key goes in */
     touch-action: none;
     /* The artwork is transparent outside the console face; this stands in for
        the rest of the machine so the port does not float on the panel. */
@@ -532,7 +532,10 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    cursor: help;
+    /* The pins still carry a title tooltip, but the cursor stays default: a "?"
+       reads as "this does something" on a face where the key really is
+       draggable, and the two must not be confused. */
+    cursor: default;
     /* above the blade bar: a lit pin under the blade still has to be visible */
     z-index: 4;
   }
@@ -594,16 +597,18 @@
   /* Rattling is grounded by definition, but it is also the loudest state in the
      panel, so it gets full strength regardless of the frame's exact geometry. */
   #exp-blade-mark.rattling { --blade-op: 1; }
-  /* The blade bar: symmetric about the insertion point (= the rotation axis).
-     Its box comes from main.js so that the drawn rectangle and the one the hit
-     test intersects are the same rectangle. */
+  /* The blade, symmetric about the insertion point (= the rotation axis).
+     Both the box and the silhouette come from main.js: --blade-poly is
+     generated from EXP_BLADE_FEATURES, so the teeth drawn here are exactly the
+     points the hit test uses. A peak that looks like it has dropped into a hole
+     is a peak the model agrees has dropped in. */
   #exp-blade-mark::before {
     content: '';
     position: absolute;
-    left: var(--blade-x);
-    top: var(--blade-y);
-    width: var(--blade-w);
-    height: var(--blade-h);
+    left: var(--blade-draw-x);
+    top: var(--blade-draw-y);
+    width: var(--blade-draw-w);
+    height: var(--blade-draw-h);
     /* Translucent because at true scale the tip is nearly as deep as the gap
        between the rows: opaque, it hid the very pins it was bridging, which is
        the one thing this view has to show.
@@ -614,15 +619,9 @@
       rgba(255, 254, 255, 0.55) 0 50%,
       rgba(184, 184, 184, 0.55) 50% 100%
     );
-    /* Ends chamfered to read as a ground key tip. The chamfer only ever removes
-       area from the rectangle the hit test uses, so the drawing never claims
-       contact the geometry does not have. */
-    clip-path: polygon(
-      0 30%, 7px 0, calc(100% - 7px) 0, 100% 30%,
-      100% 70%, calc(100% - 7px) 100%, 7px 100%, 0 70%
-    );
+    clip-path: var(--blade-poly);
     /* outlined with a shadow rather than a border so the edge follows the
-       chamfered silhouette instead of the untrimmed box */
+       toothed silhouette instead of the untrimmed box */
     filter: drop-shadow(0 0 1px #000) drop-shadow(0 0 1px #000);
   }
   /* Rattling flashes the blade between two palette entries rather than blooming
@@ -685,19 +684,17 @@
      tip box so they never extend past the blade. */
   #exp-blade-grooves {
     position: absolute;
-    left: var(--blade-x);
-    top: var(--blade-y);
-    width: var(--blade-w);
-    height: var(--blade-h);
+    left: var(--blade-draw-x);
+    top: var(--blade-draw-y);
+    width: var(--blade-draw-w);
+    height: var(--blade-draw-h);
     background: repeating-linear-gradient(
       90deg,
       rgba(0, 0, 0, 0.55) 0 2px,
       rgba(0, 0, 0, 0) 2px 8px
     );
-    clip-path: polygon(
-      0 30%, 7px 0, calc(100% - 7px) 0, 100% 30%,
-      100% 70%, calc(100% - 7px) 100%, 7px 100%, 0 70%
-    );
+    /* same generated silhouette as the blade, so the shading stops at the teeth */
+    clip-path: var(--blade-poly);
     pointer-events: none;
     z-index: 1;
   }
@@ -1663,10 +1660,10 @@ PRGとCHRを別のカセットから組み合わせた「ニコイチカセッ�
   </div>
   <button id="check-close">閉じる</button>
 </div>
-<script>window.NES_VER='1785660986';</script>
-<script src="i18n.js?v=1785660986"></script>
-<script src="smb-ram.js?v=1785660986"></script>
-<script src="nes.js?v=1785660986"></script>
-<script src="main.js?v=1785660986"></script>
+<script>window.NES_VER='1785668746';</script>
+<script src="i18n.js?v=1785668746"></script>
+<script src="smb-ram.js?v=1785668746"></script>
+<script src="nes.js?v=1785668746"></script>
+<script src="main.js?v=1785668746"></script>
 </body>
 </html>
