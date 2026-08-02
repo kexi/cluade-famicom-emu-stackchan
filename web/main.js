@@ -1445,18 +1445,27 @@
   // Sizes here are a functional requirement, not decoration: which pins a key
   // can bridge at once is decided entirely by how big the key is relative to
   // the connector, so getting the ratios wrong emulates a machine that does not
-  // exist. Connector figures are quoted from the Amphenol M24308 catalogue
-  // (D-Sub-01 Rev.10, p.13 PCB layout / p.15 receptacle table), 15 position,
-  // shell size 2: B = 24.54-24.79, D = 7.77-8.03, pitch 2.77, rows at ±1.42.
+  // exist. Connector figures are from MIL-DTL-24308/1 and the Cinch/JAE/
+  // Amphenol M24308 catalogues, 15 position, shell size 2. What mates on the
+  // female side is not an opening but a protruding D-shaped tongue, outside
+  // dims 24.59 x 7.82mm nominal (24.53-24.79 x 7.67-8.03 per MIL); the Famicom
+  // recesses that tongue at the bottom of a plastic well, which is why on
+  // screen it reads as a cavity. The key's travel is bounded by the tongue
+  // face, so those are the dimensions used here.
   //
-  // Pitch 2.77mm is drawn as 12px, so 1mm = 12/2.77 = 4.33px. The rows sit
-  // ±1.42 either side of centre, i.e. 2.84mm apart, which lands at 12.3px — the
-  // art's 12px row gap, so the deformed asset is already to scale.
+  // Pitch 2.77mm is drawn as 12px, so 1mm = 12/2.77 = 4.33px. (MIL true
+  // position is 2.74mm; catalogues and JIS quote 2.76-2.77 — the 0.03mm/pitch
+  // difference is far below one source pixel.) The rows sit ±1.42 either side
+  // of centre, i.e. 2.84mm apart, which lands at 12.3px — the art's 12px row
+  // gap, so the deformed asset is already to scale.
   const EXP_PX_PER_MM = EXP_PIN_STEP / 2.77;
   // What reaches the contacts is the key's TIP, not the full width of the
   // blade. A MIWA-pattern blade is about 9mm across at the bow end, but it is
   // ground to a guide taper, so the section that gets deep enough to touch the
-  // pins measures roughly 5.5mm across.
+  // pins measures roughly 5.5mm across. NOTE these key figures are estimates
+  // from typical Japanese house keys: the Showa-era danchi key was MIWA's
+  // disc-cylinder type (U9 only replaced it in 1991), and no published spec
+  // for its blade was found — pinning these down needs a real key measured.
   // Why not the full 9mm: at 39px the contact body was half again as long as
   // anything that physically fits down the cavity, and it shorted pins the real
   // key could never reach at once.
@@ -1474,20 +1483,20 @@
   // the one thing this panel exists to show.
   const EXP_BLADE_HALF = (5.5 / 2) * EXP_PX_PER_MM; // 5.5mm tip  -> ~24px
   const EXP_BLADE_HALF_H = (1.5 / 2) * EXP_PX_PER_MM; // 1.5mm bevel -> ~6.5px
-  // Height of the mating face the key goes into: catalogue dimension D, 7.77 to
-  // 8.03, so 7.9 nominal. The tip has to stay inside it, which is what bounds
-  // the turn. Why not the 8.36 used before: that is a shell dimension, not the
-  // insertion aperture, and it let the key sit further out than it can.
-  const EXP_OPENING_H = 7.9 * EXP_PX_PER_MM; // ~34px
-  // What the tip has to touch is the metal, not the hole. On a real female
-  // D-sub the exposed conductor is the contact spring around the mouth of each
-  // cavity — bore ⌀1.68mm, i.e. 7.3px across, so a radius of 3.6px.
-  // The artwork draws that ring 8px across (a 4x4 opening inside a 2px band,
-  // measured off the decoded PNG: pin 8's ring spans source x 60..67), which is
-  // within half a pixel of the real bore. The hit radius follows the DRAWING at
-  // 4px rather than the catalogue's 3.6px: the two agree to within rounding,
-  // and matching what is on screen is what keeps "lit" and "touching" the same
-  // statement.
+  // Height of the tongue face the key works against: MIL dimension D,
+  // 7.67-8.03, catalogue nominal 7.82. The tip has to stay inside it, which is
+  // what bounds the turn. Why not the 8.36 used before: that is the PLUG
+  // shell's inner window (25.30 x 8.40 nominal), not the female face.
+  const EXP_OPENING_H = 7.82 * EXP_PX_PER_MM; // ~34px
+  // What the tip has to touch is the metal, not the hole. A size-20 socket
+  // contact receives a ⌀1.02mm pin (MIL-DTL-24308/1: "accommodates a .040
+  // diameter pin"); the funnelled entry hole in the insulator face is wider
+  // but unpublished. The artwork draws the entry ring 8px (1.85mm) across —
+  // measured off the decoded PNG: pin 8's ring spans source x 60..67 — a
+  // plausible funnel over the ⌀1.02 throat. The hit radius follows the
+  // DRAWING at 4px: matching what is on screen is what keeps "lit" and
+  // "touching" the same statement. (An earlier note here called the bore
+  // ⌀1.68mm; that figure is the crimp barrel's, not the mating face's.)
   const EXP_HOLE_RADIUS = 4 * EXP_ART_SCALE;
   // The shell: the metal wall around the cavity, which on a real D-sub is
   // bonded to ground. Its inner edge is the D-shaped outline drawn in the
