@@ -368,6 +368,18 @@ public:
     }
     const uint8_t* dbgOam() const { return oam_; }
     const uint8_t* dbgVram() const { return vram_; }
+    // Whether the PPU is currently drawing anything ($2001 bits 3-4). Public
+    // because the frontend has to tell "emulation ran fast" apart from "emulation
+    // had nothing to draw" — a frame with rendering off costs a fraction of a
+    // drawing one, and timing it as if it were representative mismeasures the
+    // core's pace. dbgState() already carries the same bit, but it materialises
+    // the whole 30-byte readout, and this is read every draw frame.
+    //
+    // Why not NES_EMBEDDED-only like renderThisFrame: nothing here is specific to
+    // the render-skip, and gating it would make the reference build unable to ask
+    // a question that is meaningful for it too. A const inline read of an
+    // existing member costs that build nothing.
+    bool renderingOn() const { return renderingEnabled(); }
     // level of the PPU→CPU NMI output (true = asserted)
     bool nmiLine() const { return (ctrl_ & 0x80) && (status_ & 0x80); }
 
