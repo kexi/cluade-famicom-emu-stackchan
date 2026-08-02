@@ -51,6 +51,17 @@ build-web:
 serve port='8000':
     uv run tools/serve_web.py --port {{port}}
 
+# 実機の SD カード内の ROM 一覧を表示 (host は CoreS3 の IP)
+#
+# 中継サーバー (just serve) が別途動いている前提。ブラウザを開かずに
+# 「カードに何が入っているか」だけ見たいとき用で、UI から辿るより速い。
+# 実機と直接 UDP で話さず /api/sd/list を叩くのは、type 5 の分割応答の
+# 組み立てを serve_web.py が既に持っているため
+sd-list host port='8000':
+    curl -sS -X POST http://localhost:{{port}}/api/sd/list \
+        -H 'Content-Type: application/json' \
+        -d '{"host":"{{host}}"}'
+
 # -------------------------------------------------------------------- 検証
 
 # コアの構文チェック (Web / 組み込み両モード)
