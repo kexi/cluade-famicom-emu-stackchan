@@ -112,7 +112,9 @@ window.I18N = {
     expNoteTitle: '家の鍵でガチャガチャ',
     expNote:
       '団地の鍵(MIWA製)を前面拡張端子に挿してガチャガチャすると『ベースボール』で変化球が投げられた、という有名な小ネタの再現です。拡張端子のデータ線は負論理なので、鍵の金属がGND(ピン1)と短絡させた線は$4016/$4017の読み出しで「押されている」ことになります。',
-    expHint: '鍵を左右にドラッグして挿入位置、スライダーで捻り角(±30°)。右に捻れば下段、左に捻れば上段のピンに当たります。「ガチャガチャ」で約1秒ノイズを注入します',
+    expHint: '鍵を左右にドラッグして挿す位置、スライダーで回す角度(±30°)。ドアの鍵と同じで、正面から見ると時計の針のようにクルッと回ります。右に回せば刃の右端が下段、左に回せば左端が上段のピンに当たります。「ガチャガチャ」で約1秒ノイズを注入します',
+    expViewTop: '上から見た図 — 回すと鍵が細く見える',
+    expViewFront: '前から見た図 — 時計と同じ回し方',
     expRattle: 'ガチャガチャ',
     expPull: '抜く',
     expInsert: '挿す',
@@ -239,7 +241,9 @@ window.I18N = {
     expNoteTitle: 'Rattling a house key',
     expNote:
       'The famous trick: poke your apartment key (a MIWA one) into the Famicom front expansion port, rattle it about, and Baseball starts throwing curveballs. The expansion data lines are active low, so any line the key shorts to GND (pin 1) reads back as "pressed" through $4016/$4017.',
-    expHint: 'Drag the key sideways to pick the slot, use the slider to twist it (±30°). Twist right and it meets the bottom row, left and it meets the top. "Rattle" injects about a second of noise',
+    expHint: 'Drag the key sideways to pick where it goes in, use the slider to turn it (±30°). Just like a door key: seen from the front it sweeps round like the hand of a clock. Turn right and the blade\'s right end drops onto the bottom row, turn left and its left end lifts onto the top row. "Rattle" injects about a second of noise',
+    expViewTop: 'From above — turning makes the key look narrower',
+    expViewFront: 'From the front — turns like the hand of a clock',
     expRattle: 'Rattle it',
     expPull: 'Pull out',
     expInsert: 'Insert',
@@ -362,7 +366,9 @@ window.I18N = {
     expNoteTitle: '用家门钥匙乱捅',
     expNote:
       '这是著名小技巧的重现: 把公寓的钥匙(MIWA制)插进红白机前面的扩展端子来回乱捅,《棒球》就能投出变化球。扩展端子的数据线是负逻辑,钥匙让某条线与GND(1号引脚)短路后,$4016/$4017读出来就是"按下"。',
-    expHint: '左右拖动钥匙选择插入位置,用滑块拧动钥匙(±30°)。向右拧碰到下排引脚,向左拧碰到上排。点击"乱捅"注入约1秒的噪声',
+    expHint: '左右拖动钥匙选择插入位置,用滑块转动钥匙(±30°)。和开门的钥匙一样,从正面看就像钟表指针那样转。向右转,刀身右端落到下排;向左转,左端抬到上排。点击"乱捅"注入约1秒的噪声',
+    expViewTop: '俯视图 — 转动时钥匙看起来变窄',
+    expViewFront: '正视图 — 像钟表指针一样转动',
     expRattle: '乱捅',
     expPull: '拔出',
     expInsert: '插入',
