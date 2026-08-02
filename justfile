@@ -118,16 +118,43 @@ verify frames='600' scenario='':
     work=$(mktemp -d)
     trap 'rm -rf "$work"' EXIT
     echo "building (clang++ -std=c++17 -O2)..."
-    clang++ -std=c++17 -O2 -o "$work/ref" tools/verify_host.cpp core/*.cpp
-    clang++ -std=c++17 -O2 -DNES_EMBEDDED -o "$work/emb" tools/verify_host.cpp core/*.cpp
+    # 2 つのビルドは互いに独立 (出力先が別で、入力は読むだけ) なので同時に走らせる。
+    #
+    # exit status は wait <pid> で 1 つずつ受ける。`cmd &` の失敗は set -e に
+    # 引っかからないので、まとめて wait しただけでは片方のビルドが転けても
+    # 気づかず、次の実行が「無い実行ファイル」に当たって分かりにくく落ちる
+    clang++ -std=c++17 -O2 -o "$work/ref" tools/verify_host.cpp core/*.cpp &
+    pid_ref=$!
+    clang++ -std=c++17 -O2 -DNES_EMBEDDED -o "$work/emb" tools/verify_host.cpp core/*.cpp &
+    pid_emb=$!
+    build_rc=0
+    wait "$pid_ref" || build_rc=1
+    wait "$pid_emb" || build_rc=1
+    if [ "$build_rc" -ne 0 ]; then
+        echo "verify: build failed" >&2
+        exit 1
+    fi
     if [ -n '{{scenario}}' ]; then
         echo "running {{frames}} frames x3 (scenario: {{scenario}})..."
     else
         echo "running {{frames}} frames x3 (no input)..."
     fi
-    "$work/ref" m5stack/data/game.nes {{frames}} all   "${scen[@]+"${scen[@]}"}" > "$work/1-ref-all.txt"
-    "$work/emb" m5stack/data/game.nes {{frames}} all   "${scen[@]+"${scen[@]}"}" > "$work/2-emb-all.txt"
-    "$work/emb" m5stack/data/game.nes {{frames}} skip4 "${scen[@]+"${scen[@]}"}" > "$work/3-emb-skip4.txt"
+    # 3 系列も互いに独立 (それぞれ別プロセスで powerOn からやり直し、出力先も別)。
+    # ビルドと同じ理由で status は個別に受ける
+    "$work/ref" m5stack/data/game.nes {{frames}} all   "${scen[@]+"${scen[@]}"}" > "$work/1-ref-all.txt" &
+    pid1=$!
+    "$work/emb" m5stack/data/game.nes {{frames}} all   "${scen[@]+"${scen[@]}"}" > "$work/2-emb-all.txt" &
+    pid2=$!
+    "$work/emb" m5stack/data/game.nes {{frames}} skip4 "${scen[@]+"${scen[@]}"}" > "$work/3-emb-skip4.txt" &
+    pid3=$!
+    run_rc=0
+    wait "$pid1" || run_rc=1
+    wait "$pid2" || run_rc=1
+    wait "$pid3" || run_rc=1
+    if [ "$run_rc" -ne 0 ]; then
+        echo "verify: a run failed" >&2
+        exit 1
+    fi
     # 判定に使うのは各行の '#' より前 (STATE 列) だけ。'#' 以降は観測点依存の
     # 参考列で、フレーム境界では原理的に一致しない (verify_host.cpp 冒頭を参照)
     for f in 1-ref-all 2-emb-all 3-emb-skip4; do
@@ -186,13 +213,27 @@ verify frames='600' scenario='':
         # dump は差分フレームをまとめて 1 回で吐く。1 フレームずつ呼ぶと
         # powerOn からのフル再実行が差分フレーム数だけ繰り返され、73 フレーム
         # 差分なら 73x2 回の再実行 = O(n^2) になっていた
-        framelist=$(printf '%s\n' $fbdiff | sed 's/^0*//' | sed 's/^$/0/' | paste -sd, -)
-        "$work/ref" m5stack/data/game.nes {{frames}} all dump "$framelist" "${scen[@]+"${scen[@]}"}" > "$work/fa.bin"
-        "$work/emb" m5stack/data/game.nes {{frames}} all dump "$framelist" "${scen[@]+"${scen[@]}"}" > "$work/fb.bin"
+        # fbdiff は join の出力を辿ったものなので、この時点で既に昇順・重複なし
+        # (join は整列済み入力を要求し、整列済みで出す)。framelist も下の
+        # framesorted もその前提に乗る
+        framenums=$(printf '%s\n' $fbdiff | sed 's/^0*//' | sed 's/^$/0/')
+        framelist=$(printf '%s\n' "$framenums" | paste -sd, -)
+        # 上の 3 系列と同じく独立なので並列に。status も同じく個別に受ける
+        "$work/ref" m5stack/data/game.nes {{frames}} all dump "$framelist" "${scen[@]+"${scen[@]}"}" > "$work/fa.bin" &
+        pid_da=$!
+        "$work/emb" m5stack/data/game.nes {{frames}} all dump "$framelist" "${scen[@]+"${scen[@]}"}" > "$work/fb.bin" &
+        pid_db=$!
+        dump_rc=0
+        wait "$pid_da" || dump_rc=1
+        wait "$pid_db" || dump_rc=1
+        if [ "$dump_rc" -ne 0 ]; then
+            echo "verify: a dump run failed" >&2
+            exit 1
+        fi
         # 出力は 61440 バイト/フレームの固定長連結 (verify_host.cpp 冒頭)。
         # フレームは昇順に並ぶので、i 番目のフレーム番号を配列で持っておけば
         # バイト位置からフレームを引ける
-        framesorted=($(printf '%s\n' $fbdiff | sed 's/^0*//' | sed 's/^$/0/' | sort -n | uniq))
+        framesorted=($framenums)
         #
         # cmp の exit code には一切依存しない。cmp は差分があれば exit 1 を返す
         # のが正しい挙動で、set -euo pipefail の下ではそこでスクリプトが即死する。
