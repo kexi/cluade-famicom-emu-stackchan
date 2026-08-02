@@ -1051,11 +1051,12 @@ void loop() {
     // That asymmetry is deliberate — skipping the join is the unsafe direction, so
     // it has to be earned, while paying it costs at most one band's wire time.
     //
-    // Standing it down takes two things, because the average and the frame about
+    // Standing it down takes three things, because the average and the frame about
     // to run have to be talking about the same writer:
     //
-    //   1. a seeded average at or above the threshold, and
-    //   2. the previous frame having been fully rendered.
+    //   1. a seeded average at or above the threshold,
+    //   2. the previous frame having been fully rendered, and
+    //   3. rendering being on right now, as this frame starts.
     //
     // Condition 2 is what keeps the evidence in its domain. The average is built
     // only from fully-rendered frames (see the filter below), so on its own it
@@ -1068,14 +1069,31 @@ void loop() {
     // state persists across frame boundaries far more often than it flips, and
     // being wrong costs one join rather than a torn picture.
     //
-    // Why not gate on renderingOn() as an earlier revision did: with rendering
-    // off, renderScanline paints nothing, but ppu.cpp still writes the backdrop
-    // colour into all 256 pixels of every visible line whenever renderThisFrame
-    // is set. A rendering-off draw frame therefore *does* repaint the whole
-    // framebuffer, and does it faster than anything else. Gating the guard on
-    // rendering removed the protection from exactly the frames that need it most.
-    // The instantaneous read was doubly wrong: $2001 changes mid-frame, so one
-    // boundary sample cannot characterise a frame at all.
+    // Condition 3 closes the one transition condition 2 cannot see. A game that
+    // disables $2001 during vblank leaves frameFullyRendered() true — correctly,
+    // the visible region it describes *was* drawn in full — so on the very next
+    // draw frame conditions 1 and 2 both hold while the writer has already become
+    // the fast backdrop fill. Reading the register at the top of the frame catches
+    // exactly that case.
+    //
+    // Why an instantaneous read is legitimate here when an earlier revision was
+    // rightly rejected for using one: direction. That revision read renderingOn()
+    // and *skipped* the guard when it was false — off meant "no writer to race",
+    // which was wrong twice over (ppu.cpp still fills the backdrop across all 256
+    // pixels of every visible line whenever renderThisFrame is set, and does it
+    // faster than anything else). Here the same read only ever *arms* the guard:
+    // off means join. A one-dot sample still cannot characterise a whole frame,
+    // but it does not have to — it is a conservative trigger, and the only way it
+    // can be wrong is by joining when it need not have.
+    //
+    // What that leaves uncovered: rendering on at the frame's start and switched
+    // off part-way through the visible region. The guard stands down and the frame
+    // becomes a partial backdrop fill, so it runs faster than a full repaint. It
+    // is still safe on static margin — the writes are paced by emulation, not by
+    // the fill, so even that frame takes at least emuS (~12.6ms) and reaches the
+    // first row behind the in-flight band (row 180) at ~8.6ms, against ~6.7ms of
+    // wire time. Accepted rather than chased: covering it would need a mid-frame
+    // hook on $2001 writes, and the margin is real without one.
     //
     // The sample filter asks the frame-level question via frameFullyRendered():
     // only a frame whose visible region was drawn in full is a representative
@@ -1094,14 +1112,19 @@ void loop() {
     //
     // Net behaviour:
     //
-    //   boot / unseeded             join   (no evidence yet)
-    //   after reset or ROM swap     join   (evidence discarded)
-    //   rendering-off draw frame    join   (evidence is out of domain)
-    //   steady, emulation slow      skip   (both conditions met)
-    //   steady, emulation fast      join   (writer may overtake the DMA)
-    //   skipped (non-draw) frame    n/a    (framebuffer untouched)
+    //   boot / unseeded              join   (no evidence yet)
+    //   after reset or ROM swap      join   (evidence discarded)
+    //   on->off, first draw frame    join   (condition 3: caught at the register)
+    //   rendering-off draw frame     join   (conditions 2 and 3 both fail)
+    //   off->on, first draw frame    join   (condition 2: prev frame not full)
+    //   steady, emulation slow       skip   (all three conditions met)
+    //   steady, emulation fast       join   (writer may overtake the DMA)
+    //   skipped (non-draw) frame     n/a    (framebuffer untouched)
     static bool prevFrameFullyRendered = false;
-    const bool paceApplies = g_emuDrawSeeded && prevFrameFullyRendered;
+    // Sampled before runFrame() so it describes the frame about to run, not the
+    // one after it.
+    const bool renderingAtFrameStart = g_nes.ppu.renderingOn();
+    const bool paceApplies = g_emuDrawSeeded && prevFrameFullyRendered && renderingAtFrameStart;
     const bool guardStoodDown = paceApplies && g_emuDrawMs >= DISPLAY_REPAINT_GUARD_MS;
     const bool repaintRacesBand = drawThisFrame && !guardStoodDown;
     if (repaintRacesBand) joinBand();
