@@ -52,6 +52,7 @@ static void drawRow(int index) {
 
     const bool embeddedRow = index == 0;
     if (embeddedRow) {
+        M5.Display.print(MENU_BUILTIN_TITLE);
         M5.Display.print("[Built-in]");
         return;
     }

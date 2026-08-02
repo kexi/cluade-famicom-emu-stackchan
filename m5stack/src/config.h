@@ -265,6 +265,11 @@ constexpr uint32_t MENU_REPEAT_MS = 120;
 // Poll period while the menu is up. ~60Hz, so touch and pad feel the same as in
 // game, and slow enough to leave core 1 mostly idle for the UDP replies.
 constexpr uint32_t MENU_TICK_MS = 16;
+// Title shown for the first row (the flash-embedded image). The row reads
+// "<title>[Built-in]" — the title names the game, the fixed tag names where it
+// lives; the tag itself stays in menu.cpp because it never changes. Kept here,
+// not in menu.cpp, because the title must change when data/game.nes does.
+constexpr char MENU_BUILTIN_TITLE[] = "KARYUDO";
 
 // --------------------------------------------------------------------- UDP
 constexpr uint16_t UDP_PORT = 5555;
