@@ -81,7 +81,9 @@ static void configureSensor() {
     writeReg(SI12T_REG_CTRL2, SI12T_CTRL2_RUN);
     writeReg(SI12T_REG_CTRL1, SI12T_CTRL1_VALUE);
 
-    for (uint8_t i = 0; i < 5; i++) writeReg(SI12T_REG_SENSITIVITY1 + i, SI12T_SENSITIVITY_VALUE);
+    // 感度は 0x02-0x07 の 6 レジスタ (2ch ずつ 12ch ぶん)。1 本でも書き漏らすと
+    // そのチャネルのゾーンだけ無反応になる (実機で zone 1 つが沈黙して発覚)。
+    for (uint8_t i = 0; i < 6; i++) writeReg(SI12T_REG_SENSITIVITY1 + i, SI12T_SENSITIVITY_VALUE);
 }
 
 bool headTouchInit() {
@@ -154,10 +156,13 @@ bool headTouchSwiped() {
     }
     if (roseCount == 0) return false;
 
-    // 同時に複数ゾーンが立つのは指の移動ではなく掌などの面接触。距離には
-    // 数えず、起点も無効化する — 直後の release→rise を移動と誤認しないため。
+    // 複数ゾーンが同時に立つのは、指が境界をまたいで接地した瞬間 (2 ゾーン)
+    // か、掌などの面接触 (3 ゾーン)。前者は撫で始めとして正当なので起点だけ
+    // 置き (進行方向はまだ分からないので距離は数えない)、後者は起点を無効化
+    // して直後の release→rise を移動と誤認しないようにする。
     if (roseCount > 1) {
-        g_lastZone = -1;
+        const bool palm = roseCount >= ZONE_COUNT;
+        g_lastZone = palm ? -1 : rose;   // rose は最後に見つかった立ち上がり
         g_lastMoveMs = now;
         return false;
     }
