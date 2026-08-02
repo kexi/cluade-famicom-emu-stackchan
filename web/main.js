@@ -93,6 +93,21 @@
     set('exp-hint', 'expHint');
     set('exp-viewlabel', 'expViewFront');
     set('exp-rattle', 'expRattle');
+    set('exp-leg-float', 'expLegFloat');
+    set('exp-leg-cover', 'expLegCover');
+    set('exp-leg-short', 'expLegShort');
+    set('exp-leg-shell', 'expLegShell');
+    set('exp-leg-out', 'expLegOut');
+    set('exp-meter-h4', 'expMeterTitle');
+    set('exp-m-k-key', 'expMeterKeyLabel');
+    set('exp-m-k-gnd', 'expMeterGndLabel');
+    set('exp-m-k-pins', 'expMeterPinsLabel');
+    // The meter's values are words, so they have to be re-rendered on a language
+    // change. Routed through a single hoisted helper rather than reading
+    // expInserted here: this function is declared above the expansion-port block
+    // and a `let` from that block would be in its temporal dead zone, where even
+    // `typeof` throws.
+    if (typeof refreshExpMeter === 'function') refreshExpMeter();
     // the pull button is a toggle: its label depends on where the key currently is
     if (typeof refreshExpPullLabel === 'function') refreshExpPullLabel();
     set('swap-title', 'swapTitle');
@@ -1518,6 +1533,20 @@
   expBladeMark.style.setProperty('--blade-h', EXP_BLADE_HALF_H * 2 + 'px');
   expBladeMark.style.setProperty('--blade-x', -EXP_BLADE_HALF + 'px');
   expBladeMark.style.setProperty('--blade-y', -EXP_BLADE_HALF_H + 'px');
+  // Decoration that makes the tip read as a KEY rather than a bar lying on the
+  // port: the bow seen end-on behind it, the warding grooves across its face,
+  // and a crosshair marking the point you drag. All three are sized off the
+  // same --blade-* custom properties, are pointer-events: none, and take no
+  // part in expBridgedPins()/expShellContact() — the hit test is still the tip
+  // rectangle alone, so the drawing cannot claim a contact the model does not
+  // have. Added as children rather than pseudo-elements because ::before and
+  // ::after on #exp-blade-mark are already the tip and the pivot, and because
+  // children inherit the rotation transform for free.
+  for (const id of ['exp-blade-bow', 'exp-blade-grooves', 'exp-blade-cross']) {
+    const d = document.createElement('div');
+    d.id = id;
+    expBladeMark.appendChild(d);
+  }
   // Distance from a point to the blade rectangle: rotate the point into the
   // bar's own frame, where the rectangle is axis-aligned, then take the usual
   // clamped box distance. Zero means the point is inside the bar.
@@ -1625,6 +1654,83 @@
       el.classList.toggle('floating', touched && !grounded);
     }
     document.body.classList.toggle('exp-grounded', grounded);
+    // The geometry half of the instrument panel. Split from updateExpUI(),
+    // which reports what the CORE is doing: this half is what the DRAWING is
+    // doing, and it is only meaningful when the key actually moves.
+    expMeterGeometry(pins, grounded);
+  }
+  // --- instrument panel ---
+  //
+  // Two halves, updated from two places: the geometry rows change only when the
+  // key is moved (expApplyCover), while the port-bit rows are re-read from the
+  // core every frame (updateExpUI). Why not refresh all of it every frame:
+  // rebuilding the pin list allocates, and the geometry cannot change without
+  // going through setExpKey() anyway.
+  const expMeterEls = {
+    key: document.getElementById('exp-m-key'),
+    gnd: document.getElementById('exp-m-gnd'),
+    pins: document.getElementById('exp-m-pins'),
+    p1: document.getElementById('exp-m-p1'),
+    p0: document.getElementById('exp-m-p0'),
+    irq: document.getElementById('exp-m-irq'),
+  };
+  // $4017 D4..D0, drawn high bit first so the row reads like the register.
+  const expBitCells = [];
+  for (let i = 4; i >= 0; i--) {
+    const b = document.createElement('b');
+    b.textContent = '0';
+    expBitCells[i] = b;
+    expMeterEls.p1.appendChild(b);
+  }
+  function expSetMeter(el, text, cls) {
+    el.textContent = text;
+    el.classList.toggle('on', cls === 'on');
+    el.classList.toggle('off', cls === 'off');
+    el.classList.toggle('alarm', cls === 'alarm');
+  }
+  function expMeterGeometry(pins, grounded) {
+    if (!expInserted) {
+      expSetMeter(expMeterEls.key, t('expMeterOut'), 'alarm');
+      expSetMeter(expMeterEls.gnd, '-', 'off');
+      expSetMeter(expMeterEls.pins, '-', 'off');
+      return;
+    }
+    expSetMeter(expMeterEls.key, expRattling ? t('expMeterRattling') : t('expMeterIn'), 'on');
+    // Naming the route matters: "grounded" is the whole reason a touched pin is
+    // or is not a short, and the two routes behave differently to the user.
+    let how = t('expMeterFloat');
+    let cls = 'off';
+    if (grounded) {
+      cls = 'on';
+      if (expRattling) how = t('expMeterGndRattle');
+      else if (expShellContact()) how = t('expMeterGndShell');
+      else how = t('expMeterGndPin1');
+    }
+    expSetMeter(expMeterEls.gnd, how, cls);
+    const list = pins.length ? pins.map((p) => `${p}:${EXP_PIN_NAMES[p]}`).join(', ') : t('expMeterNone');
+    expSetMeter(expMeterEls.pins, list, pins.length ? '' : 'off');
+  }
+  // Re-render the geometry rows from the current state, for a language change.
+  function refreshExpMeter() {
+    if (!expInserted) {
+      expMeterGeometry([], false);
+      return;
+    }
+    const pins = expBridgedPins();
+    expMeterGeometry(pins, expKeyGrounded(pins));
+  }
+  // The port-bit half: exactly what api.keyState() is reporting this frame, so
+  // the panel shows the core's answer rather than the page's expectation of it.
+  function expMeterPorts(st, active) {
+    for (let i = 0; i <= 4; i++) {
+      const set = active && (st & (1 << i)) !== 0;
+      expBitCells[i].textContent = set ? '1' : '0';
+      expBitCells[i].classList.toggle('set', set);
+    }
+    const p0 = active && (st & 0x100) !== 0;
+    const irq = active && (st & 0x200) !== 0;
+    expSetMeter(expMeterEls.p0, p0 ? t('expMeterShort') : '-', p0 ? 'alarm' : 'off');
+    expSetMeter(expMeterEls.irq, irq ? t('expMeterShort') : '-', irq ? 'alarm' : 'off');
   }
   function expLayoutKey() {
     // An angle only means anything while the blade is inside the port.
@@ -1724,8 +1830,15 @@
       // cycles on it (a paused CPU would otherwise never retire them).
       api.keyCover(0, 0, 0);
       expStopRattleUI();
-      for (let pin = 1; pin <= 15; pin++) expPinEls[pin].classList.remove('covered', 'shorted');
+      // 'floating' too: a pin the key was resting on without a return path is
+      // still lit otherwise, so pulling the key left hollow rings on a port
+      // with nothing in it.
+      for (let pin = 1; pin <= 15; pin++) {
+        expPinEls[pin].classList.remove('covered', 'shorted', 'floating');
+      }
       expStateEl.textContent = '';
+      expMeterGeometry([], false);
+      expMeterPorts(0, false);
     }
     expRattleBtn.disabled = !inserted;
     refreshExpPullLabel();
@@ -1751,6 +1864,7 @@
       if (active && pin === EXP_IRQ_PIN) shorted = (st & 0x200) !== 0;
       expPinEls[pin].classList.toggle('shorted', shorted);
     }
+    expMeterPorts(st, active);
     if (!active) {
       expStateEl.textContent = '';
       return;
@@ -1775,6 +1889,10 @@
     pinPos: (pin) => expPinPos(pin),
     state: () => ({ x: expKeyX, y: expKeyY, angle: expKeyAngle, inserted: expInserted }),
     bridged: () => expBridgedPins(),
+    // Run one pass of the per-frame core readback on demand. The rAF loop only
+    // runs with a ROM going, so a driver that wants to see the shorted state has
+    // no other way to make the panel reflect a cover it just set.
+    refresh: () => updateExpUI(),
     shellContact: () => expShellContact(),
     grounded: () => expKeyGrounded(expBridgedPins()),
     cavityHalfWidth: (y) => expCavityHalfWidth(y),
