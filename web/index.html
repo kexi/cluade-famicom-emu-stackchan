@@ -442,6 +442,21 @@
     background: linear-gradient(#E9E1D0 0 50%, #8F2323 50% 100%);
   }
   #exp-front.dragging { cursor: grabbing; }
+  /* The shell lights up while the key is leaning on it, because that contact is
+     what grounds the key and makes a single-pin touch a real short. */
+  #exp-shell-glow {
+    position: absolute;
+    left: 60px; top: 36px;      /* cavity x 15..113, y 9..38 at 4x */
+    width: 392px;
+    height: 120px;
+    border-radius: 10px / 14px;
+    box-shadow: inset 0 0 0 3px #A5D8F7, 0 0 12px 2px rgba(165, 216, 247, 0.75);
+    opacity: 0;
+    transition: opacity 0.12s linear;
+    pointer-events: none;
+    z-index: 3;
+  }
+  body.exp-grounded #exp-shell-glow { opacity: 1; }
   #exp-front-img {
     position: absolute;
     left: 0; top: 0;
@@ -490,6 +505,13 @@
      $16, so "in contact, idle" is distinct from both the bare hole and the lit
      state without competing with it. */
   .dpin.covered { background: #2031B5; box-shadow: inset 0 0 0 2px #ADADAD; }
+  /* Touched by the key, but the key has no path to ground, so nothing is
+     actually shorted. Hollow rather than filled: the metal is on the pin but no
+     current flows, and that has to look different from a real short. */
+  .dpin.floating {
+    background: transparent;
+    box-shadow: inset 0 0 0 2px #4F4F4F;
+  }
   /* Pin actually shorted right now (read back from the core). Lit with the NES
      pale gold $37, the brightest thing on this panel. */
   .dpin.shorted {
@@ -1142,6 +1164,8 @@
       <div id="exp-viewlabel" class="exp-viewlabel" data-i18n="expViewFront">前から見た図 — 時計と同じ回し方</div>
       <div id="exp-front">
         <img id="exp-front-img" alt="" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAAAwCAYAAADZ9HK+AAACqklEQVR4nO2aO04DMRCGHZQCahBUSKkibpEKkgKxmyZCpIiERJETcAZOkAIpEg1CNCSIYkPHNajSgqBPB1qQ0cbY3tfY3sT/V/Fw4tmZ3+PxeGtRFH0x4C0brg0AboEAPAcC8Jy66h/to7ZdS4BRZs+zfAJYvN6atAdYZzufAEyz2TxzNXVlWThYdMYF8DKXK6/FkGEy+6rxyVZGAOJDmDR+3WgpfGXSp2QC4EZy45Di6Wg3l7cI0ddOBaAyBkWkObivKYRQSgCxAUVXfNgN2XQ6LTP9WhEEAZs8THJ9htdRyTg42wJ0K/708v4n2PFDJhF/952wG/79zP11d9UzOmdNdRmUpiid6lQBB8VJE0RaFlCdMMgFIE40Go203zMcDjE+p39kIigqALItIF71orEc1V4fRRHGs/z+2Trok20PZBmAK6zT6SyN49uA+JD84TA+KOSfmKQAimYA3AZ6DgTgORCA55DVAHERqEJV5KiOiRif7h+xCKxEDSALnK7bh/GM1D+VuA3MayDG6zHdLkcN4Dn18cXyOZMzTvng+bW8SQHcMTjs020Bg51GWXuAZXQxu/mYS/9e6+0z6Slg9y19wuPH6N9JIGtbU+xwYXyU2T+yE8DTid6f73sWaoDYKNnRRdbT1t0UYjxT+of6irhUBsiSBdDzp70TKbL6rWUAXRYA5THxgkhpAcTqU3WZgFmyrn4dJBlAFAGyAD1FU7/xGkBVC2R5NQw9/1/S/CNL/XkFYLwG0G0F6Pkz0p4/1eonzQBFegPAXupXZQByAXAghGrt+dYFkBSB7E1hZAV50MUXa7n/yqZ8JwLQiQCkQxV8pwLgQAhuAl8ZAYhAEGYDXnkB+CyIloWAr5wAgFmsXQaB1aKeVzFgvUAG8BwIwHMgAM+BAJjffAN1Qn8rZiT5YQAAAABJRU5ErkJggg==">
+        <!-- lights while the key is earthed against the shell -->
+        <div id="exp-shell-glow"></div>
         <!-- .dpin markers are created and positioned by main.js -->
         <div id="exp-blade-mark"></div>
       </div>
@@ -1251,10 +1275,10 @@ PRGとCHRを別のカセットから組み合わせた「ニコイチカセッ�
   </div>
   <button id="check-close">閉じる</button>
 </div>
-<script>window.NES_VER='1785656362';</script>
-<script src="i18n.js?v=1785656362"></script>
-<script src="smb-ram.js?v=1785656362"></script>
-<script src="nes.js?v=1785656362"></script>
-<script src="main.js?v=1785656362"></script>
+<script>window.NES_VER='1785659213';</script>
+<script src="i18n.js?v=1785659213"></script>
+<script src="smb-ram.js?v=1785659213"></script>
+<script src="nes.js?v=1785659213"></script>
+<script src="main.js?v=1785659213"></script>
 </body>
 </html>

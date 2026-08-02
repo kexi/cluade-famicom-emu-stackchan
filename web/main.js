@@ -1358,6 +1358,7 @@
   const EXP_P1_BIT = { 4: 4, 5: 3, 6: 2, 7: 1, 8: 0 };
   const EXP_IRQ_PIN = 3;
   const EXP_P0_PIN = 13;
+  const EXP_GND_PIN = 1; // ground itself: touching it grounds the key
   const expFront = document.getElementById('exp-front'); // port face + drag surface
   const expBladeMark = document.getElementById('exp-blade-mark');
   const expRot = document.getElementById('exp-rot');
@@ -1429,38 +1430,62 @@
   // Sizes here are a functional requirement, not decoration: which pins a key
   // can bridge at once is decided entirely by how big the key is relative to
   // the connector, so getting the ratios wrong emulates a machine that does not
-  // exist. D-sub pins are 2.77mm apart and the art draws that pitch as 12px, so
-  // 1mm = 12/2.77 = 4.33px. The rows are 2.84mm apart, which lands at 12.3px —
-  // the art's 12px row gap, so the deformed asset is already to scale.
+  // exist. Connector figures are quoted from the Amphenol M24308 catalogue
+  // (D-Sub-01 Rev.10, p.13 PCB layout / p.15 receptacle table), 15 position,
+  // shell size 2: B = 24.54-24.79, D = 7.77-8.03, pitch 2.77, rows at ±1.42.
+  //
+  // Pitch 2.77mm is drawn as 12px, so 1mm = 12/2.77 = 4.33px. The rows sit
+  // ±1.42 either side of centre, i.e. 2.84mm apart, which lands at 12.3px — the
+  // art's 12px row gap, so the deformed asset is already to scale.
   const EXP_PX_PER_MM = EXP_PIN_STEP / 2.77;
   // What reaches the contacts is the key's TIP, not the full width of the
   // blade. A MIWA-pattern blade is about 9mm across at the bow end, but it is
   // ground to a guide taper, so the section that gets deep enough to touch the
-  // pins measures roughly 5.5mm across and the usual 2.3mm thick.
+  // pins measures roughly 5.5mm across.
   // Why not the full 9mm: at 39px the contact body was half again as long as
   // anything that physically fits down the cavity, and it shorted pins the real
   // key could never reach at once.
+  //
+  // Thickness is the tip's, not the blade's. The blade body is the usual 2.3mm,
+  // but a real key is bevelled at the tip, and it is that bevelled section —
+  // about 1.5mm — which reaches the recessed contacts. Why not 2.3mm: drawn at
+  // 10px it looked like a chisel rather than a key, and it claimed contact at a
+  // depth the tapered part of the key never actually occupies.
   //
   // These two are the hit test AND the drawing: #exp-blade-mark::before is laid
   // out from them at load, so the rectangle you see is the one being
   // intersected. Why not tune them separately: a hit size picked to make the
   // covered set behave gave contacts that did not match the picture, which is
   // the one thing this panel exists to show.
-  const EXP_BLADE_HALF = (5.5 / 2) * EXP_PX_PER_MM; // 5.5mm tip -> ~24px
-  const EXP_BLADE_HALF_H = (2.3 / 2) * EXP_PX_PER_MM; // 2.3mm thick -> ~10px
-  // The mating face opening is 8.36mm tall. The tip has to stay inside it,
-  // which is what bounds the turn — a 24x10 section in a 36px opening jams at
-  // about ±40°, so the slider's ±30° sits inside the physical limit rather than
-  // being an arbitrary UI choice.
-  const EXP_OPENING_H = 8.36 * EXP_PX_PER_MM; // ~36px
+  const EXP_BLADE_HALF = (5.5 / 2) * EXP_PX_PER_MM; // 5.5mm tip  -> ~24px
+  const EXP_BLADE_HALF_H = (1.5 / 2) * EXP_PX_PER_MM; // 1.5mm bevel -> ~6.5px
+  // Height of the mating face the key goes into: catalogue dimension D, 7.77 to
+  // 8.03, so 7.9 nominal. The tip has to stay inside it, which is what bounds
+  // the turn. Why not the 8.36 used before: that is a shell dimension, not the
+  // insertion aperture, and it let the key sit further out than it can.
+  const EXP_OPENING_H = 7.9 * EXP_PX_PER_MM; // ~34px
   // What the tip has to touch is the metal, not the hole. On a real female
   // D-sub the exposed conductor is the contact spring around the mouth of each
-  // cavity, and the artwork draws exactly that: a 4x4 opening inside a 2px-wide
-  // metal ring, so the ring's outer edge is 4px from the centre (measured off
-  // the decoded PNG: pin 8's ring spans source x 60..67).
-  // Why not the 2px hole radius this used to use: that is the void in the
-  // middle, so a tip grazing the metal rim read as no contact.
+  // cavity — bore ⌀1.68mm, i.e. 7.3px across, so a radius of 3.6px.
+  // The artwork draws that ring 8px across (a 4x4 opening inside a 2px band,
+  // measured off the decoded PNG: pin 8's ring spans source x 60..67), which is
+  // within half a pixel of the real bore. The hit radius follows the DRAWING at
+  // 4px rather than the catalogue's 3.6px: the two agree to within rounding,
+  // and matching what is on screen is what keeps "lit" and "touching" the same
+  // statement.
   const EXP_HOLE_RADIUS = 4 * EXP_ART_SCALE;
+  // The shell: the metal wall around the cavity, which on a real D-sub is
+  // bonded to ground. Its inner edge is the D-shaped outline drawn in the
+  // artwork, so rather than approximate it with a formula the profile is
+  // quoted straight from the asset — half-width of the cavity about its centre
+  // for each source row, measured off the decoded PNG. Indexed from
+  // EXP_CAVITY_TOP; a row outside the table is outside the opening entirely.
+  const EXP_CAVITY_TOP = 11;
+  const EXP_CAVITY_CX = 64;
+  const EXP_CAVITY_HALF_W = [
+    33, 38, 42, 43, 44, 43, 43, 43, 43, 44, 45, 45, 45,
+    45, 45, 44, 43, 43, 42, 42, 41, 40, 40, 39, 37, 34,
+  ]; // rows 11..36
 
   // --- where the key may be put, all derived from the model above ---
   // Insertion point x, at the port centre — both rows are centred on 63.5.
@@ -1484,6 +1509,9 @@
   let expKeyY = EXP_SLOT_Y0; // insertion y across the two rows
   let expKeyAngle = 0; // degrees, + = turned clockwise
   let expInserted = true; // false = pulled clear of the port
+  // Declared here rather than beside the rattle handlers because the grounding
+  // test below reads it, and that runs from the very first setExpKey().
+  let expRattling = false;
   // Lay the drawn bar out from the hit-test constants, so the rectangle on
   // screen is the rectangle being intersected.
   expBladeMark.style.setProperty('--blade-w', EXP_BLADE_HALF * 2 + 'px');
@@ -1516,8 +1544,65 @@
     }
     return hit;
   }
+  // Half-width of the cavity at a given y, interpolated between the measured
+  // rows. Outside the opening there is no cavity, so the width is zero.
+  function expCavityHalfWidth(y) {
+    const row = y / EXP_ART_SCALE - EXP_CAVITY_TOP;
+    const outsideOpening = row < 0 || row > EXP_CAVITY_HALF_W.length - 1;
+    if (outsideOpening) return 0;
+    const i = Math.floor(row);
+    const frac = row - i;
+    const a = EXP_CAVITY_HALF_W[i];
+    const b = EXP_CAVITY_HALF_W[Math.min(i + 1, EXP_CAVITY_HALF_W.length - 1)];
+    return (a + (b - a) * frac) * EXP_ART_SCALE;
+  }
+  // Is the tip touching the shell — the grounded metal wall around the cavity?
+  // The tip is a rotated rectangle, so its four corners are the points that
+  // reach furthest out; a corner at or past the cavity edge means metal
+  // contact. Sampling the corners rather than the whole outline is enough
+  // because the wall is convex from the inside: no edge can cross it without a
+  // corner crossing first.
+  function expShellContact() {
+    if (!expInserted) return false;
+    const rad = (expKeyAngle * Math.PI) / 180;
+    const ux = Math.cos(rad);
+    const uy = Math.sin(rad);
+    for (const sl of [-1, 1]) {
+      for (const st of [-1, 1]) {
+        const along = sl * EXP_BLADE_HALF;
+        const across = st * EXP_BLADE_HALF_H;
+        const cx = expKeyX + along * ux - across * uy;
+        const cy = expKeyY + along * uy + across * ux;
+        const reachesWall = Math.abs(cx - EXP_CAVITY_CX * EXP_ART_SCALE) >= expCavityHalfWidth(cy);
+        if (reachesWall) return true;
+      }
+    }
+    return false;
+  }
+  // A short needs a return path, not just a touched pin. The key is only a
+  // short if it is also connected to ground, by either route:
+  //   - the shell: the metal wall round the cavity is bonded to ground, so a
+  //     key resting against the opening's edge is itself at ground. This is the
+  //     main route, and it is why the real trick worked so readily — one signal
+  //     pin is enough once the key is leaning on the shell.
+  //   - pin 1, which is ground itself.
+  // With neither, the key is a floating piece of metal touching a pulled-up
+  // line: nothing happens, and reporting noise there would be a lie.
+  //
+  // Rattling is allowed to count as grounded on its own. Working the key back
+  // and forth in the opening means it is knocking against the shell throughout,
+  // even at instants when the drawn angle happens not to reach the wall; the
+  // core's chattering supplies the intermittency, so gating it on the exact
+  // frame's geometry would just drop contacts the real thing makes.
+  function expKeyGrounded(pins) {
+    if (!expInserted) return false;
+    if (expRattling) return true;
+    if (expShellContact()) return true;
+    return pins.includes(EXP_GND_PIN);
+  }
   function expApplyCover() {
     const pins = expBridgedPins();
+    const grounded = expKeyGrounded(pins);
     let p0 = 0,
       p1 = 0,
       irq = false;
@@ -1527,9 +1612,19 @@
       if (bit !== undefined) p1 |= 1 << bit;
       if (pin === EXP_IRQ_PIN) irq = true;
     }
-    api.keyCover(p0, p1, irq ? 1 : 0);
+    // Ungrounded: the pins are touched but no current path exists.
+    if (grounded) api.keyCover(p0, p1, irq ? 1 : 0);
+    else api.keyCover(0, 0, 0);
     const covered = new Set(pins);
-    for (let pin = 1; pin <= 15; pin++) expPinEls[pin].classList.toggle('covered', covered.has(pin));
+    for (let pin = 1; pin <= 15; pin++) {
+      const el = expPinEls[pin];
+      const touched = covered.has(pin);
+      el.classList.toggle('covered', touched && grounded);
+      // touching but with no return path: shown differently so the difference
+      // between "the key is on it" and "this is actually shorted" is visible
+      el.classList.toggle('floating', touched && !grounded);
+    }
+    document.body.classList.toggle('exp-grounded', grounded);
   }
   function expLayoutKey() {
     // An angle only means anything while the blade is inside the port.
@@ -1594,18 +1689,21 @@
   expFront.addEventListener('pointercancel', expEndDrag);
 
   const EXP_RATTLE_CYCLES = 1789773; // ~1 second at the rated clock
-  let expRattling = false;
   function expStopRattleUI() {
     expRattling = false;
     expRattleBtn.disabled = !expInserted; // a pulled key has nothing to rattle
     expBladeMark.classList.remove('rattling');
     expLayoutKey(); // drop the keyframe transform back to the base one
+    // rattling counts as grounded, so ending it can change the cover
+    if (expInserted) expApplyCover();
   }
   function expStartRattle() {
     if (expRattling || !expInserted) return;
+    // Set first: expApplyCover() treats a rattling key as grounded, so the
+    // burst has to be flagged before the cover it runs with is computed.
+    expRattling = true;
     expApplyCover();
     api.keyRattle(EXP_RATTLE_CYCLES);
-    expRattling = true;
     expRattleBtn.disabled = true;
     expBladeMark.classList.add('rattling');
   }
@@ -1677,6 +1775,9 @@
     pinPos: (pin) => expPinPos(pin),
     state: () => ({ x: expKeyX, y: expKeyY, angle: expKeyAngle, inserted: expInserted }),
     bridged: () => expBridgedPins(),
+    shellContact: () => expShellContact(),
+    grounded: () => expKeyGrounded(expBridgedPins()),
+    cavityHalfWidth: (y) => expCavityHalfWidth(y),
     // the rectangle the hit test uses, for cross-checking against the drawing
     blade: () => ({
       x: expKeyX,
