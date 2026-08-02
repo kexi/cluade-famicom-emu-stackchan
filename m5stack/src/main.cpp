@@ -1013,13 +1013,26 @@ void loop() {
     // one, so a single quick frame cannot arm a stall; the EWMA is updated after
     // runFrame() below. Independent of PERF_LOG, which is a diagnostic and may be
     // compiled out.
-    // Seeded from the first draw frame rather than a large constant. A large seed
-    // looks conservative — the guard cannot fire until the average has decayed
-    // into range — but that decay takes ~100 draw frames, i.e. ten seconds during
-    // which a fast build would be running completely unguarded.
+    //
+    // Only frames that actually rendered are averaged, and the guard only applies
+    // while rendering is on. Both halves are the same observation: the race being
+    // guarded is renderScanline overwriting rows the DMA is still reading, and
+    // with $2001 rendering disabled renderScanline paints nothing, so there is no
+    // writer to race and nothing the measurement would describe.
+    //
+    // Why not the previous floor-the-seed approach: it only covered the *first*
+    // sample. A run with rendering off lasts as long as the game leaves it off —
+    // menus, screen transitions, the whole boot sequence — and every frame in it
+    // measures 2-3ms. From the second such frame on, those samples entered the
+    // EWMA unfiltered, and at alpha 0.05 a single one pulls a 16.45ms average
+    // down by ~0.7ms; a few dozen drag it clean through the threshold. The guard
+    // then armed on the way out, and each draw frame paid a joinBand stall for a
+    // race that could not happen. Filtering the samples fixes it at the source
+    // rather than papering over the first one.
     static float emuDrawMs = 0.0f;
     static bool emuDrawSeeded = false;
-    const bool repaintRacesBand = drawThisFrame && emuDrawSeeded && emuDrawMs < DISPLAY_REPAINT_GUARD_MS;
+    const bool rendering = g_nes.ppu.renderingOn();
+    const bool repaintRacesBand = drawThisFrame && rendering && emuDrawSeeded && emuDrawMs < DISPLAY_REPAINT_GUARD_MS;
     if (repaintRacesBand) joinBand();
     const int64_t flushEndUs = esp_timer_get_time();
     g_nes.runFrame();
@@ -1028,23 +1041,22 @@ void loop() {
     // Feed the guard above. Only draw frames count: they are the ones that
     // repaint, and a skipped frame is much cheaper, so mixing the two in would
     // understate the writer's pace and arm the guard needlessly.
-    if (drawThisFrame) {
+    //
+    // And only frames that rendered. The EWMA is meant to answer "how long does a
+    // repaint take", so a frame during which renderScanline painted nothing is
+    // not a slow or fast instance of that — it is not an instance of it at all.
+    // Rendering is re-read here rather than reused from before runFrame(): the
+    // frame just measured is the one that matters, and the game may have written
+    // $2001 during it.
+    const bool renderedThisFrame = g_nes.ppu.renderingOn();
+    if (drawThisFrame && renderedThisFrame) {
         const float drawMs = (float)(emuEndUs - flushEndUs) / 1000.0f;
         // The first sample is taken whole: there is no prior average to blend it
         // into, and starting at the real value is what keeps the guard live from
-        // the second picture onward instead of after a decay.
-        //
-        // Floored at the guard threshold, though. Why not seed with the raw value:
-        // the first draw frames run before the game has enabled rendering, so
-        // renderScanline does nothing and they measure a few milliseconds — well
-        // under the guard. Seeding from one of those arms the guard immediately,
-        // and the slow EWMA then needs ~100 draw frames (several seconds at
-        // divisor 4) to climb back out, during which every draw frame pays a
-        // joinBand stall for a race that is not happening. Starting at the
-        // threshold means the guard is disarmed until a measurement genuinely
-        // pulls the average below it, which is the state the guard is for.
-        const float seed = drawMs > DISPLAY_REPAINT_GUARD_MS ? drawMs : DISPLAY_REPAINT_GUARD_MS;
-        emuDrawMs = emuDrawSeeded ? emuDrawMs + DISPLAY_EMU_EWMA_ALPHA * (drawMs - emuDrawMs) : seed;
+        // the second picture onward instead of after a decay. No floor is needed
+        // now that samples are filtered — the boot frames that made the raw value
+        // untrustworthy are exactly the ones that no longer reach here.
+        emuDrawMs = emuDrawSeeded ? emuDrawMs + DISPLAY_EMU_EWMA_ALPHA * (drawMs - emuDrawMs) : drawMs;
         emuDrawSeeded = true;
     }
 
@@ -1073,13 +1085,15 @@ void loop() {
     // two, so the wire has long since drained and the join costs nothing.
     //
     // Why this is safe even though it leaves the last band in flight across a
-    // repaint: on a draw frame the previous iteration kicked the final band (rows
-    // 180-239 at DISPLAY_DMA_ROWS=60), and runFrame() starts repainting ~0.5ms
-    // later. The writer and the reader are separated in both space and time.
-    // renderScanline writes strictly top-to-bottom (PPU::step draws line N at dot
-    // 256), so row 180 is not touched until 180/262 of the way through emulation
-    // — at the measured emuD=19.7ms that is kick+13.5ms, while the band's 60 rows
-    // finish on the wire at kick+6.15ms. Margin ~7.4ms.
+    // repaint: on a draw frame the previous iteration kicked the final band (the
+    // last DISPLAY_DMA_ROWS rows, i.e. from NES_HEIGHT - DISPLAY_DMA_ROWS to
+    // NES_HEIGHT - 1 — rows 180-239 at the current values), and runFrame() starts
+    // repainting ~0.5ms later. The writer and the reader are separated in both
+    // space and time. renderScanline writes strictly top-to-bottom (PPU::step
+    // draws line N at dot 256), so that first band row is not touched until
+    // (NES_HEIGHT - DISPLAY_DMA_ROWS)/262 of the way through emulation — at the
+    // measured emuD=19.7ms that is kick+13.5ms, while the band finishes on the
+    // wire at kick+6.15ms. Margin ~7.4ms.
     //
     // That margin shrinks as emulation gets faster, because the writer speeds up
     // while the reader is fixed at the SPI clock. Break-even is emuD = 8.2ms; see

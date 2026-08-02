@@ -741,9 +741,19 @@ void NES_HOT PPU::stepMany(int dots) {
         // Why not include 241 and 261: 241 dot 1 raises vblank and fires NMI (and
         // ends the frame), 261 dot 1 clears the status flags. Both must still be
         // landed on, so they stay with the general dot 1 case below.
-        const bool idleLine = scanline_ == 240 || (scanline_ >= 242 && scanline_ <= 260);
+        //
+        // Said with the locals above rather than as the literal range 240 ||
+        // 242..260: scanline_ runs 0..261, so "not visible, not prerender, not
+        // 241" picks out exactly those lines. Why not the literals: they restate
+        // the boundaries `visible` and `prerender` already define, so moving
+        // either one (a different post-render layout) would leave this line
+        // silently disagreeing with them.
+        const bool idleLine = !visible && !prerender && scanline_ != 241;
+        // An idle line keeps `next` at its initial 340 — the one dot it has to
+        // land on — so it needs no branch of its own, only to be excluded from
+        // the ones below.
         if (idleLine) {
-            next = 340;
+            // nothing to do
         } else if (dot_ <= 1) {
             // Dot 1 carries work on every line regardless of rendering state:
             // scanline 241 sets vblank (which is what ends the frame) and 261
