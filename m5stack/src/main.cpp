@@ -16,6 +16,7 @@
 #include "../../core/nes.h"
 #include "config.h"
 #include "grove_input.h"
+#include "sd_rom.h"
 #include "secrets.h"
 
 // Statically allocated in internal SRAM (not PSRAM): ppu.framebuffer is handed
@@ -437,6 +438,21 @@ void setup() {
 
     // Before WiFi: the Grove controllers work regardless of network state.
     groveInputInit();
+
+    // Mount the card here, while the display is still being driven by ordinary
+    // blocking primitives. Doing it after the frame loop has started would mean
+    // reaching for the shared SPI bus with a band possibly in flight; setup()
+    // has no bands outstanding by construction, so this is the one place where
+    // the ordering costs nothing to guarantee.
+    sdRomInit();
+    if (sdRomMounted()) {
+        static SdRomEntry entries[SD_ROM_MAX_FILES];
+        const int found = sdRomScan(entries, SD_ROM_MAX_FILES);
+        Serial.printf("SD: %d ROM(s) in %s\n", found, SD_ROMS_DIR);
+        for (int i = 0; i < found; i++) {
+            Serial.printf("SD:   %s (%u bytes)\n", entries[i].name, (unsigned)entries[i].size);
+        }
+    }
 
     g_wifiConnected = connectWifi();
     if (g_wifiConnected) {

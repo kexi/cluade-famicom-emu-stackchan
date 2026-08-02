@@ -369,3 +369,44 @@ constexpr uint32_t CPU_CYCLES_PER_US = 240;
 // --------------------------------------------------------------------- WiFi
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr uint32_t IP_DISPLAY_MS = 2000;
+
+// ----------------------------------------------------------------- SD card
+// The CoreS3's microSD sits on the same SPI bus as the LCD (SCK=36, MISO=35,
+// MOSI=37; only the chip select differs), so a card access issued while a band
+// DMA is in flight would interleave with the panel's transaction. Nothing in
+// the SD driver can see that, which is why the rule is structural instead:
+// every sdRom* call happens on core 1 after joinBand(), with no band
+// outstanding. See sd_rom.h.
+//
+// 25MHz rather than the 40MHz the panel runs at: the card is reached through
+// the same traces plus a socket, the SD spec's high-speed ceiling is 50MHz for
+// SDHC and cheap cards routinely miss it, and nothing here is throughput-bound
+// (a 1MB ROM at 25MHz is ~0.3s of wire time against the ~1-2s the whole save
+// is budgeted for). Drop to 20 or 10MHz if a card proves flaky.
+constexpr uint32_t SD_SPI_FREQ = 25000000;
+// Where ROMs live. A fixed directory, not a configurable root, because the
+// path a network peer can influence is then only ever a basename appended to
+// this constant — traversal is impossible by construction rather than by
+// checking for "..".
+constexpr char SD_ROMS_DIR[] = "/roms";
+// Suffix for a save still in progress. A ".nes" only ever appears under its
+// final name after a successful rename, so an interrupted write cannot be
+// mistaken for a complete image.
+constexpr char SD_PART_SUFFIX[] = ".part";
+// Ceiling on a directory listing. The array is a static in main.cpp
+// (64 * 68B ≈ 4.4KB), and a listing that cannot fit the menu's scroll is of no
+// use to anyone; extra files are skipped with a serial warning.
+constexpr int SD_ROM_MAX_FILES = 64;
+// Longest file name handled, including the NUL. FAT short names are 8.3 and
+// VFAT allows 255, but 64 covers every realistic ROM name while keeping the
+// listing array and the type 5 packet entries small.
+constexpr int SD_ROM_NAME_MAX = 64;
+// Slack demanded on top of the image before a save is attempted. FAT allocates
+// in clusters and the directory entry itself costs space, so a save sized to
+// exactly the free bytes can still fail half-written; refusing early keeps
+// that case out of the .part cleanup path.
+constexpr uint32_t SD_SAVE_MARGIN_BYTES = 64 * 1024;
+// Unit of a file read/write. Large enough that the per-call overhead of the
+// FAT layer disappears against the transfer, small enough to sit on the loop
+// task's stack budget without a heap allocation.
+constexpr size_t SD_IO_CHUNK = 4096;
