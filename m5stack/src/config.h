@@ -307,6 +307,9 @@ constexpr uint8_t UDP_DEBUG_HEADER = 7;
 constexpr int UDP_DEBUG_CHUNK = 1400;   // stays inside a 1500-byte MTU
 constexpr uint8_t UDP_CTRL_RESET = 0x01;   // byte [6] bit 0
 constexpr uint8_t UDP_CTRL_VOLUME = 0x02;   // byte [6] bit 1, level in byte [7]
+// ROM 選択メニューを開く (ゲーム中のみ意味を持つ)。プロコンの HOME など、
+// NES のパッドビットに居場所のないボタンをメニュー呼び出しに使うための口。
+constexpr uint8_t UDP_CTRL_MENU = 0x04;   // byte [6] bit 2
 
 // Cartridge swap over WiFi. The ROM arrives in chunks because a .nes image is far
 // past any MTU; it is staged in PSRAM and only handed to the core once the whole
@@ -528,8 +531,9 @@ constexpr uint32_t HEAD_TOUCH_POLL_MS = 16;
 // 頭の端から端までの片道が 2、往復で 4 になる。回数 (ストローク) 数えでは
 // なく距離にしたのは、指を離さず連続でゴシゴシする自然ななでなでを 1 回と
 // 数え損ねないため。1 で開くと抱え上げたときの偶発的な一触れで即ゲームが
-// 中断するので、往復ぶんを要求する。
-constexpr int HEAD_TOUCH_TRAVEL_TO_MENU = 4;
+// 中断する。4 (往復) は実機で「反応が悪い」となったので、片道 + 1 またぎに
+// 緩めてある — 偶発的な接触は 1 またぎ止まりで、これでも誤爆しない。
+constexpr int HEAD_TOUCH_TRAVEL_TO_MENU = 3;
 // 動き (新しいゾーンへの移動) がこれだけ途絶えたら距離を数え直す。指を
 // 置いたまま考えている・単発の一撫でを、後から来る撫でと合算しないため。
 constexpr uint32_t HEAD_TOUCH_TRAVEL_RESET_MS = 1000;

@@ -537,6 +537,7 @@ static void udpTask(void*) {
             // is mid-frame on core 1, so the work happens at a frame boundary.
             if (cmd & UDP_CTRL_RESET) g_resetRequested.store(true, std::memory_order_relaxed);
             if (cmd & UDP_CTRL_VOLUME) g_volume.store(packet[7], std::memory_order_relaxed);
+            if (cmd & UDP_CTRL_MENU) g_menuRequested.store(true, std::memory_order_relaxed);
             continue;
         }
 

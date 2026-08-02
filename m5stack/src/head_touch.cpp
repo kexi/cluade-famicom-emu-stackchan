@@ -24,11 +24,11 @@ static constexpr uint8_t SI12T_REG_CTRL2 = 0x09;
 static constexpr uint8_t SI12T_REG_REF_RST1 = 0x0A;   // 0x0A-0x0F が ch 有効化
 static constexpr uint8_t SI12T_REG_OUTPUT1 = 0x10;   // 3 ゾーンぶんが 2bit ずつ
 
-// 感度設定値。BSP が TouchSensor_Class::begin() で使う
-// (SI12T_Type_High, SI12T_Sensitivity_Level_4) の組がこの 0xCC に当たる。
-// High タイプは上位ニブルが 0x8 + レベル、Low タイプは 0x0 + レベル、
-// それを 2ch ぶん同じ値で 1 バイトに詰める仕様なので 0xC が 2 つ並ぶ。
-static constexpr uint8_t SI12T_SENSITIVITY_VALUE = 0xCC;
+// 感度設定値。BSP の既定 (SI12T_Type_High, Level_4 = 0xCC) から 2 段階上げて
+// ある: 実機で撫でてもゾーンの反応が渋く「反応が悪い」となったため。High
+// タイプは上位ニブルが 0x8 + レベル、それを 2ch ぶん同じ値で 1 バイトに
+// 詰める仕様なので同じニブルが 2 つ並ぶ。最大は 0xFF (Level_7)。
+static constexpr uint8_t SI12T_SENSITIVITY_VALUE = 0xEE;
 // CTRL1: Auto モード / FTC=01 / 割り込みは Middle+High / レスポンス 4。
 static constexpr uint8_t SI12T_CTRL1_VALUE = 0x22;
 // CTRL2: S/W リセットを一度立ててから通常動作 + スリープ有効に落とす。
