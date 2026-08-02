@@ -152,6 +152,23 @@ SD_LIST_HEADER = 30
 SD_TIMEOUT_S = 3.0
 SD_RETRIES = 3
 SD_STATUS_OK = 0
+SD_STATUS_BUSY = 7
+# Overall budget for an idempotent op that keeps answering BUSY. The firmware
+# serves one type 5 request at a time and answers BUSY to everything else while
+# core 1 works, including a retransmission of the very request it is running, so
+# a LOAD slow enough to outlast SD_TIMEOUT_S would otherwise be reported as a
+# failure at the moment it is about to succeed. Waiting instead of failing needs
+# a bound, and this is it.
+SD_BUSY_DEADLINE_S = 12.0
+# Gap between retransmissions while the device says BUSY. Short enough that the
+# answer is picked up promptly once core 1 is free, long enough that the wait is
+# not a busy-loop on the device's receive path.
+SD_BUSY_RETRY_S = 0.25
+# Returned by the receive helpers for "the device said BUSY, ask again". A
+# sentinel rather than None because the two mean opposite things to the caller:
+# None is silence and spends a retransmission attempt, this is an answer and
+# does not.
+_SD_BUSY = object()
 SD_STATUS_NAMES = {
     0: "OK",
     1: "NOT_MOUNTED",
@@ -791,14 +808,37 @@ class PinRelay:
         idempotent = op in (SD_OP_LIST, SD_OP_LOAD)
         attempts = SD_RETRIES if idempotent else 1
 
+        # BUSY means core 1 is occupied, not that this request was rejected —
+        # the firmware answers it even to a retransmission of the request it is
+        # currently serving. For an idempotent op the right move is therefore to
+        # keep asking until it frees up, bounded by an overall deadline, rather
+        # than surfacing a 409 for an operation that is about to complete. The
+        # busy wait does not consume `attempts`: those exist for lost datagrams,
+        # and a BUSY is proof the datagram arrived.
+        busy_deadline = time.monotonic() + SD_BUSY_DEADLINE_S
+
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            for _ in range(attempts):
+            sent = 0
+            while sent < attempts:
                 sock.sendto(packet, (host, self.device_port))
+                sent += 1
                 if op == SD_OP_LIST:
                     listing = self._sd_collect_list(sock, seq)
                 else:
                     listing = self._sd_await_ack(sock, seq, op)
+                busy = listing is _SD_BUSY
+                if busy:
+                    # DELETE/RENAME never reach here: _sd_await_ack only returns
+                    # the sentinel for an idempotent op, so their single send and
+                    # immediate BUSY failure are untouched.
+                    if time.monotonic() >= busy_deadline:
+                        raise SdCommandError(
+                            SD_STATUS_BUSY, SD_STATUS_TEXT[SD_STATUS_BUSY]
+                        )
+                    time.sleep(SD_BUSY_RETRY_S)
+                    sent -= 1  # a BUSY is an answer, so it costs no attempt
+                    continue
                 if listing is not None:
                     return listing
             if idempotent:
@@ -813,7 +853,11 @@ class PinRelay:
             sock.close()
 
     def _sd_await_ack(self, sock, seq: int, op: int):
-        """Read one command's ACK within the timeout, or None to retransmit."""
+        """Read one command's ACK within the timeout.
+
+        Returns None to retransmit (nothing arrived), `_SD_BUSY` when an
+        idempotent op should wait and ask again, or the result dict.
+        """
         deadline = time.monotonic() + SD_TIMEOUT_S
         while True:
             remaining = deadline - time.monotonic()
@@ -827,6 +871,12 @@ class PinRelay:
             ack = parse_sd_ack(reply, seq, op)
             if ack is None:
                 continue  # stale or foreign datagram
+            # Handed back rather than raised, but only for LOAD: for DELETE and
+            # RENAME a BUSY is final by design, since re-sending them is what the
+            # single-attempt rule exists to prevent.
+            busy_and_retriable = ack["status"] == SD_STATUS_BUSY and op == SD_OP_LOAD
+            if busy_and_retriable:
+                return _SD_BUSY
             if ack["status"] != SD_STATUS_OK:
                 raise SdCommandError(
                     ack["status"], SD_STATUS_TEXT.get(ack["status"], "?")
@@ -863,6 +913,13 @@ class PinRelay:
                 continue
             # A LIST that failed before it had anything to list answers with the
             # bare 8-byte ACK, so the status is checked before the header is read.
+            #
+            # BUSY is the one status that is not a failure: it says core 1 has
+            # not got to this request yet. Reported up so the caller can wait,
+            # and returned immediately because no part of the listing can follow
+            # a BUSY — the device answered the request as a whole.
+            if ack["status"] == SD_STATUS_BUSY:
+                return _SD_BUSY
             if ack["status"] != SD_STATUS_OK:
                 raise SdCommandError(
                     ack["status"], SD_STATUS_TEXT.get(ack["status"], "?")

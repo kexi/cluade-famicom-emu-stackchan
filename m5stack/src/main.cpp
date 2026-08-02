@@ -144,6 +144,19 @@ static char g_romPendingName[SD_ROM_NAME_MAX] = {};
 // The BEGIN's source, so the save outcome reaches the same peer that asked for
 // it even if some other host is also talking to the device.
 static sockaddr_in g_romPendingFrom = {};
+// The last session whose END was accepted, so a resent END (its ACK was lost)
+// is answered OK again instead of BUSY or NO_SESSION.
+//
+// Why not reuse g_romActive for this: END deliberately clears it, and it has to
+// — leaving it set would let a stale session block the next BEGIN and would keep
+// DATA writing into a buffer core 1 already owns. The completed session is a
+// separate, narrower fact: "this exact transfer already finished, so say so".
+//
+// Why a single slot rather than a set: the sender is a stop-and-wait loop with
+// one transfer in flight, so the only END that can be resent is the most recent
+// one. Owned entirely by the UDP task, like the rest of the transfer state.
+static bool g_romCompletedValid = false;
+static uint16_t g_romCompletedSession = 0;
 
 // Copy a length-prefixed name field out of a datagram.
 //
@@ -242,6 +255,17 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
     // launchSdRom()'s claim handshake, and only a total order over both flags
     // stops the two cores from each deciding the buffer is theirs.
     const bool loopOwnsStaging = g_stagingBusy.load(std::memory_order_seq_cst);
+    // Checked before the busy gate, not after: this END's ACK was lost, and the
+    // transfer it belongs to is already accepted — the apply it is waiting on is
+    // the very thing that makes the gate refuse. Answering BUSY here would fail a
+    // transfer the device actually completed, and once the apply finished the
+    // resend would fall through to the NO_SESSION reply instead, so neither
+    // ordering of the retry can succeed without this.
+    const bool endOfCompleted = op == UDP_ROM_OP_END && g_romCompletedValid && session == g_romCompletedSession;
+    if (endOfCompleted) {
+        sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_OK);
+        return;
+    }
     if (applyPending || loopOwnsStaging) {
         sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_BUSY);
         return;
@@ -297,6 +321,11 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
             return;
         }
 
+        // A fresh BEGIN retires the completed-session memory, including the case
+        // where the sender reuses the same session number: from here on this
+        // session means the transfer starting now, and answering a later END of
+        // it from the old record would report success for bytes never received.
+        g_romCompletedValid = false;
         g_romSession = session;
         g_romExpectedSize = total;
         g_romExpectedCrc = (uint32_t)packet[12] | ((uint32_t)packet[13] << 8) | ((uint32_t)packet[14] << 16) |
@@ -404,6 +433,10 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
         memcpy(g_romSaveName, g_romPendingName, sizeof(g_romSaveName));
         g_romSaveReplyTo = g_romPendingFrom;
         g_romActive = false;
+        // Recorded before the ACK goes out, so even a retry that races the reply
+        // finds the transfer already marked complete.
+        g_romCompletedValid = true;
+        g_romCompletedSession = session;
         // Publishes the buffer and the plain globals above to core 1.
         g_romApplyRequested.store(true, std::memory_order_release);
         sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_OK);
@@ -1318,7 +1351,10 @@ static void sendSdListing(const sockaddr_in& to, uint16_t seq) {
     if (g_udpSock < 0) return;
 
     static SdRomEntry entries[SD_ROM_MAX_FILES];
-    const int count = sdRomMounted() ? sdRomScan(entries, SD_ROM_MAX_FILES) : 0;
+    // Called unconditionally rather than behind sdRomMounted(): the scan now
+    // remounts a card that was inserted after boot (rate-limited internally), and
+    // guarding it here would keep answering NotMounted to a card that is present.
+    const int count = sdRomScan(entries, SD_ROM_MAX_FILES);
     // Asked after the scan, not before: the scan is what discovers a card that
     // has gone away (it drops the mount when /roms is neither openable nor
     // creatable), so testing first would answer Ok with an empty listing for a

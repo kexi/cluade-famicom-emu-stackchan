@@ -157,8 +157,9 @@ void sdRomCleanupParts() {
     //
     // static rather than automatic: 4KB out of the Arduino loop task's 8KB
     // stack, on top of what the SD/FAT driver needs underneath, is more than the
-    // frame is worth. Safe because sdRomInit() calls this once from setup() and
-    // nothing re-enters it.
+    // frame is worth. Safe despite being shared: both callers (sdRomInit() from
+    // setup(), and the scan's remount path at a frame boundary) run on core 1
+    // and this function neither recurses nor yields, so no two walks overlap.
     static char doomed[SD_ROM_MAX_FILES][SD_ROM_NAME_MAX];
     // Parallel to `doomed`: true for a ".bak", which is restored rather than
     // deleted. Kept as a flag array instead of a second pass over the directory
@@ -229,8 +230,50 @@ void sdRomCleanupParts() {
 
 // -------------------------------------------------------------------- scan
 
+// Shortest gap between two remount attempts made on the scan path. A failed
+// mount on an empty slot costs the SD library's probe timeout, and the scan runs
+// on core 1's frame boundary, so an unthrottled retry would stutter the frame
+// every time a listing is asked for with no card in.
+static const uint32_t SCAN_REMOUNT_RETRY_MS = 3000;
+
+// millis() of the last attempt, or 0 for "never tried". 0 also means the very
+// first scan after boot retries immediately rather than waiting out the window.
+static uint32_t g_lastScanRemountMs = 0;
+
+// Get the card back before a listing, at most once per retry window.
+//
+// Why the scan needs this at all: sdRomLoad()/sdRomSave() already remount on
+// demand, so without it a card inserted after boot (or pulled and put back)
+// stays invisible in every listing while loading a ROM by name from that same
+// card would work — the listing is the only way the user finds the name, so the
+// asymmetry reads as a dead card.
+static bool ensureMountedForScan() {
+    if (g_mounted) return true;
+
+    // millis() wrapping (49.7 days) can only make one retry come early, which is
+    // harmless — the window exists to bound cost, not for correctness.
+    const uint32_t now = millis();
+    const bool everTried = g_lastScanRemountMs != 0;
+    const bool tooSoon = everTried && (now - g_lastScanRemountMs) < SCAN_REMOUNT_RETRY_MS;
+    if (tooSoon) return false;
+
+    g_lastScanRemountMs = now;
+    if (!sdRomRemount()) return false;
+
+    // A card that just came back is in the same state as one found at boot: it
+    // may be brand new (no /roms) and it may carry the debris of a save that was
+    // interrupted by the removal itself, which is exactly what sdRomInit() does
+    // on the boot path. Doing it here keeps a re-inserted card from listing a
+    // half-written .part as if it were a ROM.
+    const bool dirMissing = !SD.exists(SD_ROMS_DIR);
+    if (dirMissing) SD.mkdir(SD_ROMS_DIR);
+    sdRomCleanupParts();
+    return true;
+}
+
 int sdRomScan(SdRomEntry* out, int max) {
-    if (!g_mounted || max <= 0) return 0;
+    if (max <= 0) return 0;
+    if (!ensureMountedForScan()) return 0;
 
     File dir = SD.open(SD_ROMS_DIR);
     const bool dirUnusable = !dir || !dir.isDirectory();
