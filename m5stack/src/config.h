@@ -224,6 +224,12 @@ constexpr char SD_ROMS_DIR[] = "/roms";
 // final name after a successful rename, so an interrupted write cannot be
 // mistaken for a complete image.
 constexpr char SD_PART_SUFFIX[] = ".part";
+// Suffix for the image an overwrite is replacing, held only for the instant
+// between moving the old file aside and the new one landing under its name.
+// Why a distinct suffix rather than reusing ".part": the sweep deletes .part
+// files outright, and a .bak is the opposite — the last complete copy of a ROM
+// whose replacement did not arrive, so it is restored rather than discarded.
+constexpr char SD_BAK_SUFFIX[] = ".bak";
 // Ceiling on a directory listing. The array is a static in main.cpp
 // (64 * 68B ≈ 4.4KB), and a listing that cannot fit the menu's scroll is of no
 // use to anyone; extra files are skipped with a serial warning.

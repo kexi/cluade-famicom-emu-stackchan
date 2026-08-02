@@ -43,12 +43,16 @@ static bool endsWithNes(const char* name) {
     return ext[0] == '.' && (ext[1] | 0x20) == 'n' && (ext[2] | 0x20) == 'e' && (ext[3] | 0x20) == 's';
 }
 
-static bool endsWithPart(const char* name) {
+static bool endsWithSuffix(const char* name, const char* suffix) {
     const size_t len = strlen(name);
-    const size_t suffixLen = strlen(SD_PART_SUFFIX);
+    const size_t suffixLen = strlen(suffix);
     if (len < suffixLen) return false;
-    return strcmp(name + len - suffixLen, SD_PART_SUFFIX) == 0;
+    return strcmp(name + len - suffixLen, suffix) == 0;
 }
+
+static bool endsWithPart(const char* name) { return endsWithSuffix(name, SD_PART_SUFFIX); }
+
+static bool endsWithBak(const char* name) { return endsWithSuffix(name, SD_BAK_SUFFIX); }
 
 // Case-insensitive ASCII compare, for sorting a listing the way a user reads
 // it. Not strcasecmp: that is locale-aware in principle, and the names here are
@@ -156,15 +160,35 @@ void sdRomCleanupParts() {
     // frame is worth. Safe because sdRomInit() calls this once from setup() and
     // nothing re-enters it.
     static char doomed[SD_ROM_MAX_FILES][SD_ROM_NAME_MAX];
+    // Parallel to `doomed`: true for a ".bak", which is restored rather than
+    // deleted. Kept as a flag array instead of a second pass over the directory
+    // so the whole sweep still costs one walk.
+    static bool isBak[SD_ROM_MAX_FILES];
     int count = 0;
     for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
-        const char* name = f.name();
-        const bool skip = f.isDirectory() || !endsWithPart(name) || strlen(name) >= (size_t)SD_ROM_NAME_MAX;
+        // Copied before close() rather than after: f.name() hands back a pointer
+        // into the File's own storage, which close() releases, so reading it
+        // afterwards is a use-after-free that happens to survive on some driver
+        // versions and returns garbage on others.
+        char name[SD_ROM_NAME_MAX];
+        const char* raw = f.name();
+        const char* slash = strrchr(raw, '/');
+        if (slash) raw = slash + 1;
+        const bool nameFits = strlen(raw) < (size_t)SD_ROM_NAME_MAX;
+        if (nameFits) {
+            strncpy(name, raw, SD_ROM_NAME_MAX - 1);
+            name[SD_ROM_NAME_MAX - 1] = '\0';
+        } else {
+            name[0] = '\0';
+        }
+        const bool bak = nameFits && endsWithBak(name);
+        const bool skip = f.isDirectory() || !nameFits || (!endsWithPart(name) && !bak);
         f.close();
         if (skip) continue;
         if (count >= SD_ROM_MAX_FILES) break;
         strncpy(doomed[count], name, SD_ROM_NAME_MAX - 1);
         doomed[count][SD_ROM_NAME_MAX - 1] = '\0';
+        isBak[count] = bak;
         count++;
     }
     dir.close();
@@ -172,8 +196,34 @@ void sdRomCleanupParts() {
     for (int i = 0; i < count; i++) {
         char path[SD_ROM_NAME_MAX + sizeof(SD_ROMS_DIR) + 2];
         sdRomPath(doomed[i], path, sizeof(path));
-        SD.remove(path);
-        Serial.printf("SD: swept %s (interrupted write)\n", doomed[i]);
+        if (!isBak[i]) {
+            SD.remove(path);
+            Serial.printf("SD: swept %s (interrupted write)\n", doomed[i]);
+            continue;
+        }
+
+        // A .bak that outlived its save means power was lost between moving the
+        // old image aside and the new one landing. The old image is the only
+        // complete copy on the card, so it goes back under its own name —
+        // deleting it here is what would turn a survivable interruption into
+        // the data loss the .bak exists to prevent.
+        char restored[SD_ROM_NAME_MAX];
+        strncpy(restored, doomed[i], SD_ROM_NAME_MAX - 1);
+        restored[SD_ROM_NAME_MAX - 1] = '\0';
+        restored[strlen(restored) - strlen(SD_BAK_SUFFIX)] = '\0';
+        char finalPath[SD_ROM_NAME_MAX + sizeof(SD_ROMS_DIR) + 2];
+        sdRomPath(restored, finalPath, sizeof(finalPath));
+        // The new image landing is what makes the .bak redundant, so a .bak
+        // sitting next to an existing final name means the save did complete and
+        // only the cleanup was lost. Then the .bak is the stale one.
+        const bool newImageLanded = SD.exists(finalPath);
+        if (newImageLanded) {
+            SD.remove(path);
+            Serial.printf("SD: swept %s (save already completed)\n", doomed[i]);
+            continue;
+        }
+        const bool restoredOk = SD.rename(path, finalPath);
+        Serial.printf("SD: restored %s -> %s (%s)\n", doomed[i], restored, restoredOk ? "ok" : "failed");
     }
 }
 
@@ -186,24 +236,56 @@ int sdRomScan(SdRomEntry* out, int max) {
     const bool dirUnusable = !dir || !dir.isDirectory();
     if (dirUnusable) {
         if (dir) dir.close();
-        // A missing directory on a mounted card is not an I/O failure — the
-        // user may simply have never created it — so recreate rather than
-        // unmounting the card over it.
-        SD.mkdir(SD_ROMS_DIR);
+        // Two very different causes look identical here, so they are told apart
+        // before deciding: the user may never have created the directory (fine,
+        // make it), or the card may have been pulled (not fine — every later
+        // call would keep reporting an empty listing on a card that is gone).
+        // mkdir succeeding is the proof the card is still writable; when it
+        // fails the card is dropped so sdRomMounted() turns false and the
+        // existing remount path in sdRomLoad()/sdRomSave() — and the
+        // NotMounted reply the LIST caller sends on !sdRomMounted() — take over.
+        //
+        // Why not call recoverAfterIoFailure() here: it remounts immediately,
+        // which on a card that is physically absent parks this frame on the SPI
+        // bus for the mount timeout. Clearing the flag lets the next actual
+        // operation pay that cost, at a point where the caller is prepared for
+        // it.
+        const bool cardWritable = SD.mkdir(SD_ROMS_DIR) || SD.exists(SD_ROMS_DIR);
+        if (!cardWritable) {
+            Serial.println("SD: /roms unusable and cannot be created, card lost");
+            g_mounted = false;
+        }
         return 0;
     }
 
     int count = 0;
     for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
-        const char* name = f.name();
+        // Copied out before close() rather than used after it: f.name() points
+        // into the File object's own storage, which close() releases, so the
+        // later sdRomNameValid()/strncpy would be reading freed memory — it
+        // happens to still hold the name on some driver versions and hands back
+        // garbage on others, which is exactly the bug that listed corrupt names.
+        //
         // f.name() returns the basename on the ESP32 SD driver for entries
         // walked from an open directory, but a full path on some versions.
         // Take everything after the last '/' either way, so the listing is
         // always what sdRomPath() will later join back on.
-        const char* slash = strrchr(name, '/');
-        if (slash) name = slash + 1;
+        char name[SD_ROM_NAME_MAX];
+        const char* raw = f.name();
+        const char* slash = strrchr(raw, '/');
+        if (slash) raw = slash + 1;
+        // A name too long to copy cannot be listed anyway: sdRomNameValid()
+        // rejects it on length, so it is emptied here and falls out below with
+        // the same warning as any other unrepresentable name.
+        const bool nameFits = strlen(raw) < (size_t)SD_ROM_NAME_MAX;
+        if (nameFits) {
+            strncpy(name, raw, SD_ROM_NAME_MAX - 1);
+            name[SD_ROM_NAME_MAX - 1] = '\0';
+        } else {
+            name[0] = '\0';
+        }
 
-        const bool notRom = f.isDirectory() || !endsWithNes(name);
+        const bool notRom = f.isDirectory() || !nameFits || !endsWithNes(name);
         const uint32_t size = notRom ? 0 : (uint32_t)f.size();
         f.close();
         if (notRom) continue;
@@ -348,13 +430,38 @@ SdStatus sdRomSave(const char* name, const uint8_t* buf, size_t size) {
     // The overwrite happens here, at the last possible moment: until the rename
     // the old image is still intact, so a failure anywhere above leaves the
     // user with the ROM they already had.
-    SD.remove(finalPath);
+    //
+    // Why not remove(final) then rename(.part -> final): that pair has a window
+    // where neither file exists, and a rename that fails inside it destroys the
+    // ROM the user already had while not delivering the new one — the one
+    // outcome an atomic-ish save must never produce. Moving the old image aside
+    // instead keeps a complete copy on the card at every instant, so the failure
+    // path can put it back.
+    char bakPath[sizeof(finalPath) + sizeof(SD_BAK_SUFFIX)];
+    snprintf(bakPath, sizeof(bakPath), "%s%s", finalPath, SD_BAK_SUFFIX);
+    const bool overwriting = SD.exists(finalPath);
+    if (overwriting) {
+        // A .bak left by an earlier interrupted save would block the rename.
+        SD.remove(bakPath);
+        const bool stashed = SD.rename(finalPath, bakPath);
+        if (!stashed) {
+            SD.remove(partPath);
+            Serial.printf("SD: cannot move %s aside\n", finalPath);
+            return recoverAfterIoFailure() ? SdStatus::IoError : SdStatus::NotMounted;
+        }
+    }
     const bool renamed = SD.rename(partPath, finalPath);
     if (!renamed) {
         SD.remove(partPath);
+        // Put the old image back under its own name, so a failed overwrite is a
+        // no-op rather than a loss. If this restore fails too the image is still
+        // on the card as .bak, which cleanupParts() no longer sweeps blindly.
+        if (overwriting) SD.rename(bakPath, finalPath);
         Serial.printf("SD: rename %s -> %s failed\n", partPath, finalPath);
         return recoverAfterIoFailure() ? SdStatus::IoError : SdStatus::NotMounted;
     }
+    // Only now is the new image safely in place under its final name.
+    if (overwriting) SD.remove(bakPath);
     Serial.printf("SD: saved %s (%u bytes)\n", name, (unsigned)size);
     return SdStatus::Ok;
 }

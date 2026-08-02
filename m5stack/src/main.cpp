@@ -271,12 +271,32 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
             sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_TOO_BIG);
             return;
         }
+
+        // The mirror image of launchSdRom()'s claim: publish the intent, then
+        // re-read the other core's flag, and stand down if it got there first.
+        // The g_stagingBusy test at the top of this function is not enough on
+        // its own — it is a bare load, so core 1 can pass its own re-check in
+        // the gap between that load and here, leaving both cores believing they
+        // own g_romBuf. Only the symmetric store-then-recheck, in one seq_cst
+        // total order, makes at most one of them win.
+        //
+        // Set before ensureStagingBuffer() for the same reason core 1 allocates
+        // after its claim: the allocation writes g_romBuf, and two concurrent
+        // first-time allocations would leak one buffer and split the cores
+        // across two others.
+        g_romActive.store(true, std::memory_order_seq_cst);
+        const bool loopWon = g_stagingBusy.load(std::memory_order_seq_cst);
+        if (loopWon) {
+            g_romActive.store(false, std::memory_order_seq_cst);
+            sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_BUSY);
+            return;
+        }
         if (!ensureStagingBuffer()) {
+            g_romActive.store(false, std::memory_order_seq_cst);
             sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_ALLOC);
             return;
         }
 
-        g_romActive = true;
         g_romSession = session;
         g_romExpectedSize = total;
         g_romExpectedCrc = (uint32_t)packet[12] | ((uint32_t)packet[13] << 8) | ((uint32_t)packet[14] << 16) |
@@ -1236,7 +1256,6 @@ static void enterMenu() {
 // whole read-plus-install: a BEGIN that arrived between the read and the install
 // would otherwise overwrite the image while installRom() is walking it.
 static SdStatus launchSdRom(const char* name) {
-    if (!ensureStagingBuffer()) return SdStatus::IoError;
     // Claim first, then re-check. Checking before claiming leaves a window: a
     // BEGIN that passed its own g_stagingBusy test just before the store below
     // would start filling g_romBuf while sdRomLoad() is reading into it, and the
@@ -1255,6 +1274,16 @@ static SdStatus launchSdRom(const char* name) {
         // the PC side something it can retry on.
         g_stagingBusy.store(false, std::memory_order_release);
         return SdStatus::Busy;
+    }
+
+    // Allocated only after the claim is uncontested. Why not before, which reads
+    // more naturally: ensureStagingBuffer() writes g_romBuf, so calling it ahead
+    // of the claim lets both cores allocate concurrently on the very first
+    // transfer — one malloc leaks and the two cores go on to use different
+    // buffers, which is the same mixed-ROM outcome the claim exists to prevent.
+    if (!ensureStagingBuffer()) {
+        g_stagingBusy.store(false, std::memory_order_release);
+        return SdStatus::IoError;
     }
 
     size_t size = 0;
@@ -1289,9 +1318,12 @@ static void sendSdListing(const sockaddr_in& to, uint16_t seq) {
     if (g_udpSock < 0) return;
 
     static SdRomEntry entries[SD_ROM_MAX_FILES];
-    const bool mounted = sdRomMounted();
-    const int count = mounted ? sdRomScan(entries, SD_ROM_MAX_FILES) : 0;
-    if (!mounted) {
+    const int count = sdRomMounted() ? sdRomScan(entries, SD_ROM_MAX_FILES) : 0;
+    // Asked after the scan, not before: the scan is what discovers a card that
+    // has gone away (it drops the mount when /roms is neither openable nor
+    // creatable), so testing first would answer Ok with an empty listing for a
+    // card that is no longer there.
+    if (!sdRomMounted()) {
         sendSdAck(g_udpSock, to, UDP_SD_OP_LIST, seq, SdStatus::NotMounted);
         return;
     }
