@@ -60,6 +60,12 @@ static uint8_t* g_romBuf = nullptr;
 static uint32_t g_romSize = 0;
 static uint8_t g_romFlags = 0;
 static std::atomic<bool> g_romApplyRequested{false};
+// The other half of the staging interlock, in the opposite direction: core 1
+// sets this while it is filling g_romBuf from the SD card, and the UDP task's
+// BEGIN refuses with BUSY for as long as it is set. g_romApplyRequested alone
+// cannot cover that case — it means "core 0 has published an image", which is
+// exactly not what an SD load does.
+static std::atomic<bool> g_stagingBusy{false};
 // The UDP socket, shared so loop() can answer directly. lwIP's sendto is
 // thread-safe, and replying from the emulation core avoids handing the snapshot
 // buffer across tasks while it is being filled.
@@ -109,33 +115,54 @@ static void sendRomAck(int sock, const sockaddr_in& to, uint8_t op, uint16_t ses
     ::sendto(sock, ack, sizeof(ack), 0, (const sockaddr*)&to, sizeof(to));
 }
 
-// Validate the staged image the same way nes::loadRom will, so a cart that cannot
+// Validate an image the same way nes::loadRom will, so a cart that cannot
 // possibly load is rejected while the sender is still listening — rather than
 // failing on core 1 where the only report would be a serial line.
-static uint8_t checkStagedRom() {
-    const bool magicOk = g_romBuf[0] == 'N' && g_romBuf[1] == 'E' && g_romBuf[2] == 'S' && g_romBuf[3] == 0x1A;
+//
+// Takes the buffer rather than reading g_romBuf directly: the same question has
+// to be answered for an image read off the SD card, which never passes through
+// staging on the UDP task's schedule. Keeping one implementation is what stops
+// the two paths from disagreeing about which mappers this build supports.
+static uint8_t romHeaderStatus(const uint8_t* buf) {
+    const bool magicOk = buf[0] == 'N' && buf[1] == 'E' && buf[2] == 'S' && buf[3] == 0x1A;
     if (!magicOk) return UDP_ROM_STATUS_BAD_HEADER;
 
     // Archaic iNES: bytes 12-15 should be zero, and when they are not (e.g.
     // "DiskDude!" garbage) flags7's upper nibble is not a mapper number. Mirrors
     // cartridge.cpp's dirtyHeader rule exactly — disagreeing would let a ROM pass
     // here and then fail to load.
-    const bool dirtyHeader = g_romBuf[12] || g_romBuf[13] || g_romBuf[14] || g_romBuf[15];
-    const int mapperNum = (g_romBuf[6] >> 4) | (dirtyHeader ? 0 : (g_romBuf[7] & 0xF0));
+    const bool dirtyHeader = buf[12] || buf[13] || buf[14] || buf[15];
+    const int mapperNum = (buf[6] >> 4) | (dirtyHeader ? 0 : (buf[7] & 0xF0));
     const bool mapperSupported = mapperNum == 0 || mapperNum == 1 || mapperNum == 2 || mapperNum == 3 ||
                                  mapperNum == 4 || mapperNum == 24 || mapperNum == 26;
     if (!mapperSupported) return UDP_ROM_STATUS_UNSUPPORTED_MAPPER;
     return UDP_ROM_STATUS_OK;
 }
 
+// Reserve the PSRAM staging buffer on first use, and report whether it exists.
+//
+// Reserved once and never released: a buffer that comes and goes would race
+// core 1 and fragment PSRAM for nothing. 1MB against 8MB is cheap.
+//
+// Called from both cores — the UDP task on a BEGIN, core 1 before an SD load —
+// but never concurrently: core 1 only asks while holding g_stagingBusy, which
+// the BEGIN path checks first, so the allocation itself needs no lock.
+static bool ensureStagingBuffer() {
+    const bool needBuffer = g_romBuf == nullptr;
+    if (needBuffer) g_romBuf = (uint8_t*)heap_caps_malloc(ROM_MAX_SIZE, MALLOC_CAP_SPIRAM);
+    return g_romBuf != nullptr;
+}
+
 static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* packet, int received) {
     const uint16_t session = (uint16_t)(packet[4] | (packet[5] << 8));
     const uint8_t op = packet[6];
 
-    // The staging buffer belongs to core 1 until it has installed the ROM. Taking
-    // a new transfer now would overwrite the image out from under it.
+    // The staging buffer belongs to core 1 until it has installed the ROM, and
+    // equally while core 1 is filling it from the SD card. Taking a new transfer
+    // in either window would overwrite the image out from under it.
     const bool applyPending = g_romApplyRequested.load(std::memory_order_acquire);
-    if (applyPending) {
+    const bool loopOwnsStaging = g_stagingBusy.load(std::memory_order_acquire);
+    if (applyPending || loopOwnsStaging) {
         sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_BUSY);
         return;
     }
@@ -164,13 +191,7 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
             sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_TOO_BIG);
             return;
         }
-        // Reserved once and never released: a buffer that comes and goes would
-        // race core 1 and fragment PSRAM for nothing. 1MB against 8MB is cheap.
-        const bool needBuffer = g_romBuf == nullptr;
-        if (needBuffer) {
-            g_romBuf = (uint8_t*)heap_caps_malloc(ROM_MAX_SIZE, MALLOC_CAP_SPIRAM);
-        }
-        if (!g_romBuf) {
+        if (!ensureStagingBuffer()) {
             sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_ALLOC);
             return;
         }
@@ -258,7 +279,7 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
             sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_CRC);
             return;
         }
-        const uint8_t headerStatus = checkStagedRom();
+        const uint8_t headerStatus = romHeaderStatus(g_romBuf);
         const bool unloadable = headerStatus != UDP_ROM_STATUS_OK;
         if (unloadable) {
             g_romActive = false;
@@ -568,17 +589,18 @@ static void applyResetRequest() {
     Serial.println("RESET: console reset");
 }
 
-// Install a ROM that arrived over UDP, if one is waiting.
+// Hand an image to the core, whatever it came from.
 //
-// Runs at a frame boundary for the same reason as the reset above: the UDP task
-// stages the image mid-frame, and swapping the mapper out from under a running
-// instruction would fault. The acquire load pairs with the UDP task's release
-// store, so every staged byte is visible here.
-static void applyRomRequest() {
-    const bool requested = g_romApplyRequested.load(std::memory_order_acquire);
-    if (!requested) return;
-
-    const bool wantSwap = (g_romFlags & ROM_FLAG_SWAP) != 0;
+// Split out of applyRomRequest() because the SD path installs the same way from
+// a buffer that never went through the UDP session machinery: the mapper swap,
+// the fallback to the embedded image and the pace invalidation are properties of
+// *installing a cart*, not of how its bytes arrived. Returns whether the
+// requested image loaded — false still leaves a playable console, either the
+// previous cart (swap path) or the embedded ROM.
+//
+// Must be called at a frame boundary: swapping the mapper out from under a
+// running instruction would fault.
+static bool installRom(const uint8_t* data, uint32_t size, bool wantSwap) {
     bool ok = false;
     // The core allocates PRG/CHR through InternalRamAllocator, which throws when
     // internal SRAM runs out. A ROM the device cannot fit must leave the current
@@ -589,7 +611,7 @@ static void applyRomRequest() {
             // failed load leaves the running game untouched. The two therefore
             // coexist briefly and the new PRG may land in PSRAM — accepted, since
             // continuing to play matters more than that cart's speed.
-            auto m = nes::loadRom(g_romBuf, g_romSize);
+            auto m = nes::loadRom(data, size);
             if (m) {
                 g_nes.mapper = std::move(m);
                 g_nes.refreshMapperCaps();
@@ -609,7 +631,7 @@ static void applyRomRequest() {
             // which builds the replacement while the old one is still held, and on
             // this part that peak is enough to exhaust SRAM on a large ROM.
             g_nes.mapper.reset();
-            ok = g_nes.loadRom(g_romBuf, g_romSize);   // powerOn + refreshChrWindow included
+            ok = g_nes.loadRom(data, size);   // powerOn + refreshChrWindow included
         }
     } catch (const std::bad_alloc&) {
         ok = false;
@@ -637,8 +659,22 @@ static void applyRomRequest() {
     // described by the average built before this point.
     invalidateEmuDrawPace();
 
-    if (ok) Serial.printf("ROM: applied %u bytes%s\n", (unsigned)g_romSize, wantSwap ? " (no reset)" : "");
-    else Serial.printf("ROM: failed %u bytes\n", (unsigned)g_romSize);
+    if (ok) Serial.printf("ROM: applied %u bytes%s\n", (unsigned)size, wantSwap ? " (no reset)" : "");
+    else Serial.printf("ROM: failed %u bytes\n", (unsigned)size);
+    return ok;
+}
+
+// Install a ROM that arrived over UDP, if one is waiting.
+//
+// Runs at a frame boundary for the same reason as the reset above: the UDP task
+// stages the image mid-frame, and swapping the mapper out from under a running
+// instruction would fault. The acquire load pairs with the UDP task's release
+// store, so every staged byte is visible here.
+static void applyRomRequest() {
+    const bool requested = g_romApplyRequested.load(std::memory_order_acquire);
+    if (!requested) return;
+
+    installRom(g_romBuf, g_romSize, (g_romFlags & ROM_FLAG_SWAP) != 0);
 
     // Cleared last: until this store the UDP task treats the buffer as ours and
     // refuses new transfers. Clearing it earlier would let a BEGIN overwrite the
@@ -858,6 +894,12 @@ static uint32_t g_divisor = DISPLAY_DIVISOR_INITIAL;
 // handler in the middle of a frame.
 static bool g_pushOutstanding = false;
 
+// Which band the next kick ships. File scope for the same reason as the flag
+// above: leaving the frame loop for the menu has to reset it, or the first band
+// pushed after coming back would land mid-picture and paint one band of the new
+// game over three of the old.
+static int g_bandIndex = 0;
+
 // Close the open band transaction, if there is one, and wait for its DMA.
 // Panel_LCD::end_transaction() waits on the bus, so this both joins the transfer
 // and releases the SPI lock; waitDMA() alone would leave the lock held.
@@ -887,6 +929,32 @@ static void pushBand(int band) {
     M5.Display.startWrite();
     M5.Display.pushImageDMA(SCREEN_X_OFFSET, bandY, NES_WIDTH, bandRows,
                             g_nes.ppu.framebuffer + (size_t)bandY * NES_WIDTH);
+}
+
+// Bring the panel and the speaker back to the state setup() left them in, so
+// something other than the frame loop can own them.
+//
+// The three steps are not independent and the order matters. The band DMA has
+// to be joined first or the SPI bus stays locked and anything drawn afterwards
+// interleaves with a transfer still on the wire. The band index has to be reset
+// or the next picture starts from whichever band the loop was interrupted at.
+// And the ring has to be emptied rather than merely stopped: it holds up to
+// ~186ms of the previous game's audio, which would otherwise play out over the
+// first frames of the next one.
+//
+// Why not simply not stop the speaker: M5.Speaker.stop() drops what is already
+// queued in the hardware, and playRaw's queued buffers reference g_chunk slots
+// that the next game's drain will begin overwriting.
+static void stopVideoAudio() {
+    joinBand();
+    g_bandIndex = 0;
+    M5.Speaker.stop(SPEAKER_CHANNEL);
+    g_ringRead = 0;
+    g_ringWrite = 0;
+    // The DC blocker's state describes the signal that just stopped; carrying it
+    // into silence would decay as an audible thump at the start of the next one.
+    g_dcX1 = 0.0f;
+    g_dcY1 = 0.0f;
 }
 
 // Servo the playback rate to what the emulator actually produces.
@@ -1029,13 +1097,12 @@ void loop() {
     // which is what keeps the rows behind the in-flight bands stable; repainting
     // on every frame would let the emulator overwrite rows the DMA engine has not
     // read yet and tear the picture.
-    static int bandIndex = 0;
     const bool drawThisFrame = (thisFrame % g_divisor) == 0;
     // Bands still owed from the previous picture. A static_assert ties the
     // divisor floor to the segment count, so at the configured divisor this is
     // always zero on a draw frame; the flush below is the defence for a divisor
     // that does not satisfy that relation.
-    const bool pictureInFlight = bandIndex != 0;
+    const bool pictureInFlight = g_bandIndex != 0;
     g_nes.ppu.renderThisFrame = drawThisFrame;
 
     const int64_t emuStartUs = esp_timer_get_time();
@@ -1045,9 +1112,9 @@ void loop() {
     const bool mustFlushBeforeRepaint = drawThisFrame && pictureInFlight;
     if (mustFlushBeforeRepaint) {
         joinBand();
-        while (bandIndex != 0) {
-            pushBand(bandIndex);
-            bandIndex = (bandIndex + 1) % DISPLAY_DMA_SEGMENTS;
+        while (g_bandIndex != 0) {
+            pushBand(g_bandIndex);
+            g_bandIndex = (g_bandIndex + 1) % DISPLAY_DMA_SEGMENTS;
             M5.Display.endWrite();
         }
     }
@@ -1225,9 +1292,9 @@ void loop() {
 
     const bool hasBandToPush = drawThisFrame || pictureInFlight;
     if (hasBandToPush) {
-        pushBand(bandIndex);
+        pushBand(g_bandIndex);
         g_pushOutstanding = true;
-        bandIndex = (bandIndex + 1) % DISPLAY_DMA_SEGMENTS;
+        g_bandIndex = (g_bandIndex + 1) % DISPLAY_DMA_SEGMENTS;
     }
     const int64_t dmaEndUs = esp_timer_get_time();
 
