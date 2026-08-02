@@ -1,0 +1,149 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>exptest probe</title>
+<style>
+  body { background: #111; color: #ddd; font: 13px/1.5 ui-monospace, monospace; margin: 0; }
+  #host { width: 1px; height: 1px; opacity: 0; position: absolute; }
+  #shot { image-rendering: pixelated; width: 512px; height: 480px; border: 1px solid #444; }
+  #log { white-space: pre; padding: 8px; }
+</style>
+<!--
+  Headless probe for exptest.nes.
+
+  It loads the real index.html in an iframe purely to get a booted wasm module,
+  then drives the core directly through window.__nes.{api,Module}: the page's own
+  rAF loop is never used, so frames advance exactly when this script says so and
+  the run is deterministic. Everything is exposed on window.__exptest for a CDP
+  driver (tools/probe_exptest.py) to await.
+-->
+<iframe id="host" src="/index.html?rom=/exptest.nes&mute=1"></iframe>
+<canvas id="shot" width="256" height="240"></canvas>
+<div id="log">booting…</div>
+<script>
+(() => {
+  const logEl = document.getElementById('log');
+  const canvas = document.getElementById('shot');
+  const ctx = canvas.getContext('2d');
+  const lines = [];
+  const log = (s) => { lines.push(s); logEl.textContent = lines.join('\n'); };
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // The four colours exptest paints, as the ABGR words the framebuffer holds.
+  // Little-endian ABGR, so 0xff2031b5 reads back as R=b5 G=31 B=20 — red. Taking
+  // these straight from core/ppu.cpp's NES_PALETTE rather than eyeballing an RGB
+  // hex is what keeps the classifier honest.
+  const PAL = {
+    black: 0xff000000, // $0F
+    white: 0xfffffeff, // $30
+    red:   0xff2031b5, // $16
+    green: 0xff30e45c, // $2A
+  };
+
+  async function boot() {
+    const win = document.getElementById('host').contentWindow;
+    // Wait for main.js to publish the hook and for the wasm module to be live.
+    for (let i = 0; i < 600; i++) {
+      if (win.__nes && win.__nes.api && win.__nes.Module && win.__nes.Module.HEAPU8) break;
+      await sleep(50);
+    }
+    const { api, Module } = win.__nes;
+    if (!api) throw new Error('window.__nes never appeared');
+
+    // Load our ROM ourselves rather than trusting the page's own ?rom= fetch to
+    // have finished: this makes the starting state unambiguous.
+    const buf = new Uint8Array(await (await fetch('/exptest.nes')).arrayBuffer());
+    Module.HEAPU8.set(buf, api.romBuffer());
+    if (!api.loadRom(buf.length)) throw new Error('loadRom failed');
+    api.powerOn();
+    return { api, Module, win };
+  }
+
+  // Classify the centre pixel of the frame. The backdrop fills the whole visible
+  // area with rendering off, so one sample is the whole picture; a small block is
+  // averaged anyway to be robust against a stray sprite.
+  const seenPx = new Set();
+  function classify(Module, api) {
+    const ptr = api.framebuffer() >>> 2;
+    const px = Module.HEAPU32[ptr + 120 * 256 + 128] >>> 0;
+    seenPx.add('0x' + px.toString(16).padStart(8, '0'));
+    for (const [name, v] of Object.entries(PAL)) if (px === v) return { name, px };
+    return { name: 'other', px };
+  }
+
+  function snapshot(Module, api) {
+    const ptr = api.framebuffer() >>> 2;
+    const img = ctx.createImageData(256, 240);
+    const out = new Uint32Array(img.data.buffer);
+    out.set(Module.HEAPU32.subarray(ptr, ptr + 256 * 240));
+    ctx.putImageData(img, 0, 0);
+    return canvas.toDataURL('image/png');
+  }
+
+  // Run `n` frames, tallying what colour each frame ended on.
+  function runFrames({ api, Module }, n) {
+    const tally = {};
+    let first = null;
+    for (let i = 0; i < n; i++) {
+      api.frame();
+      const c = classify(Module, api);
+      tally[c.name] = (tally[c.name] || 0) + 1;
+      if (first === null) first = c.name;
+    }
+    return tally;
+  }
+
+  async function run() {
+    const ctxs = await boot();
+    const { api } = ctxs;
+    const results = {};
+    const shots = {};
+
+    // (a) no noise at all -> stays black
+    api.keyCover(0, 0, 0);
+    results.a_quiet = runFrames(ctxs, 60);
+    shots.a_quiet = snapshot(ctxs.Module, api);
+
+    // (b) $4017 D0-D4 covered, one second of rattle -> red frames appear
+    api.keyCover(0, 0x1f, 0);
+    api.keyRattle(1789773);
+    results.b_p1 = runFrames(ctxs, 60);
+    // grab the shot on a frame that is actually showing the noise colour
+    for (let i = 0; i < 30; i++) {
+      api.frame();
+      if (classify(ctxs.Module, api).name === 'red') break;
+    }
+    shots.b_p1 = snapshot(ctxs.Module, api);
+
+    // (c) $4016 D1 covered -> white frames appear
+    api.keyCover(0x02, 0, 0);
+    api.keyRattle(1789773);
+    results.c_p0 = runFrames(ctxs, 60);
+    for (let i = 0; i < 30; i++) {
+      api.frame();
+      if (classify(ctxs.Module, api).name === 'white') break;
+    }
+    shots.c_p0 = snapshot(ctxs.Module, api);
+
+    // (c2) both lines covered -> green frames appear
+    api.keyCover(0x02, 0x1f, 0);
+    api.keyRattle(1789773);
+    results.c2_both = runFrames(ctxs, 60);
+
+    // (d) burst over -> back to black. keyRattle bursts are cycle-counted, so
+    // running well past a second guarantees the burst has expired.
+    api.keyCover(0, 0, 0);
+    runFrames(ctxs, 90); // let anything in flight drain
+    results.d_after = runFrames(ctxs, 60);
+    shots.d_after = snapshot(ctxs.Module, api);
+
+    window.__exptest = { results, shots, seen: [...seenPx], done: true };
+    log(JSON.stringify(results, null, 2));
+  }
+
+  run().catch((e) => {
+    window.__exptest = { error: String(e && e.stack || e), done: true };
+    log('ERROR ' + e);
+  });
+})();
+</script>

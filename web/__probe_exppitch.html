@@ -1,0 +1,193 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>exppitch probe</title>
+<style>
+  body { background: #111; color: #ddd; font: 13px/1.5 ui-monospace, monospace; margin: 0; }
+  #host { width: 1px; height: 1px; opacity: 0; position: absolute; }
+  canvas.shot { image-rendering: pixelated; width: 256px; height: 240px; border: 1px solid #444; }
+  #log { white-space: pre; padding: 8px; }
+</style>
+<!--
+  Headless probe for exppitch.nes.
+
+  Same pattern as __probe_exptest.html: the real index.html boots in an iframe
+  only to hand over a live wasm module, and every frame is stepped explicitly from
+  here so runs are deterministic and comparable.
+
+  The measurement is the ball's x per frame, read straight out of the ROM's zero
+  page rather than inferred from pixels — $06 is Z_BALLX in make_exppitch_rom.py.
+  A pixel scan cross-checks it so a zero-page read that happened to be stable
+  cannot pass for a ball that is actually on screen.
+-->
+<iframe id="host" src="/index.html?rom=/exppitch.nes&mute=1"></iframe>
+<div id="shots"></div>
+<div id="log">booting…</div>
+<script>
+(() => {
+  const logEl = document.getElementById('log');
+  const lines = [];
+  const log = (s) => { lines.push(s); logEl.textContent = lines.join('\n'); };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  const Z_BALLX = 0x06, Z_BALLY = 0x07;
+  const BALL_WHITE = 0xfffffeff; // sprite palette entry 1 ($30)
+
+  async function boot() {
+    const win = document.getElementById('host').contentWindow;
+    for (let i = 0; i < 600; i++) {
+      if (win.__nes && win.__nes.api && win.__nes.Module && win.__nes.Module.HEAPU8) break;
+      await sleep(50);
+    }
+    const { api, Module } = win.__nes;
+    if (!api) throw new Error('window.__nes never appeared');
+    const buf = new Uint8Array(await (await fetch('/exppitch.nes')).arrayBuffer());
+    Module.HEAPU8.set(buf, api.romBuffer());
+    if (!api.loadRom(buf.length)) throw new Error('loadRom failed');
+    api.powerOn();
+    return { api, Module };
+  }
+
+  const zp = ({ api, Module }, addr) => Module.HEAPU8[api.ram() + addr];
+
+  // Count the ball's own pixels and report their centroid. The scan is limited to
+  // the 8x8 box the ROM's zero page claims the sprite occupies (sprite y in OAM is
+  // the scanline above the top row, hence the +1), because the strike-zone frame
+  // is drawn in the same white and would otherwise dominate the count. Confining
+  // the window this way makes a nonzero count mean "the sprite is rendered where
+  // the ROM thinks it is", which is the actual claim being checked.
+  function ballPixels({ api, Module }) {
+    const ptr = api.framebuffer() >>> 2;
+    const fb = Module.HEAPU32;
+    const bx = Module.HEAPU8[api.ram() + Z_BALLX];
+    const by = Module.HEAPU8[api.ram() + Z_BALLY] + 1;
+    let n = 0, sx = 0, sy = 0, offBall = 0;
+    for (let y = 0; y < 240; y++) {
+      for (let x = 0; x < 256; x++) {
+        if ((fb[ptr + y * 256 + x] >>> 0) !== BALL_WHITE) continue;
+        const inBox = x >= bx && x < bx + 8 && y >= by && y < by + 8;
+        if (inBox) { n++; sx += x; sy += y; } else { offBall++; }
+      }
+    }
+    return {
+      inBox: n,
+      cx: n ? Math.round(sx / n) : null,
+      cy: n ? Math.round(sy / n) : null,
+      expected: { x: bx, y: by },
+      otherWhite: offBall, // the static frame tiles
+    };
+  }
+
+  function snapshot({ api, Module }, name) {
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 240; c.className = 'shot';
+    const cx = c.getContext('2d');
+    const img = cx.createImageData(256, 240);
+    new Uint32Array(img.data.buffer).set(
+      Module.HEAPU32.subarray(api.framebuffer() >>> 2, (api.framebuffer() >>> 2) + 256 * 240));
+    cx.putImageData(img, 0, 0);
+    document.getElementById('shots').appendChild(c);
+    return c.toDataURL('image/png');
+  }
+
+  // Trace `n` frames of ball x/y. `overlay` is drawn onto a persistent canvas so
+  // the whole flight path is visible in one still image.
+  function trace(ctxs, n, trail) {
+    const xs = [], ys = [];
+    for (let i = 0; i < n; i++) {
+      ctxs.api.frame();
+      const x = zp(ctxs, Z_BALLX), y = zp(ctxs, Z_BALLY);
+      xs.push(x); ys.push(y);
+      if (trail) { trail.fillStyle = '#fff'; trail.fillRect(x + 3, y + 3, 2, 2); }
+    }
+    return { xs, ys };
+  }
+
+  const variance = (a) => {
+    const m = a.reduce((s, v) => s + v, 0) / a.length;
+    return a.reduce((s, v) => s + (v - m) * (v - m), 0) / a.length;
+  };
+  // Frame-to-frame movement is the thing a viewer actually sees as "weaving";
+  // raw variance of x would also be large for a ball that drifted once and stayed.
+  const meanAbsStep = (a) => {
+    let s = 0;
+    for (let i = 1; i < a.length; i++) s += Math.abs(a[i] - a[i - 1]);
+    return a.length > 1 ? s / (a.length - 1) : 0;
+  };
+
+  function trailCanvas(label) {
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 240; c.className = 'shot';
+    const g = c.getContext('2d');
+    g.fillStyle = '#000'; g.fillRect(0, 0, 256, 240);
+    document.getElementById('shots').appendChild(c);
+    return { canvas: c, g };
+  }
+
+  async function run() {
+    const ctxs = await boot();
+    const { api } = ctxs;
+    const results = {}, shots = {};
+
+    // settle: let the ROM finish its warm-up and start pitching
+    for (let i = 0; i < 20; i++) api.frame();
+
+    // (a) fastball: no key noise at all
+    api.keyCover(0, 0, 0);
+    const straightTrail = trailCanvas('straight');
+    const straight = trace(ctxs, 80, straightTrail.g);
+    shots.a_straight_frame = snapshot(ctxs, 'a');
+    shots.a_straight_trail = straightTrail.canvas.toDataURL('image/png');
+    const straightPix = ballPixels(ctxs);
+
+    // (b) curveball: cover $4016 D1 and $4017 D0-D4, rattle continuously.
+    // Re-armed every 30 frames because a burst is cycle-counted and would
+    // otherwise expire partway through the trace.
+    api.keyCover(0x02, 0x1f, 0);
+    const curveTrail = trailCanvas('curve');
+    const curve = { xs: [], ys: [] };
+    for (let chunk = 0; chunk < 4; chunk++) {
+      api.keyRattle(1789773);
+      const t = trace(ctxs, 20, curveTrail.g);
+      curve.xs.push(...t.xs); curve.ys.push(...t.ys);
+    }
+    shots.b_curve_frame = snapshot(ctxs, 'b');
+    shots.b_curve_trail = curveTrail.canvas.toDataURL('image/png');
+    const curvePix = ballPixels(ctxs);
+
+    // (c) back to a fastball once the rattle stops
+    api.keyCover(0, 0, 0);
+    for (let i = 0; i < 60; i++) api.frame(); // drain any burst still in flight
+    const after = trace(ctxs, 80, null);
+
+    results.a_straight = {
+      xs: straight.xs,
+      uniqueX: [...new Set(straight.xs)],
+      variance: +variance(straight.xs).toFixed(3),
+      meanAbsStep: +meanAbsStep(straight.xs).toFixed(3),
+      ballPixels: straightPix,
+    };
+    results.b_curve = {
+      xs: curve.xs,
+      uniqueX: [...new Set(curve.xs)].length,
+      xMin: Math.min(...curve.xs),
+      xMax: Math.max(...curve.xs),
+      variance: +variance(curve.xs).toFixed(3),
+      meanAbsStep: +meanAbsStep(curve.xs).toFixed(3),
+      ballPixels: curvePix,
+    };
+    results.c_after = {
+      uniqueX: [...new Set(after.xs)],
+      variance: +variance(after.xs).toFixed(3),
+      meanAbsStep: +meanAbsStep(after.xs).toFixed(3),
+    };
+
+    window.__exppitch = { results, shots, done: true };
+    log(JSON.stringify(results, (k, v) => (k === 'xs' ? undefined : v), 2));
+  }
+
+  run().catch((e) => {
+    window.__exppitch = { error: String((e && e.stack) || e), done: true };
+    log('ERROR ' + e);
+  });
+})();
+</script>
