@@ -102,6 +102,10 @@
     set('exp-m-k-key', 'expMeterKeyLabel');
     set('exp-m-k-gnd', 'expMeterGndLabel');
     set('exp-m-k-pins', 'expMeterPinsLabel');
+    set('exp-m-k-depth', 'expMeterDepthLabel');
+    set('exp-leg-reach', 'expLegOutOfReach');
+    const depthGauge = document.getElementById('exp-depth-gauge');
+    if (depthGauge) depthGauge.title = t('expDepthTip');
     // The meter's values are words, so they have to be re-rendered on a language
     // change. Routed through a single hoisted helper rather than reading
     // expInserted here: this function is declared above the expansion-port block
@@ -1377,6 +1381,8 @@
   const expFront = document.getElementById('exp-front'); // port face + drag surface
   const expBladeMark = document.getElementById('exp-blade-mark');
   const expRot = document.getElementById('exp-rot');
+  const expDepth = document.getElementById('exp-depth');
+  const expDepthVal = document.getElementById('exp-depth-val');
   const expAngleEl = document.getElementById('exp-angle');
   const expRattleBtn = document.getElementById('exp-rattle');
   const expStateEl = document.getElementById('exp-state');
@@ -1483,6 +1489,106 @@
   // the one thing this panel exists to show.
   const EXP_BLADE_HALF = (5.5 / 2) * EXP_PX_PER_MM; // 5.5mm tip  -> ~24px
   const EXP_BLADE_HALF_H = (1.5 / 2) * EXP_PX_PER_MM; // 1.5mm bevel -> ~6.5px
+
+  // ---- the depth axis: what the front view is actually a picture of ----
+  //
+  // The front view draws ONE SLICE of the key: the cross-section that happens
+  // to be level with the contacts. Pushing the key in slides that slice back
+  // along the blade, so the drawn shape changes — wider as the tip taper opens
+  // out, thicker as the bevel runs out, and the bitted edge rising and falling
+  // as each ward peak passes the contact plane.
+  //
+  // z is how far the key has gone in, measured from the tip touching the
+  // insulator face. The contacts are NOT at that face: they are recessed, so
+  // nothing can touch until z passes D_contact. The distance
+  //
+  //     l = z - D_contact
+  //
+  // is therefore "how far back from the tip the contact-level slice sits".
+  // l < 0 means the key has not reached the contacts at all and no contact is
+  // possible, which is exactly the reported real-hardware behaviour: a
+  // shallow-stroke commercial D-sub plug bottoms out before it ever reaches
+  // the Famicom's recessed contacts.
+  //
+  // ESTIMATE. MIL-DTL-24308/1 gives a minimum contact engagement depth of
+  // 0.149in (3.78mm), and docs/expansion-port-dimensions.md records that the
+  // Famicom recesses its contacts deeper than the standard part (qualitative
+  // report, no measurement). 4.5mm is picked as "a little deeper than the MIL
+  // minimum" to reproduce that behaviour; the true figure needs a teardown.
+  const EXP_D_CONTACT_MM = 4.5;
+  // How far the key can go before it bottoms out in the well. Also an estimate:
+  // deep enough that several ward peaks pass the contact plane over the travel,
+  // which is what makes depth worth having as a control.
+  const EXP_Z_MAX_MM = 26;
+  // ---- the blade's lengthwise profile, as functions of l (mm from the tip) ----
+  //
+  // One table, three curves, all keyed on the same l. Everything downstream —
+  // the hit test AND the drawn slice — is generated from these, so the shape on
+  // screen is by construction the shape being tested.
+  //
+  // ESTIMATE, as for every key-side figure here: no published dimensions for a
+  // Showa-era MIWA disc-cylinder blade were found (see the doc's gap section).
+  // The shapes are what a typical Japanese house key does — a short grinding
+  // taper at the tip, a bevel that runs out over roughly the same distance, and
+  // a bitting cut to a code rather than a repeating comb.
+  //
+  // Tip taper: half-width goes from nearly nothing at the very tip to the full
+  // 5.5mm effective width over the first ~4mm.
+  const EXP_TAPER_LEN_MM = 4.0;
+  // Tip bevel: half-thickness from the 1.5mm bevelled tip to the 2.3mm blade
+  // body, over a similar run.
+  const EXP_BEVEL_LEN_MM = 5.0;
+  const EXP_BLADE_BODY_HALF_H = (2.3 / 2) * EXP_PX_PER_MM;
+  // The bitting: peaks and valleys along the blade at uneven spacing AND uneven
+  // depth, which is what a key code is. Positions are mm from the tip; `cut` is
+  // how deep that valley is cut into the blade, as a fraction of the blade's
+  // half-thickness. A key is defined by its valleys — the uncut lands between
+  // them are the full blade width.
+  //
+  // Six cuts over ~20mm, deliberately irregular: an even comb would line every
+  // ward up with the pin pitch at once and bring back the flat-blade behaviour
+  // the point model exists to remove.
+  const EXP_BITTING = [
+    { at: 3.2, cut: 0.55 },
+    { at: 6.9, cut: 0.30 },
+    { at: 9.4, cut: 0.72 },
+    { at: 13.1, cut: 0.45 },
+    { at: 16.0, cut: 0.62 },
+    { at: 20.3, cut: 0.35 },
+  ];
+  // Half-width of the blade at l mm from the tip, in px.
+  function expBladeHalfWidthAt(lmm) {
+    if (lmm <= 0) return 0;
+    const t = Math.min(1, lmm / EXP_TAPER_LEN_MM);
+    return EXP_BLADE_HALF * t;
+  }
+  // Half-thickness of the uncut blade at l mm from the tip, in px.
+  function expBladeHalfThickAt(lmm) {
+    if (lmm <= 0) return 0;
+    const t = Math.min(1, lmm / EXP_BEVEL_LEN_MM);
+    return EXP_BLADE_HALF_H + (EXP_BLADE_BODY_HALF_H - EXP_BLADE_HALF_H) * t;
+  }
+  // How far the bitted edge sits from the blade's centreline at l mm from the
+  // tip, in px. Between cuts the edge is at the full half-thickness (a land);
+  // at a cut it dips by that cut's depth. Interpolated with a cosine so the
+  // valleys have rounded floors and the lands have rounded shoulders, which is
+  // what a cutter wheel actually leaves — and, more importantly, means the edge
+  // height varies smoothly with depth instead of stepping.
+  function expBittingEdgeAt(lmm) {
+    const halfThick = expBladeHalfThickAt(lmm);
+    if (lmm <= 0) return 0;
+    // find the nearest cut and how close we are to its centre
+    let deepest = 0;
+    for (const c of EXP_BITTING) {
+      const halfWidth = 1.6; // mm; how wide a single cut is along the blade
+      const d = Math.abs(lmm - c.at);
+      if (d >= halfWidth) continue;
+      // cosine bump: 1 at the cut's centre, 0 at its edges
+      const w = 0.5 * (1 + Math.cos((d / halfWidth) * Math.PI));
+      deepest = Math.max(deepest, c.cut * w);
+    }
+    return halfThick * (1 - deepest);
+  }
   // Height of the tongue face the key works against: MIL dimension D,
   // 7.67-8.03, catalogue nominal 7.82. The tip has to stay inside it, which is
   // what bounds the turn. Why not the 8.36 used before: that is the PLUG
@@ -1532,11 +1638,16 @@
   let expKeyX = EXP_SLOT_X0; // insertion x along the row of contacts
   let expKeyY = EXP_SLOT_Y0; // insertion y across the two rows
   let expKeyAngle = 0; // degrees, + = turned clockwise
+  // Insertion depth in mm, 0 = tip just touching the insulator face. The default
+  // sits a little past D_contact so the key is just barely in contact on first
+  // sight — far enough that fiddling produces a reaction straight away, close
+  // enough that backing off a millimetre visibly kills every contact.
+  let expKeyZ = EXP_D_CONTACT_MM + 1.2;
   let expInserted = true; // false = pulled clear of the port
   // Declared here rather than beside the rattle handlers because the grounding
   // test below reads it, and that runs from the very first setExpKey().
   let expRattling = false;
-  // --- the point features: the only places the key can actually touch metal ---
+  // --- the contact-level slice, and the point features on it ---
   //
   // Why the blade outline is NOT the contact test. On the real connector the
   // mating face is a flat insulating tongue, and every socket contact is
@@ -1544,48 +1655,38 @@
   // that face therefore touches PLASTIC: it bridges the holes without reaching
   // anything conductive. Metal is only met where some part of the key drops
   // INTO a funnel, and on a key the parts that can drop in are the sharp ones —
-  // the two corners of the tip, and the peaks of the warding cuts along the
+  // the corners of the slice, and the shoulders of the warding cuts on the
   // bitted edge. Everything else is a flat land that rides on the insulator.
   //
-  // So contact is a point-in-circle test on a handful of features, not an
-  // overlap test on the whole tip. The old rectangle-vs-ring test let a flat
-  // blade short every hole it spanned, which is what made five-pin shorts
-  // trivially easy; a real key has to be worked until a tooth happens to fall
-  // into the hole you want.
+  // The slice itself now depends on depth: expSliceAt(l) evaluates the
+  // lengthwise profile at l mm from the tip and returns both the outline and
+  // the feature points, so pushing the key in genuinely changes what can touch.
   //
-  // Features are defined in the blade's own frame, in the same units as
-  // EXP_BLADE_HALF / EXP_BLADE_HALF_H, then carried through the existing
-  // (x, y, theta) transform. `along` runs the length of the cross-section,
-  // `across` its thickness; the bitted edge is the +across face.
+  // The bitted edge is the +across face. `along` runs the length of the
+  // cross-section, `across` its thickness.
   //
-  // Tooth positions are deliberately UNEVEN. A real bitting is cut to a code,
-  // not a comb, and even spacing made the model degenerate: every tooth lined
-  // up with the pin pitch at once, so the flat-blade behaviour came straight
-  // back at particular angles. These fractions are of the half-length, ordered
-  // from the tip's left corner towards its right.
-  const EXP_TOOTH_ALONG_FRAC = [-0.58, -0.14, 0.31, 0.72];
-  // How far a tooth peak stands proud of the blade's flat land. The peaks are
-  // the contact points, so this is what decides whether a tooth can reach into
-  // a funnel while the land beside it rides the surface.
-  const EXP_TOOTH_RISE = EXP_BLADE_HALF_H * 0.55;
-  // The tip corners: the two sharpest points on the key, and the ones that do
-  // most of the work in practice. They sit at the ends of the cross-section, on
-  // the bitted face, matching the drawn chamfer's outer vertices.
-  //
-  // Each entry is {along, across} in blade-local px. This one table is the hit
-  // test AND the source of the drawn silhouette — expBladeTeethPath() below
-  // builds the on-screen polygon from exactly these numbers, so a peak that
-  // looks like it has dropped into a hole is a peak the model agrees has.
-  const EXP_BLADE_FEATURES = [
-    { along: -EXP_BLADE_HALF, across: EXP_BLADE_HALF_H, kind: 'corner' },
-    { along: EXP_BLADE_HALF, across: EXP_BLADE_HALF_H, kind: 'corner' },
-    ...EXP_TOOTH_ALONG_FRAC.map((f) => ({
-      along: f * EXP_BLADE_HALF,
-      across: EXP_BLADE_HALF_H + EXP_TOOTH_RISE,
-      kind: 'tooth',
-    })),
-  ];
-  // A feature's position in port coordinates, for the current (x, y, angle).
+  // Slice geometry at l mm back from the tip. Returns null when the contacts
+  // have not been reached yet — the caller must treat that as "no contact
+  // possible", not as an empty blade.
+  function expSliceAt(lmm) {
+    const notThereYet = lmm < 0;
+    if (notThereYet) return null;
+    const halfW = expBladeHalfWidthAt(lmm);
+    const backHalfT = expBladeHalfThickAt(lmm); // unbitted (back) face
+    const edgeHalfT = expBittingEdgeAt(lmm); // bitted face, dips into cuts
+    // The points that can drop into a funnel: the two corners of the bitted
+    // face (the sharpest parts of the slice, and the ones that do most of the
+    // work), plus the two corners of the back face. A cut valley pulls the
+    // bitted edge in, which is exactly how a ward stops being able to reach.
+    const features = [
+      { along: -halfW, across: edgeHalfT },
+      { along: halfW, across: edgeHalfT },
+      { along: -halfW, across: -backHalfT },
+      { along: halfW, across: -backHalfT },
+    ];
+    return { halfW, backHalfT, edgeHalfT, features };
+  }
+  // A blade-local point in port coordinates, for the current (x, y, angle).
   function expFeaturePos(f) {
     const rad = (expKeyAngle * Math.PI) / 180;
     const ux = Math.cos(rad);
@@ -1595,51 +1696,58 @@
       y: expKeyY + f.along * uy + f.across * ux,
     };
   }
-  // Lay the drawn bar out from the hit-test constants, so the rectangle on
-  // screen is the rectangle being intersected.
-  expBladeMark.style.setProperty('--blade-w', EXP_BLADE_HALF * 2 + 'px');
-  expBladeMark.style.setProperty('--blade-h', EXP_BLADE_HALF_H * 2 + 'px');
-  expBladeMark.style.setProperty('--blade-x', -EXP_BLADE_HALF + 'px');
-  expBladeMark.style.setProperty('--blade-y', -EXP_BLADE_HALF_H + 'px');
-  // The drawn silhouette, generated from EXP_BLADE_FEATURES so the teeth on
-  // screen ARE the teeth being tested. Built as a clip-path polygon in the
-  // element's own box, whose origin is the blade's top-left corner: local
-  // (along, across) maps to (along + HALF, across + HALF_H + RISE) once the box
-  // has been grown by RISE to make room for the peaks.
-  function expBladeTeethPath() {
-    const w = EXP_BLADE_HALF * 2;
-    const h = EXP_BLADE_HALF_H * 2 + EXP_TOOTH_RISE;
-    const toBox = (along, across) => [along + EXP_BLADE_HALF, across + EXP_BLADE_HALF_H];
-    const pts = [];
-    // top (unbitted) edge, left to right — a plain flat back
-    pts.push(toBox(-EXP_BLADE_HALF, -EXP_BLADE_HALF_H));
-    pts.push(toBox(EXP_BLADE_HALF, -EXP_BLADE_HALF_H));
-    // down the right end to the bitted face
-    pts.push(toBox(EXP_BLADE_HALF, EXP_BLADE_HALF_H));
-    // back along the bitted edge right-to-left, rising to each tooth peak and
-    // dropping to the land between them
-    const teeth = EXP_BLADE_FEATURES.filter((f) => f.kind === 'tooth')
-      .slice()
-      .sort((a, b) => b.along - a.along);
-    const halfBase = EXP_BLADE_HALF * 0.1; // half-width of a tooth at its base
-    for (const t of teeth) {
-      pts.push(toBox(t.along + halfBase, EXP_BLADE_HALF_H));
-      pts.push(toBox(t.along, t.across)); // the peak = the contact point
-      pts.push(toBox(t.along - halfBase, EXP_BLADE_HALF_H));
-    }
-    pts.push(toBox(-EXP_BLADE_HALF, EXP_BLADE_HALF_H));
-    const poly = pts.map(([x, y]) => `${x.toFixed(2)}px ${y.toFixed(2)}px`).join(', ');
-    return { poly: `polygon(${poly})`, w, h };
+  // How far back from the tip the contact-level slice currently sits.
+  function expContactL() {
+    return expKeyZ - EXP_D_CONTACT_MM;
   }
-  {
-    const { poly, w, h } = expBladeTeethPath();
+  // The slice for the current depth, or null if the key has not reached the
+  // contacts. One accessor so the hit test and the drawing cannot diverge.
+  function expCurrentSlice() {
+    return expSliceAt(expContactL());
+  }
+  // Push the drawn slice at the CSS. Called whenever the depth changes; the
+  // polygon is generated from the same expSliceAt() the hit test uses, so the
+  // shape on screen is the shape being intersected.
+  function expLayoutSlice() {
+    const l = expContactL();
+    const slice = expSliceAt(l);
+    const outOfReach = slice === null;
+    // Nothing to draw at a real size yet: keep a thin ghost so the user can
+    // still see where the key is while it is short of the contacts.
+    const halfW = outOfReach ? EXP_BLADE_HALF * 0.6 : slice.halfW;
+    const backT = outOfReach ? EXP_BLADE_HALF_H * 0.5 : slice.backHalfT;
+    const edgeT = outOfReach ? EXP_BLADE_HALF_H * 0.5 : slice.edgeHalfT;
+    const w = Math.max(2, halfW * 2);
+    const h = Math.max(2, backT + edgeT);
+    // Box origin is the slice's top-left; local (along, across) maps to
+    // (along + halfW, across + backT).
+    const toBox = (along, across) => [along + halfW, across + backT];
+    // Outline: flat back face, then the bitted face. The bitted face is drawn
+    // as a shallow vee between its two corners so a deep cut reads as a notch
+    // rather than as a thinner bar.
+    const pts = [
+      toBox(-halfW, -backT),
+      toBox(halfW, -backT),
+      toBox(halfW, edgeT),
+      toBox(0, edgeT * 0.82),
+      toBox(-halfW, edgeT),
+    ];
+    const poly = 'polygon(' + pts.map(([x, y]) => `${x.toFixed(2)}px ${y.toFixed(2)}px`).join(', ') + ')';
     expBladeMark.style.setProperty('--blade-poly', poly);
-    // The drawn box has to be tall enough to contain the peaks; the extra
-    // height is all on the bitted side, so the box's top stays put.
     expBladeMark.style.setProperty('--blade-draw-w', w + 'px');
     expBladeMark.style.setProperty('--blade-draw-h', h + 'px');
-    expBladeMark.style.setProperty('--blade-draw-x', -EXP_BLADE_HALF + 'px');
-    expBladeMark.style.setProperty('--blade-draw-y', -EXP_BLADE_HALF_H + 'px');
+    expBladeMark.style.setProperty('--blade-draw-x', -halfW + 'px');
+    expBladeMark.style.setProperty('--blade-draw-y', -backT + 'px');
+    // Legacy vars, still used by the bow and the crosshair for their sizing.
+    expBladeMark.style.setProperty('--blade-w', w + 'px');
+    expBladeMark.style.setProperty('--blade-h', h + 'px');
+    expBladeMark.style.setProperty('--blade-x', -halfW + 'px');
+    expBladeMark.style.setProperty('--blade-y', -backT + 'px');
+    // Drawn hollow and dashed while short of the contacts: the key is visibly
+    // present but visibly not touching anything, which is the whole point of
+    // having a depth axis.
+    expBladeMark.classList.toggle('out-of-reach', outOfReach);
+    document.body.classList.toggle('exp-out-of-reach', outOfReach);
   }
   // Decoration that makes the tip read as a KEY rather than a bar lying on the
   // port: the bow seen end-on behind it, the warding grooves across its face,
@@ -1661,7 +1769,11 @@
   // outline is the wrong test.
   function expBridgedPins() {
     if (!expInserted) return []; // out of the socket: nothing can be bridged
-    const feats = EXP_BLADE_FEATURES.map(expFeaturePos);
+    const slice = expCurrentSlice();
+    // Short of the contacts: the key is in the well but has not reached the
+    // metal, so nothing can be shorted however it is aimed.
+    if (slice === null) return [];
+    const feats = slice.features.map(expFeaturePos);
     const hit = [];
     for (let pin = 1; pin <= 15; pin++) {
       const p = expPinPos(pin);
@@ -1688,15 +1800,25 @@
   // contact. Sampling the corners rather than the whole outline is enough
   // because the wall is convex from the inside: no edge can cross it without a
   // corner crossing first.
+  // Sized from the CURRENT slice, not the fixed tip: a key pushed further in
+  // presents a wider, thicker section to the wall, so how easily it earths
+  // itself depends on depth too. Unlike the contacts, the shell is metal all
+  // the way down the well, so this stays live even when the key is short of the
+  // contact plane — a key that cannot short anything can still be earthed.
   function expShellContact() {
     if (!expInserted) return false;
+    const slice = expSliceAt(expContactL());
+    // Short of the contacts the blade is still SOMEWHERE in the well; use the
+    // profile at the tip end so the section is the narrow one it really is.
+    const halfW = slice ? slice.halfW : expBladeHalfWidthAt(0.5);
+    const halfT = slice ? Math.max(slice.backHalfT, slice.edgeHalfT) : EXP_BLADE_HALF_H;
     const rad = (expKeyAngle * Math.PI) / 180;
     const ux = Math.cos(rad);
     const uy = Math.sin(rad);
     for (const sl of [-1, 1]) {
       for (const st of [-1, 1]) {
-        const along = sl * EXP_BLADE_HALF;
-        const across = st * EXP_BLADE_HALF_H;
+        const along = sl * halfW;
+        const across = st * halfT;
         const cx = expKeyX + along * ux - across * uy;
         const cy = expKeyY + along * uy + across * ux;
         const reachesWall = Math.abs(cx - EXP_CAVITY_CX * EXP_ART_SCALE) >= expCavityHalfWidth(cy);
@@ -1767,6 +1889,7 @@
     key: document.getElementById('exp-m-key'),
     gnd: document.getElementById('exp-m-gnd'),
     pins: document.getElementById('exp-m-pins'),
+    depth: document.getElementById('exp-m-depth'),
     p1: document.getElementById('exp-m-p1'),
     p0: document.getElementById('exp-m-p0'),
     irq: document.getElementById('exp-m-irq'),
@@ -1806,6 +1929,23 @@
     expSetMeter(expMeterEls.gnd, how, cls);
     const list = pins.length ? pins.map((p) => `${p}:${EXP_PIN_NAMES[p]}`).join(', ') : t('expMeterNone');
     expSetMeter(expMeterEls.pins, list, pins.length ? '' : 'off');
+    expMeterDepth();
+  }
+  // Depth row: the raw z, and — more usefully — how far back from the tip the
+  // contact-level slice sits. A negative l is called out as "not reached",
+  // because that one fact explains every dead contact above it.
+  function expMeterDepth() {
+    if (!expInserted) {
+      expSetMeter(expMeterEls.depth, '-', 'off');
+      return;
+    }
+    const l = expContactL();
+    const z = expKeyZ.toFixed(1);
+    if (l < 0) {
+      expSetMeter(expMeterEls.depth, `${z}mm  ${t('expMeterNotReached')}`, 'alarm');
+      return;
+    }
+    expSetMeter(expMeterEls.depth, `${z}mm  (l=${l.toFixed(1)}mm)`, 'on');
   }
   // Re-render the geometry rows from the current state, for a language change.
   function refreshExpMeter() {
@@ -1842,18 +1982,44 @@
     expBladeMark.style.transform = bladeTf;
     expBladeMark.style.display = expInserted ? 'block' : 'none';
     document.body.classList.toggle('exp-pulled', !expInserted);
+    // The drawn slice depends on depth, so it is regenerated here rather than
+    // once at load: this is the single place the blade's appearance is set.
+    expLayoutSlice();
   }
-  function setExpKey(x, angle, y) {
+  // z is optional so every existing (x, angle, y) caller keeps working.
+  function setExpKey(x, angle, y, z) {
     expKeyX = Math.max(EXP_SLOT_X_MIN, Math.min(EXP_SLOT_X_MAX, x));
     const wantY = y === undefined ? expKeyY : y;
     expKeyY = Math.max(EXP_SLOT_Y_MIN, Math.min(EXP_SLOT_Y_MAX, wantY));
     expKeyAngle = Math.max(-30, Math.min(30, Math.round(angle * 10) / 10));
+    const wantZ = z === undefined ? expKeyZ : z;
+    expKeyZ = Math.max(0, Math.min(EXP_Z_MAX_MM, Math.round(wantZ * 10) / 10));
     expRot.value = expKeyAngle;
     expAngleEl.textContent = (expKeyAngle > 0 ? '+' : '') + expKeyAngle.toFixed(1) + '°';
+    expDepth.value = expKeyZ;
+    expDepthVal.textContent = expKeyZ.toFixed(1) + 'mm';
     expLayoutKey();
     expApplyCover();
   }
   expRot.addEventListener('input', () => setExpKey(expKeyX, parseFloat(expRot.value)));
+  // Depth gauge, and the wheel over the port face. Both drive the same setter.
+  expDepth.addEventListener('input', () =>
+    setExpKey(expKeyX, expKeyAngle, expKeyY, parseFloat(expDepth.value)),
+  );
+  // Wheel = push in / pull out, the gesture that matches the axis. passive:false
+  // because the page must not scroll while the pointer is over the port.
+  expFront.addEventListener(
+    'wheel',
+    (e) => {
+      if (!expInserted) return;
+      e.preventDefault();
+      // 0.4mm per notch: fine enough to walk a ward across the contact plane,
+      // coarse enough to cross the whole travel in a few flicks.
+      const step = 0.4 * (e.deltaY > 0 ? -1 : 1);
+      setExpKey(expKeyX, expKeyAngle, expKeyY, expKeyZ + step);
+    },
+    { passive: false },
+  );
   // Drag anywhere on the port face to move the insertion point in both axes.
   // Grabbing away from the blade jumps it to the pointer, so a click picks a
   // spot directly instead of only nudging from wherever the blade already was.
@@ -1892,10 +2058,28 @@
   expFront.addEventListener('pointercancel', expEndDrag);
 
   const EXP_RATTLE_CYCLES = 1789773; // ~1 second at the rated clock
+  // Working a key in a socket is mostly an IN-AND-OUT motion, not a twist: the
+  // wards ride over the contact plane again and again, so different peaks fall
+  // into different funnels from one instant to the next. That is what the depth
+  // jitter models, and it is the main reason a real rattle produces such a
+  // scattered burst. The twist keyframes stay as the visual shake; this is the
+  // part that actually changes which pins are bridged.
+  //
+  // The base depth is saved and restored so a burst leaves the key exactly
+  // where the user put it — the jitter is a transient, not a move.
+  const EXP_RATTLE_Z_AMP = 1.1; // mm either side of the resting depth
+  let expRattleZBase = 0;
+  let expRattleTimer = 0;
   function expStopRattleUI() {
     expRattling = false;
     expRattleBtn.disabled = !expInserted; // a pulled key has nothing to rattle
     expBladeMark.classList.remove('rattling');
+    if (expRattleTimer) {
+      clearInterval(expRattleTimer);
+      expRattleTimer = 0;
+      // put the key back where it was before the burst started
+      expKeyZ = expRattleZBase;
+    }
     expLayoutKey(); // drop the keyframe transform back to the base one
     // rattling counts as grounded, so ending it can change the cover
     if (expInserted) expApplyCover();
@@ -1909,6 +2093,16 @@
     api.keyRattle(EXP_RATTLE_CYCLES);
     expRattleBtn.disabled = true;
     expBladeMark.classList.add('rattling');
+    expRattleZBase = expKeyZ;
+    // Driven on a timer rather than per-frame: the depth wobble is a physical
+    // motion of the hand, so it should run at its own rate regardless of how
+    // fast the emulated machine happens to be going.
+    expRattleTimer = setInterval(() => {
+      const jitter = (Math.random() * 2 - 1) * EXP_RATTLE_Z_AMP;
+      expKeyZ = Math.max(0, Math.min(EXP_Z_MAX_MM, expRattleZBase + jitter));
+      expLayoutSlice();
+      expApplyCover();
+    }, 55);
   }
   expRattleBtn.addEventListener('click', expStartRattle);
 
@@ -1982,9 +2176,32 @@
   window.__nes = window.__nes || {};
   window.__nes.exp = {
     scale: EXP_ART_SCALE,
-    setKey: (x, angle, y) => setExpKey(x, angle, y),
+    setKey: (x, angle, y, z) => setExpKey(x, angle, y, z),
     pinPos: (pin) => expPinPos(pin),
-    state: () => ({ x: expKeyX, y: expKeyY, angle: expKeyAngle, inserted: expInserted }),
+    state: () => ({
+      x: expKeyX,
+      y: expKeyY,
+      angle: expKeyAngle,
+      z: expKeyZ,
+      l: expContactL(),
+      inserted: expInserted,
+    }),
+    // The depth model, for the independent cross-check: the profile functions
+    // and the slice they generate, so a driver can assert the drawn shape and
+    // the tested shape really are one thing.
+    depth: () => ({
+      z: expKeyZ,
+      l: expContactL(),
+      dContact: EXP_D_CONTACT_MM,
+      zMax: EXP_Z_MAX_MM,
+    }),
+    sliceAt: (lmm) => expSliceAt(lmm),
+    slice: () => expCurrentSlice(),
+    profile: (lmm) => ({
+      halfWidth: expBladeHalfWidthAt(lmm),
+      halfThick: expBladeHalfThickAt(lmm),
+      edge: expBittingEdgeAt(lmm),
+    }),
     bridged: () => expBridgedPins(),
     // Run one pass of the per-frame core readback on demand. The rAF loop only
     // runs with a ROM going, so a driver that wants to see the shorted state has
@@ -1993,15 +2210,25 @@
     shellContact: () => expShellContact(),
     grounded: () => expKeyGrounded(expBridgedPins()),
     cavityHalfWidth: (y) => expCavityHalfWidth(y),
-    // the rectangle the hit test uses, for cross-checking against the drawing
-    blade: () => ({
-      x: expKeyX,
-      y: expKeyY,
-      angle: expKeyAngle,
-      halfLen: EXP_BLADE_HALF,
-      halfThick: EXP_BLADE_HALF_H,
-      holeRadius: EXP_HOLE_RADIUS,
-    }),
+    // The current slice's extents and the feature points the hit test uses, in
+    // PORT coordinates — so a driver can check the drawn shape against the
+    // tested one without re-deriving the transform.
+    blade: () => {
+      const slice = expCurrentSlice();
+      return {
+        x: expKeyX,
+        y: expKeyY,
+        angle: expKeyAngle,
+        z: expKeyZ,
+        l: expContactL(),
+        reached: slice !== null,
+        halfLen: slice ? slice.halfW : 0,
+        halfThick: slice ? slice.backHalfT : 0,
+        edgeHalfThick: slice ? slice.edgeHalfT : 0,
+        holeRadius: EXP_HOLE_RADIUS,
+        features: slice ? slice.features.map(expFeaturePos) : [],
+      };
+    },
   };
 
   // --- cartridge front view / rotation controls ---

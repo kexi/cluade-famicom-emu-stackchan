@@ -871,6 +871,117 @@
     border-radius: 0;
     box-sizing: border-box;
   }
+  /* Depth gauge: the same machined treatment as the rotation gauge, but this
+     axis points away from the viewer, so it gets its own marks — a coarser
+     scale (one tick per 2mm) and a detent at the depth where the contacts
+     start. Kept short so it reads as a secondary control. */
+  #exp-depth-gauge {
+    --thumb-w: 12px;
+    --half-thumb: 6px;
+    position: relative;
+    display: block;
+    flex: 0 0 96px;
+    height: 26px;
+  }
+  #exp-depth-gauge::after {
+    content: '';
+    position: absolute;
+    left: var(--half-thumb);
+    right: var(--half-thumb);
+    bottom: 0;
+    height: 5px;
+    /* 13 ticks over the 26mm travel = one every 2mm */
+    background-image: repeating-linear-gradient(
+      90deg,
+      var(--nes-2d) 0 1px,
+      transparent 1px calc(100% / 13)
+    );
+    box-shadow: inset -1px 0 0 0 var(--nes-2d);
+    pointer-events: none;
+  }
+  /* The contact threshold: everything left of this mark cannot touch metal.
+     4.5mm of a 26mm travel = 17.3%. Amber, because it is a warning line rather
+     than a target — the 0-degree detent on the other gauge is a place you aim
+     for, this is a place things start working. */
+  #exp-depth-gauge::before {
+    content: '';
+    position: absolute;
+    left: calc(var(--half-thumb) + (100% - var(--thumb-w)) * 0.173);
+    bottom: 0;
+    width: 2px;
+    height: 9px;
+    margin-left: -1px;
+    background: var(--nes-27);
+    pointer-events: none;
+  }
+  #exp-depth {
+    -webkit-appearance: none;
+    appearance: none;
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 18px;
+    margin: 0;
+    cursor: pointer;
+    background: transparent;
+  }
+  #exp-depth::-webkit-slider-runnable-track {
+    height: 10px;
+    background: linear-gradient(var(--nes-0f) 0 2px, #2a2620 2px 8px, var(--nes-2d) 8px 10px);
+    border: 2px solid var(--nes-0f);
+  }
+  #exp-depth::-moz-range-track {
+    height: 10px;
+    background: linear-gradient(var(--nes-0f) 0 2px, #2a2620 2px 8px, var(--nes-2d) 8px 10px);
+    border: 2px solid var(--nes-0f);
+  }
+  #exp-depth::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: var(--thumb-w, 12px);
+    height: 22px;
+    margin-top: -8px;
+    background:
+      repeating-linear-gradient(90deg, transparent 0 3px, rgba(0, 0, 0, 0.45) 3px 5px),
+      linear-gradient(var(--nes-3d) 0 7px, var(--nes-10) 7px 15px, var(--nes-2d) 15px 22px);
+    border: 2px solid var(--nes-0f);
+    border-radius: 0;
+  }
+  #exp-depth::-moz-range-thumb {
+    width: var(--thumb-w, 12px);
+    height: 22px;
+    background:
+      repeating-linear-gradient(90deg, transparent 0 3px, rgba(0, 0, 0, 0.45) 3px 5px),
+      linear-gradient(var(--nes-3d) 0 7px, var(--nes-10) 7px 15px, var(--nes-2d) 15px 22px);
+    border: 2px solid var(--nes-0f);
+    border-radius: 0;
+    box-sizing: border-box;
+  }
+  #exp-depth-val {
+    color: #ddd;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 11px;
+    min-width: 48px;
+  }
+  /* Short of the contacts: the slice is drawn as an outline only, so the key is
+     visibly present but visibly not touching. Amber because this is the same
+     "not yet working" state the depth gauge's threshold mark warns about. */
+  body.exp-out-of-reach #exp-depth-val { color: var(--nes-27); }
+  /* Why not an inset ring: clip-path trims the pseudo-element to the slice
+     polygon, and an inset box-shadow is clipped away with it. A translucent
+     amber wash plus the existing drop-shadow outline survives the clip and
+     still reads as "drawn, but not solid". */
+  #exp-blade-mark.out-of-reach::before {
+    background: repeating-linear-gradient(
+      45deg,
+      rgba(234, 158, 34, 0.55) 0 3px,
+      rgba(234, 158, 34, 0.12) 3px 6px
+    );
+    filter: drop-shadow(0 0 1px var(--nes-27)) drop-shadow(0 0 1px #000);
+  }
+  /* the milled shading means nothing on a shape that is only an outline */
+  #exp-blade-mark.out-of-reach #exp-blade-grooves { display: none; }
   /* ---- state legend: what each pin marker means ---- */
   #exp-legend {
     display: flex;
@@ -905,6 +1016,19 @@
     border-radius: 2px;
     box-shadow: inset 0 0 0 2px var(--nes-2a), inset 0 0 0 4px var(--nes-0f);
   }
+  /* the hatched amber wash used for a slice that has not reached the contacts */
+  .exp-leg i.lg-reach {
+    border-radius: 2px;
+    background: repeating-linear-gradient(
+      45deg,
+      rgba(234, 158, 34, 0.55) 0 3px,
+      rgba(234, 158, 34, 0.12) 3px 6px
+    );
+    box-shadow: inset 0 0 0 1px var(--nes-27);
+  }
+  /* only meaningful while the key really is short of the contacts */
+  #exp-leg-reach-wrap { opacity: 0.35; }
+  body.exp-out-of-reach #exp-leg-reach-wrap { opacity: 1; }
   .exp-leg i.lg-out {
     border-radius: 2px;
     box-shadow: inset 0 0 0 2px var(--nes-2d);
@@ -1544,6 +1668,14 @@
         <span id="exp-rot-gauge">
           <input type="range" id="exp-rot" min="-30" max="30" step="0.5" value="0">
         </span>
+        <!-- Insertion depth. Same mechanical treatment as the rotation gauge,
+             turned on its side: this is the axis pointing away from the viewer,
+             so a vertical throw reads as "push it in". The wheel over the port
+             face drives the same value. -->
+        <span id="exp-depth-gauge" title="">
+          <input type="range" id="exp-depth" min="0" max="26" step="0.1" value="5.7">
+        </span>
+        <span id="exp-depth-val">5.7mm</span>
       </div>
       <!-- What each marker on the port face means. Kept directly under the port
            so the swatch and the thing it explains are in one glance. -->
@@ -1552,6 +1684,7 @@
         <span class="exp-leg"><i class="lg-cover"></i><span id="exp-leg-cover">接触(接地あり)</span></span>
         <span class="exp-leg"><i class="lg-short"></i><span id="exp-leg-short">短絡中</span></span>
         <span class="exp-leg"><i class="lg-shell"></i><span id="exp-leg-shell">シェル接地</span></span>
+        <span class="exp-leg" id="exp-leg-reach-wrap"><i class="lg-reach"></i><span id="exp-leg-reach">奥まで届いていない(接触不可)</span></span>
         <span id="exp-unplugged"><i class="lg-out"></i><span id="exp-leg-out">鍵は抜けています</span></span>
       </div>
       <div id="exp-hint">鍵を左右にドラッグして挿入位置、スライダーで捻り角(±30°)。右に捻れば下段、左に捻れば上段のピンに当たります。「ガチャガチャ」で約1秒ノイズを注入します</div>
@@ -1566,6 +1699,7 @@
         <div class="exp-meter-row"><span class="k" id="exp-m-k-key">鍵</span><span class="v" id="exp-m-key">-</span></div>
         <div class="exp-meter-row"><span class="k" id="exp-m-k-gnd">接地</span><span class="v" id="exp-m-gnd">-</span></div>
         <div class="exp-meter-row"><span class="k" id="exp-m-k-pins">接触ピン</span><span class="v" id="exp-m-pins">-</span></div>
+        <div class="exp-meter-row"><span class="k" id="exp-m-k-depth">挿入深さ</span><span class="v" id="exp-m-depth">-</span></div>
         <div class="exp-meter-row"><span class="k">$4017</span><span class="v exp-bits" id="exp-m-p1"></span></div>
         <div class="exp-meter-row"><span class="k">$4016 D1</span><span class="v" id="exp-m-p0">-</span></div>
         <div class="exp-meter-row"><span class="k">/IRQ</span><span class="v" id="exp-m-irq">-</span></div>
@@ -1660,10 +1794,10 @@ PRGとCHRを別のカセットから組み合わせた「ニコイチカセッ�
   </div>
   <button id="check-close">閉じる</button>
 </div>
-<script>window.NES_VER='1785668746';</script>
-<script src="i18n.js?v=1785668746"></script>
-<script src="smb-ram.js?v=1785668746"></script>
-<script src="nes.js?v=1785668746"></script>
-<script src="main.js?v=1785668746"></script>
+<script>window.NES_VER='1785673275';</script>
+<script src="i18n.js?v=1785673275"></script>
+<script src="smb-ram.js?v=1785673275"></script>
+<script src="nes.js?v=1785673275"></script>
+<script src="main.js?v=1785673275"></script>
 </body>
 </html>

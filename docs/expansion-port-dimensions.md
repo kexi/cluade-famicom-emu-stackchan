@@ -35,4 +35,18 @@
 - `web/main.js` の `EXP_*` 定数: タン面 24.59×7.82mm、ピッチ 2.77mm=12px、行間 2.84mm、入口リング 8px(⌀1.02mm スロートの上のファンネルとして妥当な範囲)
 - 鍵側の定数は推定値である旨をコメントに明記
 
+## 挿入深さ(2.5D)モデルの前提 — いずれも推定
+
+正面図は「コンタクト面と同じ高さにある刃のスライス」を描いている。挿入深さ z でスライス位置が変わり、`l = z − D_contact` が先端からの距離。
+
+| 定数 | 値 | 区分 | 根拠 |
+|---|---|---|---|
+| `EXP_D_CONTACT_MM` | 4.5mm | **推定** | MIL の最小接触係合深さ 0.149in(3.78mm)より一段深く設定。「実機はコンタクトが奥まっており市販の浅いプラグが届かない」という上記の定性報告を再現するための値。実測には teardown が必要 |
+| `EXP_Z_MAX_MM` | 26mm | **推定** | 底突きまでの距離。複数の刻み山がコンタクト面を通過する長さを確保するために設定 |
+| `EXP_TAPER_LEN_MM` | 4.0mm | **推定** | 先端テーパーが full width(実効5.5mm)まで開くまでの長さ |
+| `EXP_BEVEL_LEN_MM` | 5.0mm | **推定** | 先端ベベル 1.5mm → 刃body 2.3mm への遷移長 |
+| `EXP_BITTING` | 6山/約20mm、不等間隔・不等深さ | **推定** | 昭和期 MIWA ディスクシリンダー鍵の刻みコードは非公表。等間隔にすると全山がピッチに同時整合して平刃と同じ挙動に退化するため、意図的に不規則化している |
+
+**l < 0 のとき接触は一切発生しない**。これは上記「市販プラグが届かない」報告そのものをモデル化したもの。
+
 主要出典: [MIL-DTL-24308(DLA)](https://landandmaritimeapps.dla.mil/programs/milspec/ListDocs.aspx?BasicDoc=MIL-DTL-24308) / [Cinch M24308 カタログ](https://www.peigenesis.com/images/content/pei_tabs/cinch/d-sub-m24308/cinch_d-sub_m24308.pdf) / [JAE D-sub カタログ](https://www.m-elenext.co.jp/catalog/Dsub_Catalog.pdf) / [Amphenol M24308 カタログ](https://www.airelectro.com/downloads/Amphenol-Catalogs/D-Sub/Amphenol-D-Sub%20M24308.pdf) / [オムロン XM3](https://omronfs.omron.com/ja_JP/ecb/products/pdf/xm3b_f.pdf) / [MIWA 社史](https://www.miwa-lock.co.jp/miwa_smartphone/corp/history.html)
