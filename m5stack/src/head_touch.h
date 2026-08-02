@@ -13,5 +13,6 @@ bool headTouchInit();
 
 // 撫でジェスチャーを 1 回検出したフレームだけ true。Game モードの loop から
 // 毎フレーム呼ぶ想定で、内部でポーリング周期を絞っている。
-// 前→後 / 後→前 のどちらの向きでも true を返す。
+// 判定は撫でた距離 (ゾーン境界のまたぎ回数) の累積で、向きは問わず、指を
+// 離さない連続の往復も数える。閾値は HEAD_TOUCH_TRAVEL_TO_MENU。
 bool headTouchSwiped();

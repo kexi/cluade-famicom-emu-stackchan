@@ -39,27 +39,22 @@ static constexpr uint8_t SI12T_CTRL2_RUN = 0x07;
 // 内でバスロックを取るので、素の Wire ではなくこの API 経由で読むこと。
 static constexpr uint32_t SI12T_I2C_FREQ = 100000;
 
-// スワイプの時間窓 (BSP の touch_sensor.cpp と同値)。ゾーン間の着火時刻差が
-// この範囲に収まっていれば「なぞった」とみなす。下限はノイズ (3 ゾーンを同時に
-// 掌で覆っただけ) を弾き、上限は指を置いたまま考えていた場合を弾く。
-static constexpr int32_t SWIPE_MIN_INTERVAL_MS = 30;
-static constexpr int32_t SWIPE_MAX_INTERVAL_MS = 400;
-
 static constexpr int ZONE_COUNT = 3;
 
 static bool g_present = false;
-// 各ゾーンが今回の接触サイクルで一度でも触れられたか、とその最初の時刻。
-// 全ゾーンが離れた時点でリセットされる。
-static bool g_touched[ZONE_COUNT] = {};
-static uint32_t g_touchStartMs[ZONE_COUNT] = {};
-// 1 回の接触サイクルで 1 度だけ発火させるためのラッチ。BSP の _in_gesture と
-// 同じ役割で、撫でた指がまだ乗っている間の再発火を止める。
-static bool g_inGesture = false;
 static uint32_t g_lastPollMs = 0;
-// なぞり回数のカウント。HEAD_TOUCH_STROKES_TO_MENU 回目で発火し、前回のなぞり
-// から HEAD_TOUCH_STROKE_PAIR_MS 空いたら 1 回目から数え直す。
-static int g_strokeCount = 0;
-static uint32_t g_lastStrokeMs = 0;
+// 前回ポーリング時に各ゾーンが触れられていたか。立ち上がりエッジ (新しく
+// 触れられたゾーン) の検出に使う。
+static bool g_prevZone[ZONE_COUNT] = {};
+// 指が最後に「新しく」触れたゾーン。距離の起点で、-1 は未接触または
+// 掌などで複数ゾーンが同時に立って起点を決められなかった状態。
+static int g_lastZone = -1;
+static uint32_t g_lastMoveMs = 0;
+// 撫でた距離の累積 (ゾーン境界のまたぎ回数)。BSP の「3 ゾーン全部が時間窓内に
+// 順に着火したらスワイプ」判定は使っていない: あちらは 1 ストロークを 1 回と
+// 数える形で、指を離さず往復する撫で方を検出できないため。隣のゾーンへ移る
+// たびに 1 加算し、HEAD_TOUCH_TRAVEL_TO_MENU に達したら発火する。
+static int g_travel = 0;
 
 static bool writeReg(uint8_t reg, uint8_t value) {
     return M5.In_I2C.writeRegister8(SI12T_ADDR, reg, value, SI12T_I2C_FREQ);
@@ -117,36 +112,12 @@ static void parseZones(uint8_t raw, bool out[ZONE_COUNT]) {
     }
 }
 
-// 3 ゾーンの着火順を見て、順方向・逆方向どちらかのスワイプなら true。
-static bool detectSwipe() {
-    const bool allZonesTouched = g_touched[0] && g_touched[1] && g_touched[2];
-    if (!allZonesTouched) return false;
-
-    // 符号付きで引く: millis() の巻き戻りは 49 日先なので実害はないが、
-    // 逆方向の差分を負の値として素直に扱いたい。
-    const int32_t front = (int32_t)g_touchStartMs[0];
-    const int32_t middle = (int32_t)g_touchStartMs[1];
-    const int32_t back = (int32_t)g_touchStartMs[2];
-
-    // 前→後 (0→1→2) と後→前 (2→1→0)。中央を挟んで両区間とも窓に入って
-    // いることを要求するので、両端を同時に触っただけでは成立しない。
-    const int32_t forwardA = middle - front, forwardB = back - middle;
-    const int32_t backwardA = middle - back, backwardB = front - middle;
-
-    const bool inWindowForward = forwardA > SWIPE_MIN_INTERVAL_MS && forwardB > SWIPE_MIN_INTERVAL_MS &&
-                                 forwardA < SWIPE_MAX_INTERVAL_MS && forwardB < SWIPE_MAX_INTERVAL_MS;
-    const bool inWindowBackward = backwardA > SWIPE_MIN_INTERVAL_MS && backwardB > SWIPE_MIN_INTERVAL_MS &&
-                                  backwardA < SWIPE_MAX_INTERVAL_MS && backwardB < SWIPE_MAX_INTERVAL_MS;
-    // 向きは問わない: どちら向きに撫でてもメニューに戻る、という 1 つの操作。
-    return inWindowForward || inWindowBackward;
-}
-
 bool headTouchSwiped() {
     if (!g_present) return false;
 
     // レートリミット。フレーム予算 16.6ms に対し 100kHz で 1 バイト読むだけでも
-    // ~0.3ms かかるので、スワイプ判定に必要な最低限の分解能まで落とす。
-    // SWIPE_MIN_INTERVAL_MS より短くしておけば、区間の下限判定は鈍らない。
+    // ~0.3ms かかるので、指がゾーンをまたぐ動き (最速でも数十 ms) を取れる
+    // 最低限の分解能まで落とす。
     const uint32_t now = millis();
     const bool tooSoon = now - g_lastPollMs < HEAD_TOUCH_POLL_MS;
     if (tooSoon) return false;
@@ -162,44 +133,48 @@ bool headTouchSwiped() {
     bool zone[ZONE_COUNT];
     parseZones(raw, zone);
 
-    bool anyTouched = false;
+    // 動きが途絶えたら数え直す。指が完全に離れているかどうかは見ない:
+    // 乗せたまま止めても、離して間を置いても、等しく「撫で終わり」。
+    const bool idle = g_travel > 0 && now - g_lastMoveMs > HEAD_TOUCH_TRAVEL_RESET_MS;
+    if (idle) {
+        g_travel = 0;
+        g_lastZone = -1;
+    }
+
+    // このポーリングで新しく触れられたゾーン (立ち上がりエッジ) を拾う。
+    int rose = -1;
+    int roseCount = 0;
     for (int i = 0; i < ZONE_COUNT; i++) {
-        if (!zone[i]) continue;
-        anyTouched = true;
-        const bool firstContact = !g_touched[i];
-        if (firstContact) {
-            g_touched[i] = true;
-            g_touchStartMs[i] = now;
+        const bool isRising = zone[i] && !g_prevZone[i];
+        if (isRising) {
+            rose = i;
+            roseCount++;
         }
+        g_prevZone[i] = zone[i];
     }
+    if (roseCount == 0) return false;
 
-    // 全ゾーンが離れたら次のジェスチャーに備えて畳む。ここでしかフラグを
-    // 落とさないので、指が乗っている限り着火時刻は保持される。
-    if (!anyTouched) {
-        g_inGesture = false;
-        for (int i = 0; i < ZONE_COUNT; i++) g_touched[i] = false;
+    // 同時に複数ゾーンが立つのは指の移動ではなく掌などの面接触。距離には
+    // 数えず、起点も無効化する — 直後の release→rise を移動と誤認しないため。
+    if (roseCount > 1) {
+        g_lastZone = -1;
+        g_lastMoveMs = now;
         return false;
     }
 
-    // 判定済みの接触サイクル。指が乗ったままでも再発火させない。
-    if (g_inGesture) return false;
-
-    const bool swiped = detectSwipe();
-    if (!swiped) return false;
-    g_inGesture = true;
-
-    // 1 回のスワイプでは開かない: 窓の内に規定回数なぞられて初めて発火する。
-    // 窓を過ぎた古いなぞりは数え直し — 「2 回目が遅すぎた」は誤爆ではなく
-    // 単発のなぞりが 2 つあっただけ、と解釈する。
-    const bool expired = g_strokeCount > 0 && now - g_lastStrokeMs > HEAD_TOUCH_STROKE_PAIR_MS;
-    if (expired) g_strokeCount = 0;
-    g_strokeCount++;
-    g_lastStrokeMs = now;
-    if (g_strokeCount < HEAD_TOUCH_STROKES_TO_MENU) {
-        Serial.printf("HEAD: stroke %d/%d\n", g_strokeCount, HEAD_TOUCH_STROKES_TO_MENU);
+    // 隣のゾーンへ移った時だけ距離が伸びる。離れたゾーンへの跳び (一度離して
+    // 別の場所に置き直した) は移動ではないので、起点を置き直すだけにする。
+    const bool moved = g_lastZone >= 0 && (rose - g_lastZone == 1 || g_lastZone - rose == 1);
+    if (moved) g_travel++;
+    g_lastZone = rose;
+    g_lastMoveMs = now;
+    if (!moved || g_travel < HEAD_TOUCH_TRAVEL_TO_MENU) {
+        if (moved) Serial.printf("HEAD: travel %d/%d\n", g_travel, HEAD_TOUCH_TRAVEL_TO_MENU);
         return false;
     }
-    g_strokeCount = 0;
-    Serial.println("HEAD: stroke -> menu");
+
+    g_travel = 0;
+    g_lastZone = -1;
+    Serial.println("HEAD: pet -> menu");
     return true;
 }
