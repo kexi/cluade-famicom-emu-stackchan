@@ -11,6 +11,7 @@
 #include <esp_heap_caps.h>
 #include <esp_rom_crc.h>
 #include <atomic>
+#include <cstring>
 #include <new>
 
 #include "../../core/nes.h"
@@ -78,6 +79,29 @@ static std::atomic<bool> g_romApplyRequested{false};
 // cannot cover that case — it means "core 0 has published an image", which is
 // exactly not what an SD load does.
 static std::atomic<bool> g_stagingBusy{false};
+// The SD save a completed type 4 transfer asked for, published alongside the
+// image itself. Read only when g_romApplyRequested has been observed with an
+// acquire load, so it needs no ordering of its own.
+static bool g_romSaveToSd = false;
+static char g_romSaveName[SD_ROM_NAME_MAX] = {};
+// Where to report the save's outcome, since the END ACK has already gone out by
+// the time core 1 writes the card.
+static sockaddr_in g_romSaveReplyTo = {};
+
+// A type 5 request, latched by the UDP task and serviced by the frame loop.
+//
+// The payload is copied out of the datagram rather than pointed into it: the
+// receive buffer is reused by the very next recvfrom(), so by the time core 1
+// looks the name could be part of an unrelated packet. Plain (non-atomic)
+// fields published by the release store on g_sdRequested, exactly as the ROM
+// staging buffer is.
+static std::atomic<bool> g_sdRequested{false};
+static uint8_t g_sdOp = 0;
+static uint16_t g_sdSeq = 0;
+static char g_sdArgA[SD_ROM_NAME_MAX] = {};
+static char g_sdArgB[SD_ROM_NAME_MAX] = {};
+static sockaddr_in g_sdReplyTo = {};
+
 // The UDP socket, shared so loop() can answer directly. lwIP's sendto is
 // thread-safe, and replying from the emulation core avoids handing the snapshot
 // buffer across tasks while it is being filled.
@@ -108,6 +132,35 @@ static uint8_t g_romPendingFlags = 0;
 static uint16_t g_romNextChunk = 0;   // the chunk index a DATA packet must carry
 static uint32_t g_romReceived = 0;   // bytes staged so far
 static uint32_t g_romLastRxMs = 0;   // for the stale-session takeover
+// The name from a BEGIN's optional tail, held until END publishes it. Empty
+// when the sender used the old fixed-length BEGIN.
+static char g_romPendingName[SD_ROM_NAME_MAX] = {};
+// The BEGIN's source, so the save outcome reaches the same peer that asked for
+// it even if some other host is also talking to the device.
+static sockaddr_in g_romPendingFrom = {};
+
+// Copy a length-prefixed name field out of a datagram.
+//
+// Returns the number of bytes consumed (the length byte plus the name), or -1
+// when the field runs past what actually arrived. Every string this protocol
+// carries goes through here rather than being read inline, so a lying length
+// byte is rejected in one place instead of in each op's parser.
+static int readNameField(const uint8_t* packet, int received, int offset, char* out, size_t cap) {
+    out[0] = '\0';
+    const bool noLengthByte = offset >= received;
+    if (noLengthByte) return -1;
+    const int len = packet[offset];
+    const bool runsPastDatagram = offset + 1 + len > received;
+    if (runsPastDatagram) return -1;
+    // A name that does not fit is not silently truncated: a truncated name is a
+    // *different* file, and acting on it would delete or overwrite the wrong
+    // one. The caller sees the empty string and answers BadName.
+    const bool tooLong = (size_t)len >= cap;
+    if (tooLong) return -1;
+    memcpy(out, packet + offset + 1, (size_t)len);
+    out[len] = '\0';
+    return 1 + len;
+}
 
 static void sendRomAck(int sock, const sockaddr_in& to, uint8_t op, uint16_t session, uint16_t chunk, uint8_t status) {
     uint8_t ack[UDP_ROM_ACK_SIZE] = {};
@@ -214,6 +267,13 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
         g_romExpectedCrc = (uint32_t)packet[12] | ((uint32_t)packet[13] << 8) | ((uint32_t)packet[14] << 16) |
                            ((uint32_t)packet[15] << 24);
         g_romPendingFlags = packet[7];
+        // Length-discriminated, not flag-discriminated: a sender that predates
+        // the SD support sends exactly UDP_ROM_BEGIN_SIZE bytes and gets the old
+        // behaviour, with no bit it would have had to reserve in advance.
+        g_romPendingName[0] = '\0';
+        const bool hasNameField = received >= UDP_ROM_BEGIN_NAMED_SIZE;
+        if (hasNameField) readNameField(packet, received, UDP_ROM_BEGIN_SIZE, g_romPendingName, SD_ROM_NAME_MAX);
+        g_romPendingFrom = from;
         g_romNextChunk = 0;
         g_romReceived = 0;
         g_romLastRxMs = millis();
@@ -301,12 +361,88 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
 
         g_romSize = g_romReceived;
         g_romFlags = g_romPendingFlags;
+        // A save with nothing to call the file is not a save. Dropping the flag
+        // rather than inventing a name keeps the card free of images the user
+        // cannot recognise later.
+        const bool nameGiven = g_romPendingName[0] != '\0';
+        g_romSaveToSd = (g_romPendingFlags & ROM_FLAG_SAVE_SD) != 0 && nameGiven;
+        memcpy(g_romSaveName, g_romPendingName, sizeof(g_romSaveName));
+        g_romSaveReplyTo = g_romPendingFrom;
         g_romActive = false;
-        // Publishes the buffer and the two plain globals above to core 1.
+        // Publishes the buffer and the plain globals above to core 1.
         g_romApplyRequested.store(true, std::memory_order_release);
         sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_OK);
         return;
     }
+}
+
+// ------------------------------------------------------------- SD commands
+
+// Single-datagram reply, used by LOAD / DELETE / RENAME and by a LIST that
+// failed before it had anything to list.
+static void sendSdAck(int sock, const sockaddr_in& to, uint8_t op, uint16_t seq, SdStatus status) {
+    uint8_t ack[UDP_SD_ACK_SIZE] = {};
+    ack[0] = 'N';
+    ack[1] = 'S';
+    ack[2] = UDP_PROTOCOL_VERSION;
+    ack[3] = op;
+    ack[4] = seq & 0xFF;
+    ack[5] = seq >> 8;
+    ack[6] = (uint8_t)status;
+    ::sendto(sock, ack, sizeof(ack), 0, (const sockaddr*)&to, sizeof(to));
+}
+
+// Latch a type 5 request for the frame loop.
+//
+// Nothing here touches the card: the SPI bus is shared with the panel, and this
+// runs on core 0 where there is no way to know whether a band is in flight. The
+// only work done on this side is validating that the datagram is self-consistent
+// and copying the arguments somewhere the receive buffer's reuse cannot reach.
+static void handleSdPacket(int sock, const sockaddr_in& from, const uint8_t* packet, int received) {
+    const uint16_t seq = (uint16_t)(packet[4] | (packet[5] << 8));
+    const uint8_t op = packet[6];
+
+    const bool known = op == UDP_SD_OP_LIST || op == UDP_SD_OP_LOAD || op == UDP_SD_OP_DELETE || op == UDP_SD_OP_RENAME;
+    if (!known) return;
+
+    // One outstanding request at a time. Queueing would need a depth, a policy
+    // for overflow and an ordering guarantee across two cores, for a protocol
+    // whose sender is a stop-and-wait loop that has no reason to pipeline.
+    const bool alreadyPending = g_sdRequested.load(std::memory_order_acquire);
+    if (alreadyPending) {
+        sendSdAck(sock, from, op, seq, SdStatus::Busy);
+        return;
+    }
+
+    char argA[SD_ROM_NAME_MAX] = {};
+    char argB[SD_ROM_NAME_MAX] = {};
+    const bool needsName = op != UDP_SD_OP_LIST;
+    if (needsName) {
+        const int consumed = readNameField(packet, received, UDP_SD_HEADER, argA, sizeof(argA));
+        const bool malformed = consumed < 0 || argA[0] == '\0';
+        if (malformed) {
+            sendSdAck(sock, from, op, seq, SdStatus::BadName);
+            return;
+        }
+        const bool needsSecondName = op == UDP_SD_OP_RENAME;
+        if (needsSecondName) {
+            const int consumedB = readNameField(packet, received, UDP_SD_HEADER + consumed, argB, sizeof(argB));
+            const bool malformedB = consumedB < 0 || argB[0] == '\0';
+            if (malformedB) {
+                sendSdAck(sock, from, op, seq, SdStatus::BadName);
+                return;
+            }
+        }
+    }
+
+    g_sdOp = op;
+    g_sdSeq = seq;
+    memcpy(g_sdArgA, argA, sizeof(g_sdArgA));
+    memcpy(g_sdArgB, argB, sizeof(g_sdArgB));
+    g_sdReplyTo = from;
+    // Publishes the fields above to core 1, the same pairing the ROM staging
+    // buffer uses.
+    g_sdRequested.store(true, std::memory_order_release);
 }
 
 // ---------------------------------------------------------------- UDP task
@@ -374,6 +510,10 @@ static void udpTask(void*) {
         }
         if (type == UDP_TYPE_ROM) {
             handleRomPacket(sock, from, packet, received);
+            continue;   // not controller input: leave g_lastRxMs alone
+        }
+        if (type == UDP_TYPE_SD) {
+            handleSdPacket(sock, from, packet, received);
             continue;   // not controller input: leave g_lastRxMs alone
         }
         if (type == UDP_TYPE_CTRL) {
@@ -702,7 +842,46 @@ static void applyRomRequest() {
     const bool requested = g_romApplyRequested.load(std::memory_order_acquire);
     if (!requested) return;
 
-    installRom(g_romBuf, g_romSize, (g_romFlags & ROM_FLAG_SWAP) != 0);
+    // Saved before installing, for two reasons. The image is still exactly what
+    // the sender verified — installRom() does not modify staging, but a future
+    // change to it must not be able to alter what lands on the card. And a
+    // NO_LOAD transfer has no install to sequence against at all.
+    if (g_romSaveToSd) {
+        // The panel and the card share the SPI bus, so the in-flight band has to
+        // be off the wire before the write starts. This is what makes the whole
+        // save legal here and illegal in the UDP task.
+        joinBand();
+        char clean[SD_ROM_NAME_MAX];
+        sdRomSanitizeName(g_romSaveName, clean, sizeof(clean));
+        // Rejected rather than saved under the cleaned spelling: the sender then
+        // knows the name it will find on the card is not the one it asked for,
+        // and can offer the user the corrected one instead of guessing later.
+        const bool nameMangled = strcmp(clean, g_romSaveName) != 0;
+        const SdStatus status = nameMangled ? SdStatus::BadName : sdRomSave(clean, g_romBuf, g_romSize);
+        // A separate datagram, because the END ACK went out from the UDP task
+        // the moment the CRC checked — holding that ACK until the card write
+        // finished would stall the sender across a ~1-2s write.
+        const bool canReply = g_udpSock >= 0;
+        if (canReply) {
+            uint8_t event[UDP_ROM_SAVE_EVENT_SIZE] = {};
+            event[0] = 'N';
+            event[1] = 'S';
+            event[2] = UDP_PROTOCOL_VERSION;
+            event[3] = UDP_TYPE_ROM;
+            event[4] = g_romSession & 0xFF;
+            event[5] = g_romSession >> 8;
+            event[6] = (uint8_t)status;
+            ::sendto(g_udpSock, event, sizeof(event), 0, (const sockaddr*)&g_romSaveReplyTo, sizeof(g_romSaveReplyTo));
+        }
+        Serial.printf("ROM: save '%s' -> %s\n", g_romSaveName, sdStatusText(status));
+    }
+
+    // "Add to my library" rather than "play this now": the running game keeps
+    // going, and the picker (if it is up) picks the new file up on its next
+    // scan. A failed save still skips the install — the sender asked for a file,
+    // not for a cart swap, and interrupting the game would be a surprise.
+    const bool installWanted = (g_romFlags & ROM_FLAG_NO_LOAD) == 0;
+    if (installWanted) installRom(g_romBuf, g_romSize, (g_romFlags & ROM_FLAG_SWAP) != 0);
 
     // Cleared last: until this store the UDP task treats the buffer as ours and
     // refuses new transfers. Clearing it earlier would let a BEGIN overwrite the
@@ -1047,6 +1226,124 @@ static SdStatus launchSdRom(const char* name) {
     return status;
 }
 
+// Set when a type 5 op changed what a listing would show, so the picker knows
+// to rescan. Not a rescan from within the handler: the handler may run in Game
+// mode, where there is no listing to refresh.
+static bool g_sdListingChanged = false;
+
+// Send a LIST reply, split across as many datagrams as the entries need.
+//
+// The whole listing is built once and then sliced, rather than scanning the
+// card per datagram: a rescan between parts could see a different set of files
+// and produce a reply whose parts do not describe one moment in time.
+static void sendSdListing(const sockaddr_in& to, uint16_t seq) {
+    if (g_udpSock < 0) return;
+
+    static SdRomEntry entries[SD_ROM_MAX_FILES];
+    const bool mounted = sdRomMounted();
+    const int count = mounted ? sdRomScan(entries, SD_ROM_MAX_FILES) : 0;
+    if (!mounted) {
+        sendSdAck(g_udpSock, to, UDP_SD_OP_LIST, seq, SdStatus::NotMounted);
+        return;
+    }
+    uint64_t totalBytes = 0, freeBytes = 0;
+    sdRomSpace(&totalBytes, &freeBytes);
+
+    // How many entries fit one datagram, worst case. Computed against the
+    // longest name rather than the actual ones so the part count can be decided
+    // before any packing happens, which is what lets nparts be correct in part 0.
+    const int perPart = (UDP_SD_CHUNK - UDP_SD_LIST_HEADER) / UDP_SD_ENTRY_MAX;
+    // At least one part even for an empty card: "mounted, no ROMs" has to be
+    // distinguishable from "no reply arrived".
+    const int nparts = count > 0 ? (count + perPart - 1) / perPart : 1;
+
+    uint8_t datagram[UDP_SD_LIST_HEADER + UDP_SD_CHUNK];
+    for (int part = 0; part < nparts; part++) {
+        const int first = part * perPart;
+        int here = count - first;
+        if (here > perPart) here = perPart;
+        if (here < 0) here = 0;
+
+        datagram[0] = 'N';
+        datagram[1] = 'S';
+        datagram[2] = UDP_PROTOCOL_VERSION;
+        datagram[3] = UDP_SD_OP_LIST;
+        datagram[4] = seq & 0xFF;
+        datagram[5] = seq >> 8;
+        datagram[6] = (uint8_t)SdStatus::Ok;
+        datagram[7] = 0;
+        datagram[8] = (uint8_t)part;
+        datagram[9] = (uint8_t)nparts;
+        datagram[10] = (uint8_t)(count & 0xFF);
+        datagram[11] = (uint8_t)(count >> 8);
+        datagram[12] = (uint8_t)(here & 0xFF);
+        datagram[13] = (uint8_t)(here >> 8);
+        // Repeated in every part rather than riding only on part 0, so a
+        // receiver that lost part 0 still has the capacity once it has retried.
+        for (int i = 0; i < 8; i++) datagram[14 + i] = (uint8_t)(totalBytes >> (i * 8));
+        for (int i = 0; i < 8; i++) datagram[22 + i] = (uint8_t)(freeBytes >> (i * 8));
+
+        size_t offset = UDP_SD_LIST_HEADER;
+        for (int i = 0; i < here; i++) {
+            const SdRomEntry& e = entries[first + i];
+            const size_t nameLen = strlen(e.name);
+            datagram[offset++] = (uint8_t)(e.size & 0xFF);
+            datagram[offset++] = (uint8_t)((e.size >> 8) & 0xFF);
+            datagram[offset++] = (uint8_t)((e.size >> 16) & 0xFF);
+            datagram[offset++] = (uint8_t)((e.size >> 24) & 0xFF);
+            datagram[offset++] = (uint8_t)nameLen;
+            memcpy(datagram + offset, e.name, nameLen);
+            offset += nameLen;
+        }
+        ::sendto(g_udpSock, datagram, offset, 0, (const sockaddr*)&to, sizeof(to));
+    }
+    Serial.printf("SD: listed %d entries in %d part(s)\n", count, nparts);
+}
+
+// Service a latched type 5 request at a frame boundary.
+//
+// Every card access in this function is legal only because of the joinBand()
+// at the top: the panel and the card share the SPI bus, and this is the point
+// at which core 1 can guarantee nothing is on the wire.
+static void applySdRequest() {
+    const bool requested = g_sdRequested.load(std::memory_order_acquire);
+    if (!requested) return;
+
+    joinBand();
+
+    const uint8_t op = g_sdOp;
+    const uint16_t seq = g_sdSeq;
+    if (op == UDP_SD_OP_LIST) {
+        sendSdListing(g_sdReplyTo, seq);
+        g_sdRequested.store(false, std::memory_order_release);
+        return;
+    }
+
+    SdStatus status = SdStatus::IoError;
+    bool listingChanged = false;
+    if (op == UDP_SD_OP_LOAD) {
+        status = launchSdRom(g_sdArgA);
+        // A LOAD from the browser is a "play this now", the network equivalent
+        // of picking the row. Leaving the picker up on success would show the
+        // user a menu for a game that is already running.
+        const bool shouldStart = status == SdStatus::Ok && g_mode == AppMode::Menu;
+        if (shouldStart) startGame();
+    } else if (op == UDP_SD_OP_DELETE) {
+        status = sdRomDelete(g_sdArgA);
+        listingChanged = status == SdStatus::Ok;
+    } else if (op == UDP_SD_OP_RENAME) {
+        status = sdRomRename(g_sdArgA, g_sdArgB);
+        listingChanged = status == SdStatus::Ok;
+    }
+    if (listingChanged) g_sdListingChanged = true;
+
+    if (g_udpSock >= 0) sendSdAck(g_udpSock, g_sdReplyTo, op, seq, status);
+    // Cleared last, for the same reason the ROM latch is: until this store the
+    // UDP task refuses further requests, which is what keeps g_sdArgA/B stable
+    // for the duration of the work above.
+    g_sdRequested.store(false, std::memory_order_release);
+}
+
 // One frame of the picker. Returns once the mode has been decided, so the
 // caller's only job is to stop emulating while this is up.
 static void menuLoop() {
@@ -1073,8 +1370,30 @@ static void menuLoop() {
         // Type 4 and type 5 keep working while the picker is up, and both stage
         // into the same buffer this mode reads from, so they are serviced on the
         // same frame boundary they would be in Game.
+        const bool romPushed = g_romApplyRequested.load(std::memory_order_acquire);
+        const bool pushWantsPlay = romPushed && (g_romFlags & ROM_FLAG_NO_LOAD) == 0;
         applyRomRequest();
+        applySdRequest();
         applyVolumeRequest();
+        // A type 5 LOAD starts the game from inside applySdRequest(), so the
+        // mode may already have changed. Everything below is menu upkeep and
+        // would drag the user straight back out of the game they just launched.
+        const bool leftMenu = g_mode != AppMode::Menu;
+        if (leftMenu) return;
+        // A ROM sent with the install flag is a "play this now", so honour it
+        // from the picker as well: the browser's send button should not behave
+        // differently depending on whether the user happens to be browsing.
+        if (pushWantsPlay) {
+            startGame();
+            return;
+        }
+        // A save-only push (or an SD delete/rename) changed what the listing
+        // should show, so redraw it rather than leaving a stale row on screen.
+        const bool listingStale = romPushed || g_sdListingChanged;
+        if (listingStale) {
+            g_sdListingChanged = false;
+            menuEnter();
+        }
         delay(MENU_TICK_MS);
         return;
     }
@@ -1245,6 +1564,10 @@ void loop() {
         return;
     }
     applyRomRequest();
+    // After the ROM handler, not before: both may touch the card, and doing the
+    // type 4 save first means a LIST issued right behind a save already sees the
+    // new file.
+    applySdRequest();
     applyVolumeRequest();
     updateWaveCapture();
 
