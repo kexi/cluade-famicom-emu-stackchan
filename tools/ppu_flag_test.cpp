@@ -10,15 +10,20 @@
 // フラグのバグは「レンダリングを可視行のどのドットで切り替えたか」でしか
 // 現れないので、PPU を直接叩いて書き込みタイミングを作る本テストが要る。
 //
-// CPU は動かさない。PPU::step() を直接回してドット位置を進め、狙ったドットで
+// CPU は動かさない。PPU を直接回してドット位置を進め、狙ったドットで
 // writeReg($2001) するだけ。ROM を読み込むのは、PPU が可視行の dot 260 で
 // mapper->scanline() を呼ぶ (MMC3 の近似 IRQ) ため — マッパーが無いと
 // ヌル参照で落ちる。ROM の中身自体はこのテストの主張には効かない。
 //
-// 参照ビルド (-DNES_EMBEDDED なし) と組み込みビルド (あり) の両方でビルドして
-// 走らせる。両者は framebuffer を書くドットが違う (組み込みは dot 256 の一括
-// 描画、参照はドット逐次) が、フラグの述語は「span 1..256 の全体でレンダリング
-// が有効だったか」なので、どちらでも同じ答えになることを確かめる。
+// 2 軸で回す:
+//
+//   ビルド : 参照 (-DNES_EMBEDDED なし) と組み込み (あり)。両者は framebuffer を
+//            書くドットが違う (組み込みは dot 256 の一括描画、参照はドット逐次)
+//            が、フラグの述語は「区間 1..256 の全体でレンダリングが有効だったか」
+//            なので、どちらでも同じ答えになる
+//   駆動   : step() 直叩きと stepMany() (組み込みのみ)。実機は stepMany 経路を
+//            通り、そこでは区間が 1 回の step() に畳まれて AND の回数が変わる。
+//            step() だけで通したテストは実機経路を一度も踏まない
 
 #include "../core/nes.h"
 
@@ -46,12 +51,25 @@ constexpr uint8_t RENDER_OFF = 0x00;
 
 std::vector<uint8_t> g_rom;
 
+// PPU の進め方。実機 (組み込みビルド) は stepMany() でドットをまとめて飛ばす
+// ので、step() 直叩きだけで通したテストは coalesce 経路を一度も踏まない。
+// frameFullyRendered_ は「描画区間 1..256 の全ドットで AND」という形をしていて、
+// stepMany はその区間をまとめて 1 回の step() に畳む — つまり AND の回数が
+// 両者で違う。同じ答えになることは設計上の主張なので、テストで踏む。
+enum class Driver {
+    Step,   // 1 ドットずつ step()
+    StepMany,   // stepMany() でまとめて (組み込みビルドのみ)
+};
+
+const char* driverName(Driver d) { return d == Driver::Step ? "step" : "stepMany"; }
+
 // PPU を単体で回すための最小の器。CPU は一度も step() しないので、状態は
 // 「PPU が自力で進んだぶん」だけになり、テストの主張がドット位置だけで書ける。
 struct Harness {
     nes::NES machine;
+    Driver driver;
 
-    Harness() {
+    explicit Harness(Driver d) : driver(d) {
         if (!machine.loadRom(g_rom.data(), g_rom.size())) {
             std::printf("  FAIL could not load rom\n");
             g_failures++;
@@ -65,12 +83,40 @@ struct Harness {
     int scanline() { return machine.ppu.dbgState().scanline; }
     int dot() { return machine.ppu.dbgState().dot; }
 
-    // (scanline, dot) に到達するまで step() する。到達不能なら諦めて false。
-    // 上限は「1 フレーム分回しても来ないならロジックが壊れている」の意味。
+    // 1 単位進める。stepMany モードでは「行末までの残り」をまとめて渡し、
+    // coalesce を実際に働かせる。
+    //
+    // 行末 (dot 340) を上限にするのは、ここが「飛び越えてはいけない」ドットだから
+    // (stepMany 側のコメント参照)。行をまたいで大きな値を渡しても stepMany は
+    // 正しく刻むが、テスト側が「いまどの行にいるか」を見失う。行単位で止めれば、
+    // 下の advanceTo が目標ドットを通り越さないことを保証できる。
+    void advanceOne() {
+#ifdef NES_EMBEDDED
+        if (driver == Driver::StepMany) {
+            const int remaining = 340 - dot();
+            machine.ppu.stepMany(remaining > 0 ? remaining : 1);
+            return;
+        }
+#endif
+        machine.ppu.step();
+    }
+
+    // (scanline, dot) に到達するまで進める。到達不能なら諦めて false。
+    //
+    // stepMany モードでは目標ドットを飛び越えうるので、残り距離を上限に渡して
+    // 刻む。こうすると coalesce は目標の手前までしか働かず、狙ったドットに必ず
+    // 着地する — $2001 を「行の描画区間の内側/外側」のどちらで書くかが本テストの
+    // 主張そのものなので、着地点がずれると主張が変わってしまう。
     bool advanceTo(int targetScanline, int targetDot) {
         for (int i = 0; i < 262 * 341 * 2; i++) {
             if (scanline() == targetScanline && dot() == targetDot) return true;
-            machine.ppu.step();
+#ifdef NES_EMBEDDED
+            if (driver == Driver::StepMany && scanline() == targetScanline && dot() < targetDot) {
+                machine.ppu.stepMany(targetDot - dot());
+                continue;
+            }
+#endif
+            advanceOne();
         }
         return false;
     }
@@ -80,7 +126,7 @@ struct Harness {
     bool runToVBlank() {
         machine.ppu.frameReady = false;
         for (int i = 0; i < 262 * 341 * 2; i++) {
-            machine.ppu.step();
+            advanceOne();
             if (machine.ppu.frameReady) return true;
         }
         return false;
@@ -90,9 +136,9 @@ struct Harness {
 };
 
 // レンダリングを最初から最後まで有効にしたフレームは fully rendered。
-void testFullyRenderedFrame() {
-    std::printf("full frame with rendering on:\n");
-    Harness h;
+void testFullyRenderedFrame(Driver drv) {
+    std::printf("%s [%s]:\n", "full frame with rendering on", driverName(drv));
+    Harness h(drv);
     h.write(PPUMASK, RENDER_ON);
     check(h.runToVBlank(), "reached vblank");
     // 1 フレーム目はプリレンダ行が武装する前に始まっている可能性があるので、
@@ -102,9 +148,9 @@ void testFullyRenderedFrame() {
 }
 
 // レンダリングを一度も有効にしないフレームは fully rendered ではない。
-void testNeverRendered() {
-    std::printf("full frame with rendering off:\n");
-    Harness h;
+void testNeverRendered(Driver drv) {
+    std::printf("%s [%s]:\n", "full frame with rendering off", driverName(drv));
+    Harness h(drv);
     h.write(PPUMASK, RENDER_OFF);
     check(h.runToVBlank(), "reached vblank");
     check(h.runToVBlank(), "reached second vblank");
@@ -117,9 +163,9 @@ void testNeverRendered() {
 // dot 340 で瞬時の rendering を見ていた旧実装はここで false を記録していた。
 // 可視域の末尾で $2001 を落とすゲームでは EWMA が永久にシードされず、ガードが
 // 張り付いたままになる。
-void testDisableDuringHBlankKeepsLine() {
-    std::printf("rendering disabled during hblank (dot 300) of the last visible line:\n");
-    Harness h;
+void testDisableDuringHBlankKeepsLine(Driver drv) {
+    std::printf("%s [%s]:\n", "rendering disabled during hblank (dot 300) of the last visible line", driverName(drv));
+    Harness h(drv);
     h.write(PPUMASK, RENDER_ON);
     // 1 フレーム分回してプリレンダ行に武装させる
     check(h.runToVBlank(), "reached first vblank");
@@ -133,9 +179,9 @@ void testDisableDuringHBlankKeepsLine() {
 
 // 回帰の本体 (2): 逆向き。可視行の描画区間 (dots 1..256) の途中で切ったら、
 // その行は描き切れていないので fully rendered ではないこと。
-void testDisableMidDrawSpanClearsLine() {
-    std::printf("rendering disabled mid draw span (dot 100) of a visible line:\n");
-    Harness h;
+void testDisableMidDrawSpanClearsLine(Driver drv) {
+    std::printf("%s [%s]:\n", "rendering disabled mid draw span (dot 100) of a visible line", driverName(drv));
+    Harness h(drv);
     h.write(PPUMASK, RENDER_ON);
     check(h.runToVBlank(), "reached first vblank");
     check(h.advanceTo(261, 0), "reached pre-render line");
@@ -150,9 +196,9 @@ void testDisableMidDrawSpanClearsLine() {
 
 // 可視域が終わったあとの vblank 中に切っても、そのフレームの判定は動かない。
 // フロントエンドはフラグを vblank 中に読むので、読む前に値が変わらないことが要る。
-void testDisableDuringVBlankDoesNotAffectFrame() {
-    std::printf("rendering disabled during vblank:\n");
-    Harness h;
+void testDisableDuringVBlankDoesNotAffectFrame(Driver drv) {
+    std::printf("%s [%s]:\n", "rendering disabled during vblank", driverName(drv));
+    Harness h(drv);
     h.write(PPUMASK, RENDER_ON);
     check(h.runToVBlank(), "reached first vblank");
     check(h.advanceTo(261, 0), "reached pre-render line");
@@ -165,9 +211,9 @@ void testDisableDuringVBlankDoesNotAffectFrame() {
 }
 
 // リセット直後は false。$2001 はゼロなので、まだ何も描けていない。
-void testResetState() {
-    std::printf("state after reset:\n");
-    Harness h;
+void testResetState(Driver drv) {
+    std::printf("%s [%s]:\n", "state after reset", driverName(drv));
+    Harness h(drv);
     check(!h.ppu().frameFullyRendered(), "frameFullyRendered() is false after reset");
 }
 
@@ -197,12 +243,21 @@ int run(int argc, char** argv) {
 #else
     std::printf("=== ppu_flag_test (reference build) ===\n");
 #endif
-    testResetState();
-    testFullyRenderedFrame();
-    testNeverRendered();
-    testDisableDuringHBlankKeepsLine();
-    testDisableMidDrawSpanClearsLine();
-    testDisableDuringVBlankDoesNotAffectFrame();
+    // 参照ビルドに stepMany() は無い (NES_EMBEDDED 限定) ので step のみ。
+    // 組み込みビルドでは同じケースを両方の駆動で回し、coalesce の有無で
+    // frameFullyRendered() の答えが変わらないことを見る。
+    std::vector<Driver> drivers{Driver::Step};
+#ifdef NES_EMBEDDED
+    drivers.push_back(Driver::StepMany);
+#endif
+    for (const Driver drv : drivers) {
+        testResetState(drv);
+        testFullyRenderedFrame(drv);
+        testNeverRendered(drv);
+        testDisableDuringHBlankKeepsLine(drv);
+        testDisableMidDrawSpanClearsLine(drv);
+        testDisableDuringVBlankDoesNotAffectFrame(drv);
+    }
 
     if (g_failures == 0) {
         std::printf("ppu_flag_test: PASS\n");
