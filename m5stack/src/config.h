@@ -68,8 +68,9 @@ static_assert(DISPLAY_DIVISOR_INITIAL >= DISPLAY_DIVISOR_MIN && DISPLAY_DIVISOR_
 
 // Runtime guard on the repaint-versus-last-band race.
 //
-// A draw frame begins repainting while the final band (rows 180-239) may still
-// be on the wire. That is safe only because the writer is slower than the
+// A draw frame begins repainting while the final band (the last DISPLAY_DMA_ROWS
+// rows, starting at NES_HEIGHT - DISPLAY_DMA_ROWS; 180-239 at the current values)
+// may still be on the wire. That is safe only because the writer is slower than the
 // reader: renderScanline paints strictly top-to-bottom, so the last band's first
 // row is not touched until that fraction of the way through emulation, while the
 // band clears the wire earlier. Setting the two equal gives break-even; the guard
