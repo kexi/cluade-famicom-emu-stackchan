@@ -552,6 +552,107 @@
   }
   #swap-device-btn:active { transform: translateY(2px); box-shadow: none; }
   #swap-device-btn:disabled { opacity: 0.55; cursor: default; transform: none; }
+  /* SD card: shown with the device row, i.e. only when ?device=<ip> is set */
+  #sd-save-row { display: flex; gap: 6px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  #sd-save-row[hidden] { display: none; }
+  #sd-save-label, #sd-noload-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #c8c8c8;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #sd-save-name {
+    flex: 1 1 120px;
+    min-width: 0;
+    background: #0d0d0d;
+    color: #9fdf9f;
+    border: 1px solid #444;
+    border-radius: 4px;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 12px;
+    padding: 5px 8px;
+  }
+  #sd-save-name:disabled { opacity: 0.45; }
+  #sd-panel { border-top: 1px solid #3a3a3a; padding-top: 10px; margin-bottom: 12px; }
+  #sd-panel[hidden] { display: none; }
+  #sd-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  #sd-title { margin: 0; font-size: 13px; color: var(--fc-cream); }
+  #sd-capacity { flex: 1 1 0; font-size: 11px; color: #85755a; font-family: ui-monospace, Menlo, monospace; }
+  #sd-refresh {
+    background: #3a3a3a;
+    color: #d8d8d8;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  #sd-refresh:disabled { opacity: 0.55; cursor: default; }
+  /* Capped so a card full of ROMs scrolls inside the panel rather than
+     pushing the close button off the bottom of the dialog. */
+  #sd-list { max-height: 190px; overflow-y: auto; margin-bottom: 10px; }
+  .sd-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .sd-row:nth-child(odd) { background: #1a1a1a; }
+  .sd-name {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #9fdf9f;
+    font-family: ui-monospace, Menlo, monospace;
+  }
+  .sd-size { color: #85755a; font-size: 11px; font-family: ui-monospace, Menlo, monospace; white-space: nowrap; }
+  .sd-row button {
+    background: #3a3a3a;
+    color: #d8d8d8;
+    border: none;
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .sd-row button.sd-boot { background: var(--fc-red); color: var(--fc-cream); font-weight: bold; }
+  .sd-row button:disabled { opacity: 0.5; cursor: default; }
+  #sd-empty-msg { color: #85755a; font-size: 12px; padding: 6px; }
+  #sd-url-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+  #sd-url {
+    flex: 1 1 0;
+    min-width: 0;
+    background: #0d0d0d;
+    color: #9fdf9f;
+    border: 1px solid #444;
+    border-radius: 4px;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 12px;
+    padding: 6px 8px;
+  }
+  #sd-url-btn {
+    background: var(--fc-red);
+    color: var(--fc-cream);
+    border: none;
+    border-radius: 5px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: bold;
+    cursor: pointer;
+    box-shadow: 0 2px 0 var(--fc-red-dark);
+    white-space: nowrap;
+  }
+  #sd-url-btn:active { transform: translateY(2px); box-shadow: none; }
+  #sd-url-btn:disabled { opacity: 0.55; cursor: default; transform: none; box-shadow: none; }
+  #sd-status { font-size: 11px; color: #85755a; min-height: 14px; line-height: 1.4; }
   #swap-note {
     font-size: 11px;
     color: #85755a;
@@ -1000,6 +1101,24 @@
   <div id="swap-device-row" hidden>
     <label id="swap-device-label"><input type="checkbox" id="swap-device-noreset"><span id="lbl-swap-noreset">リセットせず差し替え</span></label>
     <button id="swap-device-btn">実機に送る</button>
+  </div>
+  <div id="sd-save-row" hidden>
+    <label id="sd-save-label"><input type="checkbox" id="sd-save-check"><span id="lbl-sd-save">SDカードにも保存</span></label>
+    <input type="text" id="sd-save-name" placeholder="game.nes" spellcheck="false" maxlength="63" disabled>
+    <label id="sd-noload-label"><input type="checkbox" id="sd-noload-check" disabled><span id="lbl-sd-noload">保存のみ (起動しない)</span></label>
+  </div>
+  <div id="sd-panel" hidden>
+    <div id="sd-head">
+      <h4 id="sd-title">SDカードのROM</h4>
+      <span id="sd-capacity"></span>
+      <button id="sd-refresh">再読込</button>
+    </div>
+    <div id="sd-list"></div>
+    <div id="sd-url-row">
+      <input type="text" id="sd-url" placeholder="https://example.com/game.nes" spellcheck="false">
+      <button id="sd-url-btn">取得して送る</button>
+    </div>
+    <div id="sd-status"></div>
   </div>
   <div id="swap-note">電源を入れたまま差し替えます(リセットは掛かりません → リセットで起動、RAM保持)。
 PRGとCHRを別のカセットから組み合わせた「ニコイチカセット」も作れます。マッパー/ミラーリングはPRG側のヘッダに従います。</div>

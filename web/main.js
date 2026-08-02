@@ -91,6 +91,16 @@
     set('swap-url-btn', 'urlLoad');
     set('swap-device-btn', 'sendDevice');
     set('lbl-swap-noreset', 'sendDeviceNoReset');
+    set('lbl-sd-save', 'sdSaveToSd');
+    set('lbl-sd-noload', 'sdNoLoad');
+    set('sd-title', 'sdTitle');
+    set('sd-refresh', 'sdRefresh');
+    set('sd-url-btn', 'sdUrlSend');
+    const sdUrlEl = document.getElementById('sd-url');
+    if (sdUrlEl) sdUrlEl.placeholder = t('sdUrlPlaceholder');
+    // The listing carries its own translated labels per row, so it has to be
+    // rebuilt rather than relabelled in place.
+    if (typeof renderSdList === 'function') renderSdList();
     set('btn-settings', 'settingsBtn');
     set('settings-title', 'settingsTitle');
     set('lbl-master', 'masterVol');
@@ -584,9 +594,14 @@
     }
     return { name: file.name, header: p.header, prg: p.prg, chr: p.chr };
   }
+  // Set by the SD block below, once it has the elements it needs. Null until
+  // then so opening the panel before that point is simply a no-op rather than
+  // an error.
+  let onSwapPanelOpen = null;
   document.getElementById('btn-swap').addEventListener('click', () => {
     updateSwapInfo();
     swapPanel.classList.add('show');
+    if (onSwapPanelOpen) onSwapPanelOpen();
   });
   document.getElementById('swap-close').addEventListener('click', () => swapPanel.classList.remove('show'));
   document.getElementById('swap-input').addEventListener('change', async (e) => {
@@ -1192,7 +1207,27 @@
   const swapDeviceRow = document.getElementById('swap-device-row');
   const swapDeviceBtn = document.getElementById('swap-device-btn');
   const swapDeviceNoReset = document.getElementById('swap-device-noreset');
-  if (deviceIp) swapDeviceRow.hidden = false;
+  const sdSaveRow = document.getElementById('sd-save-row');
+  const sdSaveCheck = document.getElementById('sd-save-check');
+  const sdSaveName = document.getElementById('sd-save-name');
+  const sdNoLoadCheck = document.getElementById('sd-noload-check');
+  const sdPanel = document.getElementById('sd-panel');
+  if (deviceIp) {
+    swapDeviceRow.hidden = false;
+    sdSaveRow.hidden = false;
+    sdPanel.hidden = false;
+  }
+
+  // The name and "save only" options mean nothing without a save target, so
+  // they follow the checkbox rather than sitting there inert.
+  function syncSdSaveInputs() {
+    const on = sdSaveCheck.checked;
+    sdSaveName.disabled = !on;
+    sdNoLoadCheck.disabled = !on;
+    if (!on) sdNoLoadCheck.checked = false;
+  }
+  sdSaveCheck.addEventListener('change', syncSdSaveInputs);
+  syncSdSaveInputs();
 
   // Device verdicts, as the relay maps them onto HTTP.
   const DEVICE_ROM_ERRORS = {
@@ -1238,11 +1273,25 @@
     }
 
     const noReset = swapDeviceNoReset.checked;
+    // A save with no name is the one combination the relay refuses outright, so
+    // fall back to the loaded cart's own name rather than sending a 400.
+    const wantsSave = sdSaveCheck.checked;
+    const saveName = wantsSave ? sdSaveName.value.trim() || defaultSdName() : '';
+    if (wantsSave && !isValidSdName(saveName)) {
+      statusEl.textContent = t('sdBadName');
+      return;
+    }
     swapDeviceBtn.disabled = true;
     statusEl.textContent = t('deviceSending');
     try {
       const res = await fetch(
-        '/api/rom?host=' + encodeURIComponent(deviceIp) + '&swap=' + (noReset ? 1 : 0) + '&progress=1',
+        '/api/rom?host=' +
+          encodeURIComponent(deviceIp) +
+          '&swap=' +
+          (noReset ? 1 : 0) +
+          '&progress=1' +
+          (wantsSave ? '&save=' + encodeURIComponent(saveName) : '') +
+          (wantsSave && sdNoLoadCheck.checked ? '&load=0' : ''),
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/octet-stream' },
@@ -1265,7 +1314,21 @@
         verdict = line;
       });
       if (verdict && verdict.ok) {
+        // A successful save is worth naming: the point of the checkbox is that
+        // the ROM is now on the card, which "sent" alone would not confirm.
+        if (verdict.sd) {
+          statusEl.textContent = t('sdSaved', { name: verdict.name || saveName });
+          refreshSdList();
+          return;
+        }
         statusEl.textContent = t(noReset ? 'deviceSentSwap' : 'deviceSent');
+        return;
+      }
+      // The image reached the device but the card refused it. The transfer is
+      // not the thing that failed, so the message has to name the SD status
+      // rather than fall through to "failed to send".
+      if (verdict && verdict.sd) {
+        statusEl.textContent = sdStatusMessage(verdict.sd.status);
         return;
       }
       // No verdict means the stream died mid-transfer: the relay committed to
@@ -1285,6 +1348,272 @@
     }
   }
   swapDeviceBtn.addEventListener('click', sendRomToDevice);
+
+  // ------------------------------------------------------- SD card browsing
+  //
+  // Every op goes through the relay, which turns the device's SdStatus into an
+  // HTTP code and a body carrying the numeric status. The numeric status is what
+  // this side keys off: it is the device's own vocabulary, so a message stays
+  // correct even where two statuses share a code (BUSY and EXISTS are both 409).
+  const SD_STATUS_KEYS = {
+    1: 'sdNotMounted',
+    2: 'sdNotFound',
+    3: 'sdNoSpace',
+    4: 'deviceTooBig',
+    5: 'deviceUnsupported',
+    6: 'sdBadName',
+    7: 'sdBusy',
+    8: 'sdIoError',
+    9: 'sdExists',
+  };
+  const sdList = document.getElementById('sd-list');
+  const sdCapacity = document.getElementById('sd-capacity');
+  const sdRefreshBtn = document.getElementById('sd-refresh');
+  const sdStatusEl = document.getElementById('sd-status');
+  const sdUrlInput = document.getElementById('sd-url');
+  const sdUrlBtn = document.getElementById('sd-url-btn');
+  // Last listing received, kept so a language change can re-render the rows
+  // without another round trip to the card.
+  let sdFiles = [];
+  let sdBusy = false;
+
+  function sdStatusMessage(status) {
+    return t(SD_STATUS_KEYS[status] || 'sdFail');
+  }
+
+  // Mirrors sanitiseRomName() on the device: it accepts a bare filename ending
+  // in .nes, with no path separators. Checked here so a bad name is caught
+  // before the transfer rather than after the whole image has gone over.
+  function isValidSdName(name) {
+    if (!name || name.length > 63) return false;
+    if (name.includes('/') || name.includes('\\')) return false;
+    return /\.nes$/i.test(name);
+  }
+
+  // The PRG side names the cart, matching updateSwapInfo(): with a mixed
+  // "nikoichi" cartridge the mapper comes from PRG, so its name is the one that
+  // describes what will actually run.
+  function defaultSdName() {
+    const base = ((cartPrg && cartPrg.name) || 'game.nes').replace(/^.*[\\/]/, '');
+    return /\.nes$/i.test(base) ? base : base + '.nes';
+  }
+
+  function formatBytes(n) {
+    if (!(n > 0)) return '0B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    let v = n;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i++;
+    }
+    return (v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)) + units[i];
+  }
+
+  // POST one SD command and return its parsed body, or null once the failure has
+  // been reported. Centralised so every caller reports failures the same way.
+  async function sdCommand(path, body) {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: deviceIp, ...body }),
+    });
+    const data = await res.json().catch(() => null);
+    if (res.ok) return data;
+    sdStatusEl.textContent = data && typeof data.status === 'number' ? sdStatusMessage(data.status) : t('sdFail');
+    return null;
+  }
+
+  function renderSdList() {
+    sdList.textContent = '';
+    if (!sdFiles.length) {
+      const empty = document.createElement('div');
+      empty.id = 'sd-empty-msg';
+      empty.textContent = t('sdEmpty');
+      sdList.appendChild(empty);
+      return;
+    }
+    for (const file of sdFiles) {
+      const row = document.createElement('div');
+      row.className = 'sd-row';
+      const name = document.createElement('span');
+      name.className = 'sd-name';
+      // textContent, not innerHTML: the names come off a card the user can put
+      // anything on, and this row is built from them every refresh.
+      name.textContent = file.name;
+      name.title = file.name;
+      const size = document.createElement('span');
+      size.className = 'sd-size';
+      size.textContent = formatBytes(file.size);
+      const boot = document.createElement('button');
+      boot.className = 'sd-boot';
+      boot.textContent = t('sdBoot');
+      boot.addEventListener('click', () => sdBoot(file.name));
+      const rename = document.createElement('button');
+      rename.textContent = t('sdRename');
+      rename.addEventListener('click', () => sdRename(file.name));
+      const del = document.createElement('button');
+      del.textContent = t('sdDelete');
+      del.addEventListener('click', () => sdDelete(file.name));
+      row.append(name, size, boot, rename, del);
+      sdList.appendChild(row);
+    }
+  }
+
+  // Disables the whole panel for the duration of one command. The device runs
+  // one SD request at a time and answers BUSY to the rest, so letting the user
+  // queue clicks would just produce avoidable failures.
+  function setSdBusy(busy) {
+    sdBusy = busy;
+    sdRefreshBtn.disabled = busy;
+    sdUrlBtn.disabled = busy;
+    for (const b of sdList.querySelectorAll('button')) b.disabled = busy;
+  }
+
+  async function refreshSdList() {
+    if (!deviceIp || sdBusy) return;
+    setSdBusy(true);
+    sdStatusEl.textContent = t('sdLoading');
+    try {
+      const data = await sdCommand('/api/sd/list', {});
+      if (!data) return;
+      sdFiles = data.files || [];
+      renderSdList();
+      sdCapacity.textContent =
+        t('sdCount', { n: sdFiles.length }) +
+        ' · ' +
+        t('sdCapacity', { free: formatBytes(data.freeBytes), total: formatBytes(data.totalBytes) });
+      sdStatusEl.textContent = '';
+    } catch (err) {
+      console.warn('[nes] sd list failed:', err);
+      sdStatusEl.textContent = t('sdFail');
+    } finally {
+      setSdBusy(false);
+    }
+  }
+
+  async function sdBoot(name) {
+    if (sdBusy) return;
+    setSdBusy(true);
+    sdStatusEl.textContent = t('sdBooting', { name });
+    try {
+      const ok = await sdCommand('/api/sd/load', { name });
+      if (ok) sdStatusEl.textContent = t('sdBooted', { name });
+    } catch (err) {
+      console.warn('[nes] sd load failed:', err);
+      sdStatusEl.textContent = t('sdFail');
+    } finally {
+      setSdBusy(false);
+    }
+  }
+
+  async function sdRename(name) {
+    if (sdBusy) return;
+    const next = prompt(t('sdRenamePrompt'), name);
+    if (next === null) return;
+    const to = next.trim();
+    if (to === name) return;
+    if (!isValidSdName(to)) {
+      sdStatusEl.textContent = t('sdBadName');
+      return;
+    }
+    setSdBusy(true);
+    try {
+      const ok = await sdCommand('/api/sd/rename', { name, to });
+      if (!ok) return;
+      sdStatusEl.textContent = t('sdRenamed', { name: to });
+    } catch (err) {
+      console.warn('[nes] sd rename failed:', err);
+      sdStatusEl.textContent = t('sdFail');
+      return;
+    } finally {
+      setSdBusy(false);
+    }
+    await refreshSdList();
+  }
+
+  async function sdDelete(name) {
+    if (sdBusy) return;
+    if (!confirm(t('sdDeleteConfirm', { name }))) return;
+    setSdBusy(true);
+    try {
+      const ok = await sdCommand('/api/sd/delete', { name });
+      if (!ok) return;
+      sdStatusEl.textContent = t('sdDeleted', { name });
+    } catch (err) {
+      console.warn('[nes] sd delete failed:', err);
+      sdStatusEl.textContent = t('sdFail');
+      return;
+    } finally {
+      setSdBusy(false);
+    }
+    await refreshSdList();
+  }
+
+  // The relay does the download: the browser would be blocked by CORS on most
+  // ROM hosts, and the device has no TLS stack of its own.
+  async function sdSendUrl() {
+    if (sdBusy) return;
+    const url = sdUrlInput.value.trim();
+    if (!/^https?:\/\//i.test(url)) {
+      sdStatusEl.textContent = t('sdUrlBad');
+      return;
+    }
+    const wantsSave = sdSaveCheck.checked;
+    const saveName = wantsSave ? sdSaveName.value.trim() : '';
+    if (wantsSave && !isValidSdName(saveName)) {
+      sdStatusEl.textContent = t('sdBadName');
+      return;
+    }
+    setSdBusy(true);
+    sdStatusEl.textContent = t('sdUrlFetching');
+    try {
+      const res = await fetch(
+        '/api/rom/url?host=' +
+          encodeURIComponent(deviceIp) +
+          '&url=' +
+          encodeURIComponent(url) +
+          (wantsSave ? '&save=' + encodeURIComponent(saveName) : '') +
+          (wantsSave && sdNoLoadCheck.checked ? '&load=0' : ''),
+        { method: 'POST' },
+      );
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        // 422 here means the download was not an iNES image — a stale link
+        // serving an HTML error page is the usual cause, so say that rather
+        // than blaming the device.
+        if (res.status === 422) sdStatusEl.textContent = t('sdUrlNotRom');
+        else if (data && typeof data.status === 'number') sdStatusEl.textContent = sdStatusMessage(data.status);
+        else sdStatusEl.textContent = t('sdUrlFail');
+        return;
+      }
+      if (data && data.sd && data.sd.status !== 0) {
+        sdStatusEl.textContent = sdStatusMessage(data.sd.status);
+        return;
+      }
+      sdStatusEl.textContent = wantsSave ? t('sdSaved', { name: saveName }) : t('deviceSent');
+    } catch (err) {
+      console.warn('[nes] rom url send failed:', err);
+      sdStatusEl.textContent = t('sdUrlFail');
+      return;
+    } finally {
+      setSdBusy(false);
+    }
+    if (wantsSave) await refreshSdList();
+  }
+
+  sdRefreshBtn.addEventListener('click', refreshSdList);
+  sdUrlBtn.addEventListener('click', sdSendUrl);
+  sdUrlInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') sdSendUrl();
+  });
+  // Listed when the panel opens rather than at load: the card is only
+  // interesting once the panel is visible, and a boot-time request would race
+  // the device's own mount. Registered on the same button the panel opens from,
+  // whose handler lives further up with the rest of the swap UI.
+  onSwapPanelOpen = () => {
+    if (deviceIp && !sdFiles.length) refreshSdList();
+  };
 
   // Everything the mirror needs is now initialised; volume changes may flow.
   // Push the current setting once so a device that booted at SPEAKER_VOLUME
