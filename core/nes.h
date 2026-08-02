@@ -391,11 +391,14 @@ public:
     // it just took is representative of a full render, and only a flag
     // accumulated over the frame can answer that.
     //
-    // Set at the end of the pre-render line and ANDed with the rendering state at
-    // the end of each visible line, so it is final by the time vblank starts and
-    // stays stable for the whole vblank the frontend reads it in. Pure
-    // observation: nothing in the core branches on it, so both builds produce
-    // byte-identical framebuffers and state with or without it.
+    // Armed at the end of the pre-render line, then ANDed once per visible line
+    // with whether rendering stayed on across that line's entire draw span (dots
+    // 1..256, where both builds write the framebuffer). A line whose rendering was
+    // toggled part-way through the span counts as not fully rendered — the
+    // conservative side, since dropping a sample only costs a join. It is final by
+    // the time vblank starts and stays stable for the whole vblank the frontend
+    // reads it in. Pure observation: nothing in the core branches on it, so both
+    // builds produce byte-identical framebuffers and state with or without it.
     bool frameFullyRendered() const { return frameFullyRendered_; }
     // level of the PPU→CPU NMI output (true = asserted)
     bool nmiLine() const { return (ctrl_ & 0x80) && (status_ & 0x80); }
@@ -421,6 +424,10 @@ private:
     // Starts false so the very first frame is only reported as fully rendered once
     // a pre-render line has actually armed it.
     bool frameFullyRendered_ = false;
+    // Per-line half of the same accumulator: whether rendering stayed on across
+    // the current line's whole draw span (dots 1..256). Folded into
+    // frameFullyRendered_ at the end of each visible line and re-armed there.
+    bool lineFullyRendered_ = true;
 
 #ifdef NES_EMBEDDED
     // Cached mapper->chrWindow(); refreshed whenever the cart may have switched

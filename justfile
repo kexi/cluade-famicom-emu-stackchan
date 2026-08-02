@@ -327,6 +327,33 @@ verify frames='600' scenario='':
     if [ "$rc" -eq 0 ]; then echo "verify: PASS"; else echo "verify: FAIL"; fi
     exit $rc
 
+# PPU::frameFullyRendered() の単体テスト (tools/ppu_flag_test.cpp)
+#
+# verify が実 ROM の流しっぱなしで bit-exact を見るのに対し、こちらは $2001 を
+# 狙ったドットで書いてフラグの述語だけを突く。可視行の描画区間の内と外で
+# レンダリングを切り替えるケースは、ROM を流すだけでは踏めるかどうかが
+# ゲーム任せになるため、直接叩くテストを分けている。
+#
+# 参照/組み込みの両方でビルドして走らせる。framebuffer を書くドットは両者で
+# 違うが、フラグの述語 (「描画区間 1..256 の全体でレンダリングが有効だったか」)
+# は同じ答えにならなければならない
+test-ppu-flag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # 窓や CRC には依存しないが、マッパーが要る (PPU が dot 260 で
+    # mapper->scanline() を呼ぶ) ので verify と同じ ROM を使う
+    if [ -f m5stack/data/game.nes ]; then
+        ./m5stack/scripts/fetch_rom.sh --check
+    else
+        ./m5stack/scripts/fetch_rom.sh
+    fi
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    clang++ -std=c++17 -O2 -o "$work/ref" tools/ppu_flag_test.cpp core/*.cpp
+    clang++ -std=c++17 -O2 -DNES_EMBEDDED -o "$work/emb" tools/ppu_flag_test.cpp core/*.cpp
+    "$work/ref" m5stack/data/game.nes
+    "$work/emb" m5stack/data/game.nes
+
 # コードを整形 (C++ は .clang-format、Python は ruff.toml、JS は .oxfmtrc.json 準拠)
 #
 # oxfmt に web/*.js を明示するのは、ディレクトリを渡すと index.html まで

@@ -61,6 +61,10 @@ void PPU::reset() {
     // game enables rendering. Reporting the first frame as fully rendered would
     // hand a consumer a claim the frame does not back up.
     frameFullyRendered_ = false;
+    // True: the per-line accumulator is armed at the start of every line and only
+    // cleared by an off dot, so its idle state is true. reset() lands mid-line
+    // (dot 0 of the pre-render line), which is exactly where a line begins.
+    lineFullyRendered_ = true;
 #ifdef NES_EMBEDDED
     invalidateSpriteCandidates();   // OAM survives reset, so a stale list could not
 #endif
@@ -873,26 +877,50 @@ void NES_HOT PPU::step() {
         status_ &= ~(0x80 | 0x40 | 0x20);
     }
 
-    // Frame-level "was the whole visible region drawn" accumulator, sampled once
-    // per line at the line's last dot. The pre-render line arms it for the frame
-    // about to start; each visible line then clears it if rendering was off as
-    // that line finished. By scanline 241 dot 1 — where frameReady is raised, and
-    // where the frontend reads it — lines 0..239 have all been folded in.
+    // Frame-level "was the whole visible region drawn" accumulator.
     //
-    // Why the last dot rather than the first: it is the one dot every line is
-    // guaranteed to land on in both builds. stepMany() coalesces idle dots and
-    // floors its skip target at 340 precisely so the scanline wrap below is never
-    // jumped, which makes dot 340 the single reliable per-line hook; a dot-1 hook
-    // would be skipped on the lines stepMany() fast-paths.
+    // The per-line question is whether *this line's* framebuffer write went
+    // through the rendering-on path, so it has to be answered from the rendering
+    // state the line's draw actually saw — dots 1..256, the span both builds write
+    // in. Sampling it at dot 340 instead was wrong: $2001 is writable throughout
+    // hblank (dots 257..340), so a game that draws a line with rendering on and
+    // then disables it late in the line would have that correctly-drawn line
+    // recorded as not rendered. A title that parks $2001 off at the bottom of the
+    // visible region would never seed the EWMA at all, leaving the frontend's
+    // guard armed forever.
     //
-    // Why sample at the end of the line rather than tracking every $2001 write:
-    // the question is whether renderScanline drew this line, and that is decided
-    // by the rendering state the line's draw actually saw — dot 256 in the batched
-    // path, the 1..256 span in the dot-accurate one. A late-in-hblank write that
-    // only takes effect on the next line must not retroactively mark this one.
+    // Mid-line toggles are folded in conservatively: `rendering` is ANDed on every
+    // dot of the span, so a line that had it off for any part of 1..256 counts as
+    // not fully rendered. Why not track precisely which pixels came from which
+    // path: the consumer is an EWMA that wants representative whole-line repaint
+    // samples, and a partially-drawn line is not one regardless of where the split
+    // fell. Erring toward "not rendered" only ever drops a sample, which costs a
+    // join; erring the other way would admit a cheap frame and skip one.
+    //
+    // Why this stays consistent across the two builds even though they write at
+    // different dots (embedded draws the whole line at 256, the reference build
+    // per-dot across 1..256): the predicate is "was rendering on for the entire
+    // span", which does not depend on where inside the span the writes land.
+    //
+    // The embedded build reaches this line on fewer dots — stepMany() coalesces
+    // the span into a single step() at dot 256 — but not on fewer *distinct
+    // states*. It only ever coalesces dots it has already established rendering is
+    // on for (the `else if (rendering)` branch picks next = 256), and drops to
+    // dot-by-dot the moment rendering is off on a visible line (`next = dot_`, so
+    // the backdrop fill can run per pixel). A dot skipped by the fast path is
+    // therefore always a dot whose sample would have been `true`, and ANDing true
+    // is what skipping it amounts to. Both builds land on the same answer.
+    //
+    // The fold into the frame accumulator stays at dot 340. That is the one dot
+    // every line is guaranteed to land on in both builds — stepMany() floors its
+    // skip target at 340 so the scanline wrap below is never jumped — and by
+    // scanline 241 dot 1, where frameReady is raised and the frontend reads the
+    // flag, lines 0..239 have all been folded in.
+    if (visible && dot_ >= 1 && dot_ <= 256) lineFullyRendered_ &= rendering;
     if (dot_ == 340) {
         if (prerender) frameFullyRendered_ = true;
-        else if (visible) frameFullyRendered_ &= rendering;
+        else if (visible) frameFullyRendered_ &= lineFullyRendered_;
+        lineFullyRendered_ = true;   // arm for the line about to start
     }
 
     dot_++;
