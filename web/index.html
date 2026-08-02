@@ -394,6 +394,163 @@
     50% { transform: translate(2px, 1px) rotate(1deg); }
     75% { transform: translate(-1px, 2px); }
   }
+  /* front expansion port (DA-15) key rattle panel */
+  #expport {
+    display: none;
+    background: #211d18;
+    border-bottom: 4px solid var(--fc-red);
+    padding: 4px 8px 6px;
+    overflow-x: auto;
+    flex-shrink: 0;
+    gap: 14px;
+    align-items: flex-start;
+  }
+  body.exp-on #expport { display: flex; }
+  #exp-left { flex-shrink: 0; padding-left: 14px; }
+  #exp-left h3 {
+    color: #ddd;
+    font-size: 12px;
+    margin: 0 0 6px;
+    text-align: left;
+  }
+  /* stage the connector and the key share, so the key can be placed over it */
+  #exp-stage {
+    position: relative;
+    width: 300px;
+    height: 190px;
+    flex-shrink: 0;
+    touch-action: none;
+  }
+  /* DA-15 female shell: trapezoid metal frame with a dark insulator inside */
+  #exp-shell {
+    position: absolute;
+    left: 10px; top: 14px;
+    width: 280px;
+    height: 62px;
+    background: linear-gradient(#c9c9c9 0%, #9a9a9a 40%, #6e6e6e 100%);
+    /* D-sub shell: the long edge is at the top, tapering towards the bottom */
+    clip-path: polygon(0 0, 100% 0, 94% 100%, 6% 100%);
+    border-radius: 3px;
+  }
+  #exp-insul {
+    position: absolute;
+    left: 26px; top: 22px;
+    width: 248px;
+    height: 46px;
+    background: linear-gradient(#2a2a2a, #151312);
+    clip-path: polygon(0 0, 100% 0, 96% 100%, 4% 100%);
+  }
+  /* mounting screw ears either side of the shell */
+  .exp-ear {
+    position: absolute;
+    top: 30px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: radial-gradient(circle 4px at 50% 45%, #3a3a3a 4px, #b0b0b0 5px);
+    box-shadow: inset 0 0 0 1px #6e6e6e;
+  }
+  #exp-ear-l { left: 0; }
+  #exp-ear-r { right: 0; }
+  /* contact holes: the same gold as the cartridge fingers, punched into the shell */
+  .dpin {
+    position: absolute;
+    width: 13px;
+    height: 13px;
+    margin: -6.5px 0 0 -6.5px;   /* placed by centre coordinate */
+    border-radius: 50%;
+    background: linear-gradient(#8a6a24 0%, #E5C877 35%, #FFF0B8 55%, #8a6a24 100%);
+    box-shadow: inset 0 0 0 2px #0a0a0a;
+    color: #4a3510;
+    font-size: 7px;
+    font-weight: bold;
+    font-family: ui-monospace, Menlo, monospace;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: help;
+  }
+  /* pin covered by the key blade: same warning look as an unstable cart pin */
+  .dpin.covered {
+    background: #6e5418;
+    color: #FFD37A;
+    box-shadow: inset 0 0 0 2px #E0A030;
+  }
+  /* pin actually shorted right now (read back from the core) */
+  .dpin.shorted {
+    background: #E0A030;
+    color: #211d18;
+    box-shadow: inset 0 0 0 2px #FFD37A, 0 0 6px 2px rgba(224, 160, 48, 0.8);
+    animation: pinblink 0.4s steps(2) infinite;
+  }
+  /* the key itself: dragged horizontally, rotated by the slider */
+  #exp-key {
+    position: absolute;
+    left: 0; top: 0;
+    width: 44px;
+    height: 150px;
+    margin-left: -22px;          /* left is the blade centre line */
+    transform-origin: 50% 100%;  /* pivot at the handle, blade swings */
+    cursor: grab;
+    touch-action: none;
+  }
+  #exp-key.dragging { cursor: grabbing; }
+  #exp-key.rattling { animation: keyrattle 0.14s linear infinite; }
+  #exp-key svg { display: block; pointer-events: none; }
+  @keyframes keyrattle {
+    0%, 100% { transform: var(--key-tf) translate(0, 0); }
+    25% { transform: var(--key-tf) translate(-3px, 1px) rotate(-2.5deg); }
+    50% { transform: var(--key-tf) translate(3px, -1px) rotate(2.5deg); }
+    75% { transform: var(--key-tf) translate(-2px, 0) rotate(1.5deg); }
+  }
+  #exp-controls {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: 2px;
+    width: 300px;
+  }
+  #exp-controls button {
+    background: var(--fc-red);
+    color: var(--fc-cream);
+    border: none;
+    border-radius: 5px;
+    padding: 4px 8px;
+    font-size: 11px;
+    font-weight: bold;
+    cursor: pointer;
+    box-shadow: 0 2px 0 var(--fc-red-dark);
+  }
+  #exp-controls button:active { transform: translateY(2px); box-shadow: none; }
+  #exp-controls button:disabled { opacity: 0.5; cursor: default; transform: none; }
+  #exp-angle {
+    color: #ddd;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 12px;
+    min-width: 44px;
+  }
+  #exp-rot {
+    flex: 1 1 90px;
+    min-width: 80px;
+    accent-color: var(--fc-red);
+    cursor: pointer;
+  }
+  #exp-right { width: 300px; flex-shrink: 0; }
+  #exp-right h3 {
+    color: #ddd;
+    font-size: 12px;
+    margin: 0 0 6px;
+    text-align: left;
+  }
+  #exp-hint, #exp-note { font-size: 9px; color: #85755a; margin-top: 3px; text-align: left; }
+  #exp-state {
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 10px;
+    color: #9fdf9f;
+    margin-top: 4px;
+    min-height: 13px;
+  }
   /* oscilloscope probe popup (hover a pin) */
   #probe-scope {
     display: none;
@@ -839,6 +996,7 @@
     <button id="btn-mute">🔊</button>
     <button id="btn-debug">DEBUG</button>
     <button id="btn-bus">端子</button>
+    <button id="btn-exp">拡張端子</button>
     <button id="btn-xev" hidden>XEVIOUS判定</button>
     <button id="btn-tas" hidden>TAS</button>
     <button id="btn-settings">⚙</button>
@@ -923,6 +1081,52 @@
         <button id="cart-blow">息(フーフー)💨</button>
       </div>
       <div id="cart-note">傾けると端子の接触が浮いた側から不安定になります(点滅=接触不良気味、黒=断線)。「挿し直す」で全ピン復旧。</div>
+    </div>
+  </div>
+  <div id="expport">
+    <div id="exp-left">
+      <h3 id="exp-title-h3">前面拡張端子(DA-15)</h3>
+      <div id="exp-stage">
+        <div id="exp-shell"></div>
+        <div id="exp-insul"></div>
+        <div id="exp-ear-l" class="exp-ear"></div>
+        <div id="exp-ear-r" class="exp-ear"></div>
+        <!-- .dpin holes are created and positioned by main.js -->
+        <div id="exp-key">
+          <!-- MIWA UR タイプ風の刻みキー: 丸い頭部 + 片側のこぎり刃 -->
+          <svg viewBox="0 0 44 150" width="44" height="150" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="exp-key-grad" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stop-color="#6e6e6e"/>
+                <stop offset="35%" stop-color="#c9c9c9"/>
+                <stop offset="55%" stop-color="#e8e8e8"/>
+                <stop offset="100%" stop-color="#8a8a8a"/>
+              </linearGradient>
+            </defs>
+            <!-- blade: tip at the top (into the connector), sawtooth cuts on the left edge -->
+            <path d="M0,4 L44,4 L44,124 L0,124 L0,116 L8,110 L0,104 L8,98 L0,92 L8,86 L0,80 L8,74 L0,68 Z"
+                  fill="url(#exp-key-grad)" stroke="#4a4a4a" stroke-width="1"/>
+            <!-- shoulder / bow -->
+            <rect x="10" y="120" width="24" height="8" rx="2" fill="#9a9a9a" stroke="#4a4a4a" stroke-width="1"/>
+            <circle cx="22" cy="138" r="12" fill="#b0b0b0" stroke="#4a4a4a" stroke-width="1"/>
+            <circle cx="22" cy="133" r="3.4" fill="#211d18"/>
+            <text x="22" y="146" font-size="5.5" text-anchor="middle" fill="#4a4a4a"
+                  font-family="ui-monospace, Menlo, monospace">MIWA</text>
+          </svg>
+        </div>
+      </div>
+      <div id="exp-controls">
+        <button id="exp-rattle">ガチャガチャ</button>
+        <button id="exp-pull">抜く</button>
+        <span id="exp-angle">0.0°</span>
+        <input type="range" id="exp-rot" min="-30" max="30" step="0.5" value="0">
+      </div>
+      <div id="exp-hint">鍵を左右にドラッグして挿入位置、スライダーで角度(±30°)。「ガチャガチャ」で約1秒ノイズを注入します</div>
+    </div>
+    <div id="exp-right">
+      <h3 id="exp-note-h3">家の鍵でガチャガチャ</h3>
+      <div id="exp-note">団地の鍵(MIWA製)を前面拡張端子に挿してガチャガチャすると『ベースボール』で変化球が投げられた、という有名な小ネタの再現です。拡張端子のデータ線は負論理なので、鍵の金属がGND(ピン1)と短絡させた線は$4016/$4017の読み出しで「押されている」ことになります。</div>
+      <div id="exp-state"></div>
     </div>
   </div>
   <div id="screen-wrap">
@@ -1013,10 +1217,10 @@ PRGとCHRを別のカセットから組み合わせた「ニコイチカセッ�
   </div>
   <button id="check-close">閉じる</button>
 </div>
-<script>window.NES_VER='1785324359';</script>
-<script src="i18n.js?v=1785324359"></script>
-<script src="smb-ram.js?v=1785324359"></script>
-<script src="nes.js?v=1785324359"></script>
-<script src="main.js?v=1785324359"></script>
+<script>window.NES_VER='1785645656';</script>
+<script src="i18n.js?v=1785645656"></script>
+<script src="smb-ram.js?v=1785645656"></script>
+<script src="nes.js?v=1785645656"></script>
+<script src="main.js?v=1785645656"></script>
 </body>
 </html>

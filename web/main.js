@@ -42,6 +42,9 @@
     probeBuffer: Module._nes_probe_buffer,
     probePos: Module._nes_probe_pos,
     probeLevel: Module._nes_probe_level,
+    keyCover: Module._nes_key_cover,
+    keyRattle: Module._nes_key_rattle,
+    keyState: Module._nes_key_state,
     sram: Module._nes_sram,
     sramSize: Module._nes_sram_size,
     hasBattery: Module._nes_has_battery,
@@ -73,6 +76,7 @@
     set('btn-reset', 'reset');
     set('btn-swap', 'swap');
     set('btn-bus', 'bus');
+    set('btn-exp', 'expBtn');
     set('btn-debug', 'debug');
     set('btn-xev', 'xevCheck');
     set('btn-tas', 'tas');
@@ -83,6 +87,12 @@
     set('cart-straight', 'reinsert');
     set('cart-blow', 'blow');
     set('cart-note', 'cartNote');
+    set('exp-title-h3', 'expTitle');
+    set('exp-note-h3', 'expNoteTitle');
+    set('exp-note', 'expNote');
+    set('exp-hint', 'expHint');
+    set('exp-rattle', 'expRattle');
+    set('exp-pull', 'expPull');
     set('swap-title', 'swapTitle');
     set('lbl-swap-whole', 'swapWhole');
     set('lbl-swap-prg', 'swapPrg');
@@ -107,6 +117,7 @@
     set('dbg-src-remote', 'dbgSrcRemote');
     if (typeof romLoaded !== 'undefined' && !romLoaded) statusEl.textContent = t('statusDefault');
     if (typeof refreshPinTitles === 'function') refreshPinTitles();
+    if (typeof refreshExpPinTitles === 'function') refreshExpPinTitles();
     if (typeof updateChrTitle === 'function') updateChrTitle();
     if (typeof updateMuteTips === 'function') updateMuteTips();
     const sel = document.getElementById('lang-select');
@@ -1327,6 +1338,220 @@
     }
   }
 
+  // ---- front expansion port (DA-15): the house-key rattle ----
+  //
+  // Pin map (NesDev "Expansion port"). Only the data lines are modelled; the
+  // supply/strobe pins get a tooltip and nothing else, because shorting them on
+  // real hardware does not produce a button press — it produces a repair bill.
+  //   top row (odd):  1 GND, 3 /IRQ, 5 $4017 D3, 7 $4017 D1, 9 /OE, 11 OUT1,
+  //                   13 $4016 D1, 15 +5V
+  //   bottom (even):  2 SOUND, 4 $4017 D4, 6 $4017 D2, 8 $4017 D0, 10 OUT2,
+  //                   12 OUT0, 14 /OE
+  const EXP_PIN_NAMES = [
+    null,
+    'GND', 'SOUND', '/IRQ', '$4017 D4', '$4017 D3', '$4017 D2', '$4017 D1',
+    '$4017 D0', '/OE (JP2)', 'OUT2', 'OUT1', 'OUT0', '$4016 D1', '/OE (JP1)', '+5V',
+  ];
+  // pin -> port bit. p1 = $4017 D0-D4, p0 = $4016 D1. Everything else: no effect.
+  const EXP_P1_BIT = { 4: 4, 5: 3, 6: 2, 7: 1, 8: 0 };
+  const EXP_IRQ_PIN = 3;
+  const EXP_P0_PIN = 13;
+  const expStage = document.getElementById('exp-stage');
+  const expKey = document.getElementById('exp-key');
+  const expRot = document.getElementById('exp-rot');
+  const expAngleEl = document.getElementById('exp-angle');
+  const expRattleBtn = document.getElementById('exp-rattle');
+  const expStateEl = document.getElementById('exp-state');
+  const expPinEls = [null];
+  // stage-local geometry (px). Holes sit inside #exp-insul, two staggered rows.
+  const EXP_ROW_TOP_Y = 33;
+  const EXP_ROW_BOT_Y = 57;
+  const EXP_TOP_X0 = 36;
+  const EXP_TOP_STEP = 32; // 8 holes: 36 .. 260
+  const EXP_BOT_X0 = 52;
+  const EXP_BOT_STEP = 32; // 7 holes: 52 .. 244
+  function expPinPos(pin) {
+    const isTopRow = pin % 2 === 1;
+    if (isTopRow) return { x: EXP_TOP_X0 + ((pin - 1) / 2) * EXP_TOP_STEP, y: EXP_ROW_TOP_Y };
+    return { x: EXP_BOT_X0 + (pin / 2 - 1) * EXP_BOT_STEP, y: EXP_ROW_BOT_Y };
+  }
+  function expPinDesc(pin) {
+    if (pin === 1) return t('exp_pin_gnd');
+    if (pin === 15) return t('exp_pin_5v');
+    if (pin === 2) return t('exp_pin_sound');
+    if (pin === EXP_IRQ_PIN) return t('exp_pin_irq');
+    if (pin === EXP_P0_PIN) return t('exp_pin_p0d1');
+    if (EXP_P1_BIT[pin] !== undefined) return t('exp_pin_p1', { n: EXP_P1_BIT[pin] });
+    if (pin === 9 || pin === 14) return t('exp_pin_oe');
+    return t('exp_pin_out');
+  }
+  function refreshExpPinTitles() {
+    for (let pin = 1; pin <= 15; pin++) {
+      const el = expPinEls[pin];
+      if (el) el.title = `pin ${pin}: ${EXP_PIN_NAMES[pin]}\n${expPinDesc(pin)}`;
+    }
+  }
+  for (let pin = 1; pin <= 15; pin++) {
+    const el = document.createElement('div');
+    el.className = 'dpin';
+    el.dataset.dpin = pin;
+    el.textContent = pin;
+    const p = expPinPos(pin);
+    el.style.left = p.x + 'px';
+    el.style.top = p.y + 'px';
+    expPinEls[pin] = el;
+    expStage.appendChild(el);
+  }
+  refreshExpPinTitles();
+
+  // --- key geometry: horizontal position + angle -> the set of bridged pins ---
+  //
+  // The blade is a rectangle in key-local coordinates; a hole is a point. Testing
+  // the point in the blade's own frame (rotate by -angle about the pivot) keeps
+  // this to one inverse rotation instead of building a rotated polygon.
+  const EXP_KEY_PIVOT_Y = 178; // stage-local y of the key's rotation origin
+  // Wide enough to span 2-3 contacts at once: a blade that only ever touched one
+  // hole could never bridge a data line to GND, which is the whole trick.
+  const EXP_BLADE_HALF_W = 22; // blade half width in key-local px
+  const EXP_BLADE_TOP = 4; // blade tip, measured from the key's own top
+  const EXP_BLADE_BOTTOM = 124; // where the blade meets the bow
+  let expKeyX = 148; // stage-local x of the blade centre line
+  let expKeyAngle = 0; // degrees, + = clockwise
+  // key-local y of a point: the SVG is 150 tall with its origin at the pivot
+  const EXP_KEY_HEIGHT = 150;
+  function expBridgedPins() {
+    const rad = (-expKeyAngle * Math.PI) / 180;
+    const cos = Math.cos(rad),
+      sin = Math.sin(rad);
+    const hit = [];
+    for (let pin = 1; pin <= 15; pin++) {
+      const p = expPinPos(pin);
+      // into the key frame: translate to the pivot, then undo the rotation
+      const dx = p.x - expKeyX;
+      const dy = p.y - EXP_KEY_PIVOT_Y;
+      const lx = dx * cos - dy * sin;
+      const ly = dx * sin + dy * cos;
+      const keyY = EXP_KEY_HEIGHT + ly; // ly is negative above the pivot
+      const insideWidth = Math.abs(lx) <= EXP_BLADE_HALF_W;
+      const insideLength = keyY >= EXP_BLADE_TOP && keyY <= EXP_BLADE_BOTTOM;
+      if (insideWidth && insideLength) hit.push(pin);
+    }
+    return hit;
+  }
+  function expApplyCover() {
+    const pins = expBridgedPins();
+    let p0 = 0,
+      p1 = 0,
+      irq = false;
+    for (const pin of pins) {
+      if (pin === EXP_P0_PIN) p0 |= 1 << 1;
+      const bit = EXP_P1_BIT[pin];
+      if (bit !== undefined) p1 |= 1 << bit;
+      if (pin === EXP_IRQ_PIN) irq = true;
+    }
+    api.keyCover(p0, p1, irq ? 1 : 0);
+    const covered = new Set(pins);
+    for (let pin = 1; pin <= 15; pin++) expPinEls[pin].classList.toggle('covered', covered.has(pin));
+  }
+  function expLayoutKey() {
+    // the rattle keyframes compose on top of this base transform
+    const tf = `translate(${expKeyX}px, ${EXP_KEY_PIVOT_Y - EXP_KEY_HEIGHT}px) rotate(${expKeyAngle}deg)`;
+    expKey.style.setProperty('--key-tf', tf);
+    expKey.style.transform = tf;
+  }
+  function setExpKey(x, angle) {
+    expKeyX = Math.max(0, Math.min(300, x));
+    expKeyAngle = Math.max(-30, Math.min(30, Math.round(angle * 10) / 10));
+    expRot.value = expKeyAngle;
+    expAngleEl.textContent = (expKeyAngle > 0 ? '+' : '') + expKeyAngle.toFixed(1) + '°';
+    expLayoutKey();
+    expApplyCover();
+  }
+  expRot.addEventListener('input', () => setExpKey(expKeyX, parseFloat(expRot.value)));
+  // horizontal drag = insertion position
+  let expDragId = null;
+  let expDragDx = 0;
+  expKey.addEventListener('pointerdown', (e) => {
+    expDragId = e.pointerId;
+    expDragDx = e.clientX - expStage.getBoundingClientRect().left - expKeyX;
+    expKey.classList.add('dragging');
+    expKey.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  expKey.addEventListener('pointermove', (e) => {
+    if (expDragId !== e.pointerId) return;
+    const x = e.clientX - expStage.getBoundingClientRect().left - expDragDx;
+    setExpKey(x, expKeyAngle);
+  });
+  const expEndDrag = (e) => {
+    if (expDragId !== e.pointerId) return;
+    expDragId = null;
+    expKey.classList.remove('dragging');
+  };
+  expKey.addEventListener('pointerup', expEndDrag);
+  expKey.addEventListener('pointercancel', expEndDrag);
+
+  const EXP_RATTLE_CYCLES = 1789773; // ~1 second at the rated clock
+  let expRattling = false;
+  function expStopRattleUI() {
+    expRattling = false;
+    expRattleBtn.disabled = false;
+    expKey.classList.remove('rattling');
+    expLayoutKey(); // drop the keyframe transform back to the base one
+  }
+  function expStartRattle() {
+    if (expRattling) return;
+    expApplyCover();
+    api.keyRattle(EXP_RATTLE_CYCLES);
+    expRattling = true;
+    expRattleBtn.disabled = true;
+    expKey.classList.add('rattling');
+  }
+  expRattleBtn.addEventListener('click', expStartRattle);
+  document.getElementById('exp-pull').addEventListener('click', () => {
+    // Pulling the key out ends the burst as far as the port is concerned: with
+    // nothing bridging the contacts there is nothing left to chatter, so the
+    // cover is cleared and the shake stops even if the core's counter has cycles
+    // left on it (a paused CPU would otherwise never retire them).
+    setExpKey(expKeyX, 0);
+    api.keyCover(0, 0, 0);
+    expStopRattleUI();
+    for (let pin = 1; pin <= 15; pin++) expPinEls[pin].classList.remove('covered', 'shorted');
+  });
+
+  // Reflect what the core is actually shorting right now. Driven from the frame
+  // loop rather than a timer so a slowed clock stretches the burst honestly, and
+  // so the animation stops exactly when the core says the burst is over.
+  function updateExpUI() {
+    const panelHidden = !document.body.classList.contains('exp-on');
+    if (panelHidden) return;
+    const st = api.keyState();
+    const active = (st & 0x8000) !== 0;
+    if (expRattling && !active) expStopRattleUI();
+    for (let pin = 1; pin <= 15; pin++) {
+      const bit = EXP_P1_BIT[pin];
+      let shorted = false;
+      if (active && bit !== undefined) shorted = (st & (1 << bit)) !== 0;
+      if (active && pin === EXP_P0_PIN) shorted = (st & 0x100) !== 0;
+      if (active && pin === EXP_IRQ_PIN) shorted = (st & 0x200) !== 0;
+      expPinEls[pin].classList.toggle('shorted', shorted);
+    }
+    if (!active) {
+      expStateEl.textContent = '';
+      return;
+    }
+    const p1 = st & 0x1f;
+    const parts = [`$4017=${p1.toString(2).padStart(5, '0')}b`];
+    if (st & 0x100) parts.push('$4016 D1');
+    if (st & 0x200) parts.push('/IRQ');
+    expStateEl.textContent = parts.join('  ');
+  }
+  document.getElementById('btn-exp').addEventListener('click', () => {
+    document.body.classList.toggle('exp-on');
+    updateExpUI();
+  });
+  setExpKey(expKeyX, 0);
+
   // --- cartridge front view / rotation controls ---
   const cartBody = document.getElementById('cart-body');
   const cartAngle = document.getElementById('cart-angle');
@@ -2283,6 +2508,10 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
   function tick(now) {
     requestAnimationFrame(tick);
     drawProbe(); // oscilloscope updates in real time, even when paused
+    // Same deal: the burst only advances while the CPU runs, so the panel has to
+    // keep polling even when it does not, or a rattle started while paused would
+    // leave the button disabled and the key shaking forever.
+    updateExpUI();
     if (!powered) {
       drawStatic();
       return;
@@ -2368,7 +2597,7 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
     }
   }
   // ---- URL query parameters ----
-  // ?rom=<url> ?debug=1 ?pin=0 ?clock=<Hz> ?tilt=<deg> ?break=25,29 ?mute=1 ?lang=en
+  // ?rom=<url> ?debug=1 ?pin=0 ?exp=1 ?clock=<Hz> ?tilt=<deg> ?break=25,29 ?mute=1 ?lang=en
   {
     const qs = new URLSearchParams(location.search);
     const langQ = qs.get('lang');
@@ -2382,6 +2611,9 @@ NOP*:1A imp,3A imp,5A imp,7A imp,DA imp,FA imp,80 imm,82 imm,89 imm,C2 imm,E2 im
     const pinQ = qs.get('pin') ?? qs.get('bus'); // 端子パネルの表示 (既定は1)
     if (pinQ === '0' && document.body.classList.contains('bus-on')) document.getElementById('btn-bus').click();
     if (pinQ === '1' && !document.body.classList.contains('bus-on')) document.getElementById('btn-bus').click();
+    const expQ = qs.get('exp'); // 前面拡張端子パネルの表示 (既定は非表示)
+    if (expQ === '0' && document.body.classList.contains('exp-on')) document.getElementById('btn-exp').click();
+    if (expQ === '1' && !document.body.classList.contains('exp-on')) document.getElementById('btn-exp').click();
     const clk = parseFloat(qs.get('clock'));
     if (!isNaN(clk)) setClock(clk);
     const tiltQ = parseFloat(qs.get('tilt'));

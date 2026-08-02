@@ -59,6 +59,14 @@ The whole toolchain — clang, Emscripten, PlatformIO, uv, just, lefthook, gitle
 - **Blow 💨** — clears a bad contact 65 % of the time, but each good PPU-side pin has a 10 % chance of going bad from the moisture. Comes with a sound effect and a reset, as tradition demands.
 - **Re-insert** restores every pin, straightens the cart and resets.
 
+### Front expansion port and the house key ("EXP PORT" mode)
+The famous playground trick, reproduced: poke your apartment key (a MIWA one) into the Famicom's front expansion port (DA-15), rattle it about, and Baseball starts throwing curveballs. The expansion data lines are active low, so any line the key shorts to GND (pin 1) reads back as "pressed" through $4016/$4017. Nintendo's standard pad-read routine ORs D0 with D1, so the noise arrives as D-pad input and bends the pitch.
+
+- The **DA-15 female connector** is drawn to the real pinout (8 holes on the top row = odd pins, 7 on the bottom = even pins). Hover a hole for its description.
+- **Drag the key sideways** for the insertion position and use the **slider (±30°)** for the angle. Only the pins the blade actually overlaps can short, so inserting it at an angle catches just the top row or just the bottom.
+- **Rattle it** injects about a second of chatter (1,789,773 CPU cycles). Shorted pins light up and the key shakes. Slow the clock down and the burst stretches in real time.
+- Catching pin 3 (/IRQ) fires random interrupts — screen glitches and crashes, recoverable with RESET. /OE, OUT, SOUND and +5V are not modeled; they only get a tooltip.
+
 ### Hot cartridge swap (bug techniques)
 The **RESET** button behaves like the real one — work RAM survives. **Swap Cart** loads a new ROM *without any reset at all*, so the classic swap-carts-with-the-power-on tricks work (Super Mario → Tennis → Super Mario for the minus/9-1 world). The dialog can also take the PRG-ROM and the CHR-ROM from **different cartridges** to build a franken-cart, or fetch a ROM straight **from a URL**.
 
@@ -90,6 +98,7 @@ Load an FCEUX **.fm2** movie with the TAS button. Playback power-cycles with the
 | `device=<IP>` | Mirror connector faults, reset and volume to an M5Stack on the LAN (needs `just serve`) |
 | `debug=1` | Start with the debug panel open |
 | `pin=0` / `pin=1` | Hide / show the connector panel (shown by default) |
+| `exp=1` | Start with the front expansion port (key rattle) panel open (hidden by default) |
 | `clock=<Hz>` | Clock frequency, 1–1789773 |
 | `tilt=<deg>` | Cartridge tilt, ±6 |
 | `break=25,29` | Start with these pins disconnected |
