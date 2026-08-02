@@ -17,6 +17,7 @@
 #include "../../core/nes.h"
 #include "config.h"
 #include "grove_input.h"
+#include "head_touch.h"
 #include "menu.h"
 #include "sd_rom.h"
 #include "secrets.h"
@@ -635,6 +636,11 @@ void setup() {
     // reaching for the shared SPI bus with a band possibly in flight; setup()
     // has no bands outstanding by construction, so this is the one place where
     // the ordering costs nothing to guarantee.
+    // 内部 I2C 上のセンサーなので、外部 I2C を張り替える groveInputInit() とは
+    // 独立に呼べる。StackChan ボディが無ければ検出に失敗して以降無効になるだけで、
+    // 素の CoreS3 の起動には影響しない。
+    headTouchInit();
+
     sdRomInit();
     int sdRomsFound = 0;
     if (sdRomMounted()) {
@@ -709,6 +715,18 @@ static uint8_t touchButtonBits() {
     return bits;
 }
 
+// StackChan の頭を撫でる操作。BtnC 長押しと同じラッチを立てるだけで、実際の
+// 遷移は loop() のフレーム境界に任せる。
+//
+// 呼ぶのは applyInput() の中、つまり Game モードのフレームだけ。メニュー中は
+// loop() が先に return しているのでポーリング自体が走らず、パネルと SPI を
+// 触っているメニューの裏で I2C が動くこともない。
+static void applyHeadTouch() {
+    const bool swiped = headTouchSwiped();
+    if (!swiped) return;
+    g_menuRequested.store(true, std::memory_order_relaxed);
+}
+
 // Pad 1 is the OR of every local source (Grove units, touch zones) and the UDP
 // sender. Only the UDP bits are subject to the staleness timeout — a physical
 // button that is held down should stay down.
@@ -719,6 +737,9 @@ static void applyInput() {
     const uint8_t udp1 = udpStale ? 0 : g_padBits[1].load(std::memory_order_relaxed);
     g_nes.pad[0].setButtons(udp0 | groveInputBits() | touchButtonBits());
     g_nes.pad[1].setButtons(udp1);
+    // パッドのビットには寄与しない (撫でるのはメニューを開く操作であって
+    // ボタンではない) が、同じ「毎フレームの入力取り込み」の一部なのでここに置く。
+    applyHeadTouch();
 }
 
 // Push connector state into the core, but only on an actual change: applyPinMask
