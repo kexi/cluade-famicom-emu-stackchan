@@ -91,8 +91,7 @@
     set('exp-note-h3', 'expNoteTitle');
     set('exp-note', 'expNote');
     set('exp-hint', 'expHint');
-    set('exp-viewlabel', 'expViewTop');
-    set('exp-viewlabel-front', 'expViewFront');
+    set('exp-viewlabel', 'expViewFront');
     set('exp-rattle', 'expRattle');
     // the pull button is a toggle: its label depends on where the key currently is
     if (typeof refreshExpPullLabel === 'function') refreshExpPullLabel();
@@ -1359,27 +1358,31 @@
   const EXP_P1_BIT = { 4: 4, 5: 3, 6: 2, 7: 1, 8: 0 };
   const EXP_IRQ_PIN = 3;
   const EXP_P0_PIN = 13;
-  const expTop = document.getElementById('exp-top'); // overhead view (drag surface)
-  const expFront = document.getElementById('exp-front'); // port face (pin state)
-  const expSlotEl = document.getElementById('exp-slot');
+  const expFront = document.getElementById('exp-front'); // port face + drag surface
   const expBladeMark = document.getElementById('exp-blade-mark');
-  const expKey = document.getElementById('exp-key');
   const expRot = document.getElementById('exp-rot');
   const expAngleEl = document.getElementById('exp-angle');
   const expRattleBtn = document.getElementById('exp-rattle');
   const expStateEl = document.getElementById('exp-state');
   const expPinEls = [null];
   // Front-view geometry, in artwork pixels times EXP_ART_SCALE. The port art is
-  // 120x44 with its pins at fixed source coordinates (see make_port_png.py), so
-  // every number here is quoted from the asset rather than hand-tuned: change
-  // the scale and the hit-testing follows the picture automatically.
+  // the 128x48 deformed asset (make_port_deformed_png.py), drawn for legibility
+  // rather than photographic accuracy: 4x4 pin holes on a 12px pitch. The hole
+  // centres below are quoted from that script and verified against the decoded
+  // PNG (all 15 holes read 16/16 opening-coloured pixels).
+  //
+  // Each hole spans cx-2..cx+1, so its visual centre is half a pixel back from
+  // the script's integer coordinate — hence the -0.5 on both axes. Without it
+  // every highlight sits half a source pixel (2 screen px at 4x) low and right.
   const EXP_ART_SCALE = 4; // must match the CSS width/height on #exp-front-img
-  const EXP_ROW_TOP_Y = 19 * EXP_ART_SCALE;
-  const EXP_ROW_BOT_Y = 24 * EXP_ART_SCALE;
-  const EXP_TOP_X0 = 35 * EXP_ART_SCALE;
-  const EXP_TOP_STEP = 7 * EXP_ART_SCALE; // 8 pins: source x 35 .. 84
-  const EXP_BOT_X0 = 39 * EXP_ART_SCALE;
-  const EXP_BOT_STEP = 7 * EXP_ART_SCALE; // 7 pins: source x 39 .. 81
+  const EXP_ROW_TOP_Y = 17.5 * EXP_ART_SCALE; // script y=18, less the half-pixel
+  const EXP_ROW_BOT_Y = 29.5 * EXP_ART_SCALE; // script y=30, less the half-pixel
+  const EXP_TOP_X0 = 21.5 * EXP_ART_SCALE; // pin 1 at script x=22
+  const EXP_BOT_X0 = 27.5 * EXP_ART_SCALE; // pin 2 at script x=28
+  // One pitch for both rows; the bottom row is offset half a pitch, as drawn.
+  const EXP_PIN_STEP = 12 * EXP_ART_SCALE;
+  const EXP_TOP_STEP = EXP_PIN_STEP; // 8 pins: script x 22 .. 106
+  const EXP_BOT_STEP = EXP_PIN_STEP; // 7 pins: script x 28 .. 100
   function expPinPos(pin) {
     const isTopRow = pin % 2 === 1;
     if (isTopRow) return { x: EXP_TOP_X0 + ((pin - 1) / 2) * EXP_TOP_STEP, y: EXP_ROW_TOP_Y };
@@ -1421,51 +1424,94 @@
   // blade's cross-section sweeps round like the hand of a clock: roll right and
   // the right-hand end of the blade dips onto the bottom row of pins while the
   // left-hand end lifts onto the top row.
-  const EXP_SLOT_X0 = 60 * EXP_ART_SCALE; // insertion point x (port centre)
+  // --- the physical model, in millimetres, scaled by the artwork's pin pitch ---
+  //
+  // Sizes here are a functional requirement, not decoration: which pins a key
+  // can bridge at once is decided entirely by how big the key is relative to
+  // the connector, so getting the ratios wrong emulates a machine that does not
+  // exist. D-sub pins are 2.77mm apart and the art draws that pitch as 12px, so
+  // 1mm = 12/2.77 = 4.33px. The rows are 2.84mm apart, which lands at 12.3px —
+  // the art's 12px row gap, so the deformed asset is already to scale.
+  const EXP_PX_PER_MM = EXP_PIN_STEP / 2.77;
+  // What reaches the contacts is the key's TIP, not the full width of the
+  // blade. A MIWA-pattern blade is about 9mm across at the bow end, but it is
+  // ground to a guide taper, so the section that gets deep enough to touch the
+  // pins measures roughly 5.5mm across and the usual 2.3mm thick.
+  // Why not the full 9mm: at 39px the contact body was half again as long as
+  // anything that physically fits down the cavity, and it shorted pins the real
+  // key could never reach at once.
+  //
+  // These two are the hit test AND the drawing: #exp-blade-mark::before is laid
+  // out from them at load, so the rectangle you see is the one being
+  // intersected. Why not tune them separately: a hit size picked to make the
+  // covered set behave gave contacts that did not match the picture, which is
+  // the one thing this panel exists to show.
+  const EXP_BLADE_HALF = (5.5 / 2) * EXP_PX_PER_MM; // 5.5mm tip -> ~24px
+  const EXP_BLADE_HALF_H = (2.3 / 2) * EXP_PX_PER_MM; // 2.3mm thick -> ~10px
+  // The mating face opening is 8.36mm tall. The tip has to stay inside it,
+  // which is what bounds the turn — a 24x10 section in a 36px opening jams at
+  // about ±40°, so the slider's ±30° sits inside the physical limit rather than
+  // being an arbitrary UI choice.
+  const EXP_OPENING_H = 8.36 * EXP_PX_PER_MM; // ~36px
+  // What the tip has to touch is the metal, not the hole. On a real female
+  // D-sub the exposed conductor is the contact spring around the mouth of each
+  // cavity, and the artwork draws exactly that: a 4x4 opening inside a 2px-wide
+  // metal ring, so the ring's outer edge is 4px from the centre (measured off
+  // the decoded PNG: pin 8's ring spans source x 60..67).
+  // Why not the 2px hole radius this used to use: that is the void in the
+  // middle, so a tip grazing the metal rim read as no contact.
+  const EXP_HOLE_RADIUS = 4 * EXP_ART_SCALE;
+
+  // --- where the key may be put, all derived from the model above ---
+  // Insertion point x, at the port centre — both rows are centred on 63.5.
+  const EXP_SLOT_X0 = 63.5 * EXP_ART_SCALE;
   // Insertion x travel, clamped to the span of the contacts.
-  const EXP_SLOT_X_MIN = 38 * EXP_ART_SCALE;
-  const EXP_SLOT_X_MAX = 82 * EXP_ART_SCALE;
-  // Insertion point y: midway between the two pin rows (source 19 and 24).
-  const EXP_SLOT_Y = 21.5 * EXP_ART_SCALE;
-  // The blade cross-section, measured from the insertion point. Deliberately
-  // asymmetric — a real blade is bitted on one side, so the keyway centre is not
-  // its midpoint. A symmetric bar would make +θ and -θ mirror images covering the
-  // same pins, and the direction of turn would stop mattering.
-  const EXP_BLADE_BITTED = 8 * EXP_ART_SCALE; // reach on the cut (leading) side
-  const EXP_BLADE_BACK = 1 * EXP_ART_SCALE; // reach on the flat back side
-  // How close the blade has to pass to a pin to bridge it. Tuned against this
-  // artwork's 7px pin pitch and 5px row gap; it does not survive a change to
-  // those without re-tuning.
-  const EXP_CONTACT_DIST = 2.75 * EXP_ART_SCALE;
-  // y of the slot mouth in the overhead view, where the key meets the console
-  // (the front bar is 26px tall with the slot inset 6px; see #exp-slot).
-  const EXP_SLOT_MOUTH_Y = 13;
-  // How far the key slides down out of the slot when pulled. Kept short enough
-  // that the whole key stays inside the overhead view rather than being clipped.
-  const EXP_PULL_DROP = 24;
+  const EXP_SLOT_X_MIN = 21.5 * EXP_ART_SCALE;
+  const EXP_SLOT_X_MAX = 105.5 * EXP_ART_SCALE;
+  // Insertion point y, default midway between the two rows. At true scale the
+  // tip reaches both rows from here, so the neutral position shorts across
+  // them — which is exactly the failure the trick exploits — and turning lifts
+  // one end clear onto a single row.
+  const EXP_SLOT_Y0 = 23.5 * EXP_ART_SCALE;
+  // Insertion y travel: the tip's centre can go anywhere the tip still fits
+  // inside the opening, i.e. the opening's half-height less the tip's own.
+  // Derived rather than picked so it stays right if the tip dimensions change.
+  // It reaches past both rows, so parking the key clear of every contact is
+  // possible — touching nothing is a real position for a key to be in.
+  const EXP_SLOT_Y_MIN = EXP_SLOT_Y0 - EXP_OPENING_H / 2 + EXP_BLADE_HALF_H;
+  const EXP_SLOT_Y_MAX = EXP_SLOT_Y0 + EXP_OPENING_H / 2 - EXP_BLADE_HALF_H;
   let expKeyX = EXP_SLOT_X0; // insertion x along the row of contacts
+  let expKeyY = EXP_SLOT_Y0; // insertion y across the two rows
   let expKeyAngle = 0; // degrees, + = turned clockwise
   let expInserted = true; // false = pulled clear of the port
-  // Distance from a pin to the rolled blade segment. The segment runs through the
-  // insertion point, so projecting onto its direction and clamping to its reach
-  // gives the nearest point in one step.
+  // Lay the drawn bar out from the hit-test constants, so the rectangle on
+  // screen is the rectangle being intersected.
+  expBladeMark.style.setProperty('--blade-w', EXP_BLADE_HALF * 2 + 'px');
+  expBladeMark.style.setProperty('--blade-h', EXP_BLADE_HALF_H * 2 + 'px');
+  expBladeMark.style.setProperty('--blade-x', -EXP_BLADE_HALF + 'px');
+  expBladeMark.style.setProperty('--blade-y', -EXP_BLADE_HALF_H + 'px');
+  // Distance from a point to the blade rectangle: rotate the point into the
+  // bar's own frame, where the rectangle is axis-aligned, then take the usual
+  // clamped box distance. Zero means the point is inside the bar.
   function expBladeDistance(px, py) {
     const rad = (expKeyAngle * Math.PI) / 180;
     const ux = Math.cos(rad); // unit vector along the blade cross-section
     const uy = Math.sin(rad);
     const dx = px - expKeyX;
-    const dy = py - EXP_SLOT_Y;
-    let along = dx * ux + dy * uy;
-    if (along > EXP_BLADE_BITTED) along = EXP_BLADE_BITTED;
-    if (along < -EXP_BLADE_BACK) along = -EXP_BLADE_BACK;
-    return Math.hypot(dx - along * ux, dy - along * uy);
+    const dy = py - expKeyY;
+    const along = dx * ux + dy * uy; // coordinate along the bar
+    const across = -dx * uy + dy * ux; // coordinate across its thickness
+    const outAlong = Math.max(0, Math.abs(along) - EXP_BLADE_HALF);
+    const outAcross = Math.max(0, Math.abs(across) - EXP_BLADE_HALF_H);
+    return Math.hypot(outAlong, outAcross);
   }
   function expBridgedPins() {
     if (!expInserted) return []; // out of the socket: nothing can be bridged
     const hit = [];
     for (let pin = 1; pin <= 15; pin++) {
       const p = expPinPos(pin);
-      const touching = expBladeDistance(p.x, p.y) <= EXP_CONTACT_DIST;
+      // rectangle-vs-circle: they meet when the box distance is within the radius
+      const touching = expBladeDistance(p.x, p.y) <= EXP_HOLE_RADIUS;
       if (touching) hit.push(pin);
     }
     return hit;
@@ -1486,31 +1532,23 @@
     for (let pin = 1; pin <= 15; pin++) expPinEls[pin].classList.toggle('covered', covered.has(pin));
   }
   function expLayoutKey() {
-    // Pulled out, the key slides straight down out of the slot and stops turning:
-    // an angle only means anything while the blade is inside the port.
-    const drop = expInserted ? 0 : EXP_PULL_DROP;
+    // An angle only means anything while the blade is inside the port.
     const angle = expInserted ? expKeyAngle : 0;
-    // Overhead, you are looking down on the flat of the bow, so turning the key
-    // does not rotate it on screen — it foreshortens it. cos alone is only 87% at
-    // 30 degrees, too subtle to read, so the angle is doubled for the visual.
-    const squash = Math.cos((angle * 2 * Math.PI) / 180);
-    const tf = `translate(${expKeyX}px, ${EXP_SLOT_MOUTH_Y + drop}px) scaleX(${squash.toFixed(4)})`;
-    // the rattle keyframes compose on top of this base transform
-    expKey.style.setProperty('--key-tf', tf);
-    expKey.style.transform = tf;
-    // the slot in the console's front edge follows the insertion point
-    expSlotEl.style.left = expKeyX + 'px';
-    // Front view: the blade's cross-section, turning like a clock hand about the
-    // insertion point. This is where the rotation is meant to read.
+    // The blade's cross-section, turning like a clock hand about the insertion
+    // point, which is also the bar's centre.
     expBladeMark.style.left = expKeyX + 'px';
-    expBladeMark.style.top = EXP_SLOT_Y + 'px';
+    expBladeMark.style.top = expKeyY + 'px';
     const bladeTf = `rotate(${angle}deg)`;
+    // the rattle keyframes compose on top of this base transform
     expBladeMark.style.setProperty('--blade-tf', bladeTf);
     expBladeMark.style.transform = bladeTf;
     expBladeMark.style.display = expInserted ? 'block' : 'none';
+    document.body.classList.toggle('exp-pulled', !expInserted);
   }
-  function setExpKey(x, angle) {
+  function setExpKey(x, angle, y) {
     expKeyX = Math.max(EXP_SLOT_X_MIN, Math.min(EXP_SLOT_X_MAX, x));
+    const wantY = y === undefined ? expKeyY : y;
+    expKeyY = Math.max(EXP_SLOT_Y_MIN, Math.min(EXP_SLOT_Y_MAX, wantY));
     expKeyAngle = Math.max(-30, Math.min(30, Math.round(angle * 10) / 10));
     expRot.value = expKeyAngle;
     expAngleEl.textContent = (expKeyAngle > 0 ? '+' : '') + expKeyAngle.toFixed(1) + '°';
@@ -1518,35 +1556,48 @@
     expApplyCover();
   }
   expRot.addEventListener('input', () => setExpKey(expKeyX, parseFloat(expRot.value)));
-  // horizontal drag = insertion position
+  // Drag anywhere on the port face to move the insertion point in both axes.
+  // Grabbing away from the blade jumps it to the pointer, so a click picks a
+  // spot directly instead of only nudging from wherever the blade already was.
   let expDragId = null;
   let expDragDx = 0;
-  expKey.addEventListener('pointerdown', (e) => {
+  let expDragDy = 0;
+  expFront.addEventListener('pointerdown', (e) => {
+    if (!expInserted) return; // nothing to position while the key is out
+    const box = expFront.getBoundingClientRect();
+    const localX = e.clientX - box.left;
+    const localY = e.clientY - box.top;
+    const grabbedBlade =
+      Math.abs(localX - expKeyX) <= EXP_BLADE_HALF &&
+      Math.abs(localY - expKeyY) <= EXP_HOLE_RADIUS * 2;
     expDragId = e.pointerId;
-    expDragDx = e.clientX - expTop.getBoundingClientRect().left - expKeyX;
-    expKey.classList.add('dragging');
-    expKey.setPointerCapture(e.pointerId);
+    expDragDx = grabbedBlade ? localX - expKeyX : 0;
+    expDragDy = grabbedBlade ? localY - expKeyY : 0;
+    expFront.classList.add('dragging');
+    expFront.setPointerCapture(e.pointerId);
+    setExpKey(localX - expDragDx, expKeyAngle, localY - expDragDy);
     e.preventDefault();
   });
-  expKey.addEventListener('pointermove', (e) => {
+  expFront.addEventListener('pointermove', (e) => {
     if (expDragId !== e.pointerId) return;
-    const x = e.clientX - expTop.getBoundingClientRect().left - expDragDx;
-    setExpKey(x, expKeyAngle);
+    const box = expFront.getBoundingClientRect();
+    const x = e.clientX - box.left - expDragDx;
+    const y = e.clientY - box.top - expDragDy;
+    setExpKey(x, expKeyAngle, y);
   });
   const expEndDrag = (e) => {
     if (expDragId !== e.pointerId) return;
     expDragId = null;
-    expKey.classList.remove('dragging');
+    expFront.classList.remove('dragging');
   };
-  expKey.addEventListener('pointerup', expEndDrag);
-  expKey.addEventListener('pointercancel', expEndDrag);
+  expFront.addEventListener('pointerup', expEndDrag);
+  expFront.addEventListener('pointercancel', expEndDrag);
 
   const EXP_RATTLE_CYCLES = 1789773; // ~1 second at the rated clock
   let expRattling = false;
   function expStopRattleUI() {
     expRattling = false;
     expRattleBtn.disabled = !expInserted; // a pulled key has nothing to rattle
-    expKey.classList.remove('rattling');
     expBladeMark.classList.remove('rattling');
     expLayoutKey(); // drop the keyframe transform back to the base one
   }
@@ -1556,7 +1607,6 @@
     api.keyRattle(EXP_RATTLE_CYCLES);
     expRattling = true;
     expRattleBtn.disabled = true;
-    expKey.classList.add('rattling');
     expBladeMark.classList.add('rattling');
   }
   expRattleBtn.addEventListener('click', expStartRattle);
@@ -1618,6 +1668,25 @@
     updateExpUI();
   });
   setExpKey(expKeyX, 0);
+  // Test hook: lets the headless screenshot/verification driver set the key
+  // state directly and read back the geometry it is asserting against.
+  window.__nes = window.__nes || {};
+  window.__nes.exp = {
+    scale: EXP_ART_SCALE,
+    setKey: (x, angle, y) => setExpKey(x, angle, y),
+    pinPos: (pin) => expPinPos(pin),
+    state: () => ({ x: expKeyX, y: expKeyY, angle: expKeyAngle, inserted: expInserted }),
+    bridged: () => expBridgedPins(),
+    // the rectangle the hit test uses, for cross-checking against the drawing
+    blade: () => ({
+      x: expKeyX,
+      y: expKeyY,
+      angle: expKeyAngle,
+      halfLen: EXP_BLADE_HALF,
+      halfThick: EXP_BLADE_HALF_H,
+      holeRadius: EXP_HOLE_RADIUS,
+    }),
+  };
 
   // --- cartridge front view / rotation controls ---
   const cartBody = document.getElementById('cart-body');

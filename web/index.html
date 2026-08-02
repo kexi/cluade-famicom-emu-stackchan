@@ -417,67 +417,13 @@
     color: #85755a;
     font-size: 9px;
     font-family: ui-monospace, Menlo, monospace;
-    margin: 6px 0 2px;
+    margin: 0 0 3px;
   }
-  /* ---- top-down view: the console seen from above, key hinging in the port ---- */
-  #exp-top {
-    position: relative;
-    width: 480px;
-    height: 200px;
-    flex-shrink: 0;
-    touch-action: none;
-    overflow: hidden;
-  }
-  /* The front edge of the console, seen end-on from above. Inset to the same
-     width as the port view below so the two line up as one machine. */
-  #exp-frontbar {
-    position: absolute;
-    left: 24px; top: 0;
-    width: 432px;
-    height: 26px;
-    background: linear-gradient(#a02a30 0 6px, #8f1d22 6px 18px, #6f141a 18px 26px);
-    border-radius: 3px 3px 0 0;
-  }
-  /* the port opening in that edge: the key hinges here */
-  #exp-slot {
-    position: absolute;
-    top: 6px;
-    width: 56px;
-    height: 14px;
-    margin-left: -28px;
-    background: #100f0e;
-    box-shadow: inset 0 0 0 2px #4a4a4a;
-  }
-  /* The key from above = its side silhouette, blade up into the slot. Turning it
-     does not rotate it from this angle — you are looking down on the flat of the
-     bow, so it foreshortens. scaleX about the blade's centre line does that. */
-  #exp-key {
-    position: absolute;
-    left: 0; top: 0;
-    width: 64px;               /* 32 * 2 */
-    height: 176px;             /* 88 * 2 */
-    margin-left: -32px;
-    transform-origin: 32px 0;  /* the blade centre line, at the slot mouth */
-    image-rendering: pixelated;
-    z-index: 2;
-    cursor: grab;
-    touch-action: none;
-    transition: transform 0.25s ease-out;
-  }
-  /* dragging and rattling both drive the transform every frame: easing there
-     would lag the pointer and smear the swing */
-  #exp-key.dragging, #exp-key.rattling { transition: none; }
-  #exp-key.dragging { cursor: grabbing; }
-  #exp-key.rattling { animation: keyrattle 0.16s ease-in-out infinite; }
-  /* Rattling = working the key back and forth about the blade axis. Overhead
-     that shows up as the bow's width pulsing, since turning only foreshortens
-     it from this angle. */
-  @keyframes keyrattle {
-    0%, 100% { transform: var(--key-tf) scaleX(0.62); }
-    50% { transform: var(--key-tf) scaleX(1); }
-  }
-  /* The same shake in the front view, where it is an actual rotation. It rides
-     on --blade-tf so the shake is relative to whatever angle is currently set. */
+  /* The port artwork is 120x44; everything in this panel — the port view, the
+     control row — is sized off that one number so they share an edge. */
+  #exp-left { --exp-w: 512px; }  /* 128 * 4, must match EXP_ART_SCALE */
+  /* The shake, as an actual rotation of the blade cross-section. It rides on
+     --blade-tf so the shake is relative to whatever angle is currently set. */
   #exp-blade-mark.rattling { animation: bladerattle 0.16s ease-in-out infinite; }
   @keyframes bladerattle {
     0%, 100% { transform: var(--blade-tf) rotate(-22deg); }
@@ -486,26 +432,50 @@
   /* ---- front view: the port face, where the contact state is shown ---- */
   #exp-front {
     position: relative;
-    width: 480px;   /* 120 * 4 */
-    height: 176px;  /* 44 * 4 */
+    width: var(--exp-w);
+    height: 192px;  /* 48 * 4 */
     flex-shrink: 0;
+    cursor: move;        /* drag in both axes = where the key goes in */
+    touch-action: none;
+    /* The artwork is transparent outside the console face; this stands in for
+       the rest of the machine so the port does not float on the panel. */
+    background: linear-gradient(#E9E1D0 0 50%, #8F2323 50% 100%);
   }
+  #exp-front.dragging { cursor: grabbing; }
   #exp-front-img {
     position: absolute;
     left: 0; top: 0;
-    width: 480px;
-    height: 176px;
+    width: var(--exp-w);
+    height: 192px;
     image-rendering: pixelated;
     pointer-events: none;
     z-index: 1;
   }
+  /* The key, lying beside the port while it is pulled out. At true scale (bow
+     25mm against the 2.77mm pin pitch) it would be 433px across and taller than
+     the whole panel, so it is shown at a third of that — the proportions are
+     the asset's, only the overall size is reduced to fit. Laid on its side
+     because a key resting next to the console lies flat. */
+  #exp-key {
+    display: none;
+    width: 144px;   /* 32 * 4.5 */
+    height: 396px;  /* 88 * 4.5, before rotation */
+    image-rendering: pixelated;
+    transform: rotate(-90deg);
+    transform-origin: 72px 72px;
+    margin: 0 0 -252px 0;   /* reclaim the height the rotation frees up */
+  }
+  body.exp-pulled #exp-key { display: block; }
   /* Contact pins. These sit over the artwork's pin dots and light up; the
      artwork itself only draws the dull metal state. */
+  /* Sized to the artwork's contact ring (outer radius 4 source px) at 4x, so a
+     lit pin covers the metal the blade actually has to touch. */
   .dpin {
     position: absolute;
-    width: 10px;
-    height: 10px;
-    margin: -5px 0 0 -5px;   /* placed by centre coordinate */
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    margin: -16px 0 0 -16px;   /* placed by centre coordinate */
     color: transparent;      /* the number is a tooltip, not a caption */
     font-size: 7px;
     font-family: ui-monospace, Menlo, monospace;
@@ -513,19 +483,24 @@
     align-items: center;
     justify-content: center;
     cursor: help;
-    z-index: 2;
+    /* above the blade bar: a lit pin under the blade still has to be visible */
+    z-index: 4;
   }
-  /* pin covered by the key blade: same warning colours as an unstable cart pin */
-  .dpin.covered { background: #6e5418; box-shadow: 0 0 0 2px #E0A030; }
-  /* pin actually shorted right now (read back from the core) */
+  /* Pin covered by the key blade but not currently shorting: the muted NES blue
+     $16, so "in contact, idle" is distinct from both the bare hole and the lit
+     state without competing with it. */
+  .dpin.covered { background: #2031B5; box-shadow: inset 0 0 0 2px #ADADAD; }
+  /* Pin actually shorted right now (read back from the core). Lit with the NES
+     pale gold $37, the brightest thing on this panel. */
   .dpin.shorted {
-    background: #E0A030;
-    box-shadow: 0 0 0 2px #FFD37A, 0 0 8px 3px rgba(224, 160, 48, 0.85);
+    background: #A5D8F7;
+    box-shadow: inset 0 0 0 2px #FFFEFF, 0 0 8px 3px rgba(165, 216, 247, 0.85);
     animation: pinblink 0.4s steps(2) infinite;
   }
   /* The blade seen end-on, turning about the insertion point like a clock hand.
-     This is where the rotation reads: the bar is the blade's cross-section and
-     the stub marks the bitted side, so the direction of turn is unambiguous. */
+     Why not pivot at one end: the axis is the blade's centre, so the bar is
+     symmetric about the insertion point and reads as a bar pinned in the middle
+     rather than a hand swinging off a corner. This axis is fixed by design. */
   #exp-blade-mark {
     position: absolute;
     width: 0;
@@ -534,37 +509,62 @@
     z-index: 3;
     transition: transform 0.25s ease-out;
   }
-  /* the blade bar: longer on the bitted side, matching the hit-test geometry */
+  /* The blade bar: symmetric about the insertion point (= the rotation axis).
+     Its box comes from main.js so that the drawn rectangle and the one the hit
+     test intersects are the same rectangle. */
   #exp-blade-mark::before {
     content: '';
     position: absolute;
-    left: -4px;          /* EXP_BLADE_BACK at 4x */
-    top: -3px;
-    width: 36px;         /* (BACK 1 + BITTED 8) * 4 */
-    height: 6px;
-    background: #e8e0d0;
-    box-shadow: 0 0 0 1px rgba(16, 16, 16, 0.75);
+    left: var(--blade-x);
+    top: var(--blade-y);
+    width: var(--blade-w);
+    height: var(--blade-h);
+    /* Translucent because at true scale the tip is nearly as deep as the gap
+       between the rows: opaque, it hid the very pins it was bridging, which is
+       the one thing this view has to show. */
+    background: linear-gradient(
+      rgba(255, 254, 255, 0.55) 0 50%,
+      rgba(184, 184, 184, 0.55) 50% 100%
+    );
+    /* Ends chamfered to read as a ground key tip. The chamfer only ever removes
+       area from the rectangle the hit test uses, so the drawing never claims
+       contact the geometry does not have. */
+    clip-path: polygon(
+      0 30%, 7px 0, calc(100% - 7px) 0, 100% 30%,
+      100% 70%, calc(100% - 7px) 100%, 7px 100%, 0 70%
+    );
+    /* outlined with a shadow rather than a border so the edge follows the
+       chamfered silhouette instead of the untrimmed box */
+    filter: drop-shadow(0 0 1px #000) drop-shadow(0 0 1px #000);
   }
-  /* the bow edge, so the key reads as a key rather than a floating bar */
+  /* Rattling gets a glow rather than extra thickness — the tip has to stay the
+     size the hit test uses. Applied as a filter because clip-path would cut a
+     box-shadow off at the chamfer. */
+  #exp-blade-mark.rattling::before {
+    filter: drop-shadow(0 0 1px #000) drop-shadow(0 0 4px rgba(165, 216, 247, 0.95));
+  }
+  /* The pivot, so the centre axis is visible at a glance. Reads as the thick
+     end of the key; only the blade itself has to be thin. */
   #exp-blade-mark::after {
     content: '';
     position: absolute;
-    left: -12px;
-    top: -9px;
-    width: 8px;
-    height: 18px;
-    border-radius: 2px;
-    background: #b8b0a4;
-    box-shadow: 0 0 0 1px rgba(16, 16, 16, 0.75);
+    left: -7px;
+    top: -7px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #ADADAD;
+    box-shadow: 0 0 0 2px #000000;
   }
+
   #exp-blade-mark.rattling { transition: none; }
   #exp-controls {
     display: flex;
     gap: 6px;
     align-items: center;
     flex-wrap: wrap;
-    margin-top: 4px;
-    width: 480px;
+    margin-top: 6px;
+    width: var(--exp-w);
   }
   #exp-controls button {
     background: var(--fc-red);
@@ -593,6 +593,7 @@
   }
   #exp-right { flex: 0 1 300px; min-width: 190px; }
   #exp-hint, #exp-note { font-size: 9px; color: #85755a; margin-top: 3px; text-align: left; }
+  #exp-hint { width: var(--exp-w); line-height: 1.5; }
   #exp-state {
     font-family: ui-monospace, Menlo, monospace;
     font-size: 10px;
@@ -1135,21 +1136,19 @@
   <div id="expport">
     <div id="exp-left">
       <h3 id="exp-title-h3">前面拡張端子(DA-15)</h3>
-      <!-- Two views of the same thing. Above: the console from overhead, where
-           you swing the key on its hinge. Below: the port face, where you watch
-           which contacts the blade is currently across. -->
-      <div id="exp-viewlabel" data-i18n="expViewTop">上から見た図 — 鍵を左右に振る</div>
-      <div id="exp-top">
-        <div id="exp-frontbar"></div>
-        <div id="exp-slot"></div>
-        <img id="exp-key" alt="" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAABYCAYAAACUC/VYAAAChklEQVR4nO1ay5GDMAwVGhWUcw4pwBWkCspIAVRBBS4gh5zpKDvK4h2WNSAJYWdm8y4hfKxnWQ/JShowIoTwnJ+LMTbacchqvG3b3KWnlgSCI5hUzjOuBMLy7E0kEAzoug680Fgf5FmeTie4XC6v7/f7/XXM5DRxgFYCbGQYhl/ntMZ3EfACWR5KQcZLMMUYnK9rUk+QxXjf9/B4PF7rPsckLkTvBITKIO0DPKvr9ZpdAkswkpZAIjEePpMME1gZRWSYQ1EZhvFFtBdkMZwkN1dBkuHhS9D3/eI19sqhySh+q2D1Hk1GJC2BRIJdXSUG5iRyMtRIkaCyDMkzGVmAFuOsglxZVqQmZKypIMnwMBXESR5YWgL2hLRuRC2BtZLMEozonQuKZMOwsDcokg3DqAIvkNtIpYrSuFGSaYtS0hJIJMbDP7lAu3UjcEaxmjBkZFgkGYWVkswCtDy0JMMiyShulGTampC0BBKJrWR0+N4w1k5GXjIkcCzJiiajtlZJFgUbEw2JRktgamTuhapNqs5g3EwgN3vL+psIrLVqi+0LPIGejepDm9VBYNxCgjTGz+fzzzluVM4xrQ+kCQmhMtBr9oxpgcrekCwFQmWg1+ytXkCoDHxbAsHgfssyIFQG/nsCJPHAVgm2hq1eIkkHsnRFJMTJWwE5JCXkkhNKB0lNh63P+bGrCjrBwHzPYY3KVliQHOYBqUEpUQZp5MTBlPtMmJ9f2j2bCAyCwSwgyU3px2otJD0khMrADwGoDLJofinDsVI07wATATZ+u92yu50i23NvIFQGrV3cUwMwcr8lvJ0HcE8fQIvc/oC0g7DULNG+BNI+4O0ddB3tQ8CAbAx4/mVzC19hzLVjh22lIwAAAABJRU5ErkJggg==">
-      </div>
-      <div id="exp-viewlabel-front" class="exp-viewlabel" data-i18n="expViewFront">前から見た図 — 接触しているピン</div>
+      <!-- One view: the port face. The blade's cross-section turns about the
+           insertion point like a clock hand, and the pins it bridges light up.
+           Dragging sideways moves the insertion point along the row. -->
+      <div id="exp-viewlabel" class="exp-viewlabel" data-i18n="expViewFront">前から見た図 — 時計と同じ回し方</div>
       <div id="exp-front">
-        <img id="exp-front-img" alt="" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHgAAAAsCAYAAACue3wzAAACE0lEQVR4nO2aMUvDUBDHXySD7k5OAZeOrg6Cc4fAcxEn3RwFB6EODg4KDk4ubnVqnYQObs76EboU8i10q1zsAwl9iUl9793dux+UFlLo3f3zv7ukST7exnMlsGUtdACCW0Rg5ojAzEltB7Ltnt9IBCvFbKq6Ig5mjggca4vG3nqokQUaeWlIQWOa80Wg3FOfycUkaJVq7r5q4lxgSCRmYW2YmriujyxZzBGBmSMCM8f5DIb50mXODK7u1MvkVVFB5311e32Bbj8Jeh1sExWKBZh3Kgx+xd9WbNIt2ri4rjC9nX2SolYx8UM+kFfoqwtUDqbUkqngbclqcnFMFB7vDaDYomFeQWsbDx+s36F2TCOZw4ntmSxXZ5jt7KW2NTdhE7iLe1n8H2xczAGNxL1AOjo89/6jR8/3Ud6fLmZT5bve9kd2NtaVb8xZT7lV6wb3dqlr8flFq0W/n1z+aa5gXJ7aHjNAvpC3b5Kzza15CAfvDm+sbZrqwqVr3LuKwOQc3MbFHCgCuRfVFk19o9aINmc0Ate5mJLI2lFrZnUvepnQp8d5+Xp8mqCcyTrvl/HZ4sdwKRhsyVq2cHGaydkin/9wL8klS/ADCoHNLMbQ0rC5l4XAABRjtHdQfqYqdLaIG/LAIC6aGUx5Nmce3LrKDEYtsPCDLFkC/hksuEEEZk7qou8LeBAHM0cEZo4IzBwRWPHmG6cUBGEIiow/AAAAAElFTkSuQmCC">
+        <img id="exp-front-img" alt="" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAAAwCAYAAADZ9HK+AAACqklEQVR4nO2aO04DMRCGHZQCahBUSKkibpEKkgKxmyZCpIiERJETcAZOkAIpEg1CNCSIYkPHNajSgqBPB1qQ0cbY3tfY3sT/V/Fw4tmZ3+PxeGtRFH0x4C0brg0AboEAPAcC8Jy66h/to7ZdS4BRZs+zfAJYvN6atAdYZzufAEyz2TxzNXVlWThYdMYF8DKXK6/FkGEy+6rxyVZGAOJDmDR+3WgpfGXSp2QC4EZy45Di6Wg3l7cI0ddOBaAyBkWkObivKYRQSgCxAUVXfNgN2XQ6LTP9WhEEAZs8THJ9htdRyTg42wJ0K/708v4n2PFDJhF/952wG/79zP11d9UzOmdNdRmUpiid6lQBB8VJE0RaFlCdMMgFIE40Go203zMcDjE+p39kIigqALItIF71orEc1V4fRRHGs/z+2Trok20PZBmAK6zT6SyN49uA+JD84TA+KOSfmKQAimYA3AZ6DgTgORCA55DVAHERqEJV5KiOiRif7h+xCKxEDSALnK7bh/GM1D+VuA3MayDG6zHdLkcN4Dn18cXyOZMzTvng+bW8SQHcMTjs020Bg51GWXuAZXQxu/mYS/9e6+0z6Slg9y19wuPH6N9JIGtbU+xwYXyU2T+yE8DTid6f73sWaoDYKNnRRdbT1t0UYjxT+of6irhUBsiSBdDzp70TKbL6rWUAXRYA5THxgkhpAcTqU3WZgFmyrn4dJBlAFAGyAD1FU7/xGkBVC2R5NQw9/1/S/CNL/XkFYLwG0G0F6Pkz0p4/1eonzQBFegPAXupXZQByAXAghGrt+dYFkBSB7E1hZAV50MUXa7n/yqZ8JwLQiQCkQxV8pwLgQAhuAl8ZAYhAEGYDXnkB+CyIloWAr5wAgFmsXQaB1aKeVzFgvUAG8BwIwHMgAM+BAJjffAN1Qn8rZiT5YQAAAABJRU5ErkJggg==">
         <!-- .dpin markers are created and positioned by main.js -->
         <div id="exp-blade-mark"></div>
       </div>
+      <!-- The key itself, shown lying beside the port while it is pulled out.
+           Inserted, the blade is inside the port and only the cross-section
+           marker is visible, so this is hidden. -->
+      <img id="exp-key" alt="" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAABYCAYAAACUC/VYAAACgElEQVR4nO1aXW6DMAx2Lb/1Xus7vUO6Iw0OwTu7V587GRGNsUBsY5JO6ydVtNDEX/wTO25PYEQI4bG813XdSTsPWYU3TZN69NCSQHAEk0ppxpVAWF+9iQSCAX3fgxdO1oG8ysvlAufzefx8v9/H90xO4wdoJcBChmH4cU8rfBcBL5BlUHQyNsEck3OOz6SaIIvw9qOF4XMY7b7EzC9EewJCZZB2wLSqpAkszkhaAjMSjF+bEkdGkTBMoWgYhmkj2guyCOYrq34ZBTEMDzdB+9GuPmOtaJIRWaMglxGlmiAtgTmJKj6Q00RMUIfuA55hSOCYjCxAi3COgpQTWmpCAgNu77ckgZlWxCmZ9uSBNRMwOWndiFoCWyWZxRnROxcUyYZh5WxQJBuGKQq8QG4zlSpKu0xJpi1KSUtgRmIUsuYLVUxQtCYMiTAskozCRklmAVoGrYVhkWTUZUqymIxKHEweW8no8LNhVzsZeYUhgWNJVjQZNU4lGWoJ8Aq5JMuRLNIlaxZaqNqk6g3CzQRSq7fY30Rgq1VbxAm9gZ6N6kOb1UEg3EKCNMIvb987Hzcql5jXB9KEhFAZ6LV6RmzdR21ITIFQGei1eqsWECoDn5ZAMKjfYgaEysB/T4AkGsiVYFvI9RJJOpGlKyIhTt4RkEKMhFRyQukksemQuy7fu0ZBL5iYv3NYo7IRFiSHaUAqUEqUQZpwYmdKXSOW99dOzyYCg2AyC0jypfhjtRaSHhJCZeCLAPw1E/R9PzpX6mX5ew9pB3B8X6/X5GmnyPHcGwiVQVsP99QAy+r4aTWAe/oAWqTOB6SdhJOSxdvXQNoB3tpB19leBAxI+oDnXzZz+AK9VsbxUQ77LgAAAABJRU5ErkJggg==">
       <div id="exp-controls">
         <button id="exp-rattle">ガチャガチャ</button>
         <button id="exp-pull">抜く</button>
@@ -1252,10 +1251,10 @@ PRGとCHRを別のカセットから組み合わせた「ニコイチカセッ�
   </div>
   <button id="check-close">閉じる</button>
 </div>
-<script>window.NES_VER='1785651895';</script>
-<script src="i18n.js?v=1785651895"></script>
-<script src="smb-ram.js?v=1785651895"></script>
-<script src="nes.js?v=1785651895"></script>
-<script src="main.js?v=1785651895"></script>
+<script>window.NES_VER='1785656362';</script>
+<script src="i18n.js?v=1785656362"></script>
+<script src="smb-ram.js?v=1785656362"></script>
+<script src="nes.js?v=1785656362"></script>
+<script src="main.js?v=1785656362"></script>
 </body>
 </html>
