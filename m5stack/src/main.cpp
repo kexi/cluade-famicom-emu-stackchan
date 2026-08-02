@@ -515,6 +515,31 @@ static void applyPinChanges() {
     Serial.printf("PINS: %016llx\n", (unsigned long long)wanted);
 }
 
+// Smoothed emulation time of fully-rendered draw frames, and whether it holds a
+// real sample yet. Read by the repaint guard in loop() — see the long comment
+// there for what it stands for and why it is filtered.
+//
+// At file scope rather than function-local statics inside loop() so reset and ROM
+// swap can invalidate it. The evidence describes one cart running one scene; a
+// different cart, or the same one restarted, is a different writer whose pace has
+// not been measured yet.
+static float g_emuDrawMs = 0.0f;
+static bool g_emuDrawSeeded = false;
+
+// Forget the measured emulation pace. Called whenever the thing being measured is
+// replaced, so the guard falls back to its armed default until a fresh
+// fully-rendered draw frame re-seeds it.
+//
+// Why not keep the old average across a reset: it was gathered from a game that
+// had booted into steady state, and the frames right after a reset are the boot
+// sequence again — fast, mostly rendering-off, and exactly the ones the guard
+// exists to protect. Carrying the old evidence forward would stand the guard down
+// across that window on the strength of measurements that no longer apply.
+static void invalidateEmuDrawPace() {
+    g_emuDrawMs = 0.0f;
+    g_emuDrawSeeded = false;
+}
+
 // The RESET button, as the browser's connector UI presses it. Runs after the pin
 // state is applied so a "reseat and reset" arrives in the same order it happens
 // on a real console: contacts restored first, then the reset vector fetched.
@@ -523,6 +548,7 @@ static void applyResetRequest() {
     const bool requested = g_resetRequested.exchange(false, std::memory_order_relaxed);
     if (!requested) return;
     g_nes.reset();
+    invalidateEmuDrawPace();
     Serial.println("RESET: console reset");
 }
 
@@ -587,6 +613,13 @@ static void applyRomRequest() {
         }
         if (!restored) haltWithError("ROM load failed");
     }
+
+    // Unconditionally, on every path that got this far. A successful load is
+    // obviously a new writer; a failed one either left the old cart running (swap
+    // path) or fell back to the embedded image, and in the failure case the frames
+    // around it were spent allocating rather than emulating. None of those are
+    // described by the average built before this point.
+    invalidateEmuDrawPace();
 
     if (ok) Serial.printf("ROM: applied %u bytes%s\n", (unsigned)g_romSize, wantSwap ? " (no reset)" : "");
     else Serial.printf("ROM: failed %u bytes\n", (unsigned)g_romSize);
@@ -1014,40 +1047,62 @@ void loop() {
     // runFrame() below. Independent of PERF_LOG, which is a diagnostic and may be
     // compiled out.
     //
-    // The guard is armed by default and only stood down on positive evidence:
-    // a seeded, representative average that is at or above the threshold. That
-    // asymmetry is deliberate — skipping the join is the unsafe direction, so it
-    // has to be earned, while paying it costs at most one band's wire time.
+    // The guard is armed by default and only stood down on positive evidence.
+    // That asymmetry is deliberate — skipping the join is the unsafe direction, so
+    // it has to be earned, while paying it costs at most one band's wire time.
+    //
+    // Standing it down takes two things, because the average and the frame about
+    // to run have to be talking about the same writer:
+    //
+    //   1. a seeded average at or above the threshold, and
+    //   2. the previous frame having been fully rendered.
+    //
+    // Condition 2 is what keeps the evidence in its domain. The average is built
+    // only from fully-rendered frames (see the filter below), so on its own it
+    // says nothing about a rendering-off frame — and those are the *fast* ones,
+    // 2-3ms against 16. Without it, a game that reaches steady state and then
+    // switches rendering off would carry a 16.45ms average into the first
+    // rendering-off draw frame and skip the join there: evidence from the slowest
+    // writer licensing the fastest one. The previous frame's flag is used as the
+    // predictor for the next frame's writer profile — not exact, but rendering
+    // state persists across frame boundaries far more often than it flips, and
+    // being wrong costs one join rather than a torn picture.
     //
     // Why not gate on renderingOn() as an earlier revision did: with rendering
     // off, renderScanline paints nothing, but ppu.cpp still writes the backdrop
     // colour into all 256 pixels of every visible line whenever renderThisFrame
     // is set. A rendering-off draw frame therefore *does* repaint the whole
-    // framebuffer — and does it in 2-3ms instead of 16, which is the fastest any
-    // writer ever runs and so the closest anything gets to overtaking the DMA.
-    // Gating the guard on rendering removed the protection from exactly the
-    // frames that need it most. The instantaneous read was doubly wrong: $2001
-    // changes mid-frame, so one boundary sample cannot characterise a frame at
-    // all.
+    // framebuffer, and does it faster than anything else. Gating the guard on
+    // rendering removed the protection from exactly the frames that need it most.
+    // The instantaneous read was doubly wrong: $2001 changes mid-frame, so one
+    // boundary sample cannot characterise a frame at all.
     //
-    // The sample filter keeps its purpose, but asks the frame-level question via
-    // frameFullyRendered() instead: only a frame whose visible region was drawn
-    // in full is a representative "how long does a repaint take" measurement.
-    // Why filter at all: a rendering-off run lasts as long as the game leaves it
-    // off — menus, screen transitions, the whole boot sequence — and every frame
-    // in it measures 2-3ms. Unfiltered, at alpha 0.05 a single one pulls a
-    // 16.45ms average down by ~0.7ms and a few dozen drag it through the
-    // threshold, so the average would stop describing the drawing frames it is
-    // supposed to bound.
+    // The sample filter asks the frame-level question via frameFullyRendered():
+    // only a frame whose visible region was drawn in full is a representative
+    // "how long does a repaint take" measurement. Why filter at all: a
+    // rendering-off run lasts as long as the game leaves it off — menus, screen
+    // transitions, the whole boot sequence — and every frame in it measures 2-3ms.
+    // Unfiltered, at alpha 0.05 a single one pulls a 16.45ms average down by
+    // ~0.7ms and a few dozen drag it through the threshold, so the average would
+    // stop describing the drawing frames it is supposed to bound.
     //
     // Unseeded counts as armed. Until a representative sample exists there is no
     // evidence either way, and the honest price of that is a joinBand stall on
     // each draw frame during boot: bounded (one band's wire time per picture),
     // paid only until the first fully-rendered draw frame lands, and cheap next
-    // to a torn picture.
-    static float emuDrawMs = 0.0f;
-    static bool emuDrawSeeded = false;
-    const bool guardStoodDown = emuDrawSeeded && emuDrawMs >= DISPLAY_REPAINT_GUARD_MS;
+    // to a torn picture. reset and ROM swap clear the seed for the same reason.
+    //
+    // Net behaviour:
+    //
+    //   boot / unseeded             join   (no evidence yet)
+    //   after reset or ROM swap     join   (evidence discarded)
+    //   rendering-off draw frame    join   (evidence is out of domain)
+    //   steady, emulation slow      skip   (both conditions met)
+    //   steady, emulation fast      join   (writer may overtake the DMA)
+    //   skipped (non-draw) frame    n/a    (framebuffer untouched)
+    static bool prevFrameFullyRendered = false;
+    const bool paceApplies = g_emuDrawSeeded && prevFrameFullyRendered;
+    const bool guardStoodDown = paceApplies && g_emuDrawMs >= DISPLAY_REPAINT_GUARD_MS;
     const bool repaintRacesBand = drawThisFrame && !guardStoodDown;
     if (repaintRacesBand) joinBand();
     const int64_t flushEndUs = esp_timer_get_time();
@@ -1073,9 +1128,14 @@ void loop() {
         // the second picture onward instead of after a decay. No floor is needed
         // now that samples are filtered — the boot frames that made the raw value
         // untrustworthy are exactly the ones that no longer reach here.
-        emuDrawMs = emuDrawSeeded ? emuDrawMs + DISPLAY_EMU_EWMA_ALPHA * (drawMs - emuDrawMs) : drawMs;
-        emuDrawSeeded = true;
+        g_emuDrawMs = g_emuDrawSeeded ? g_emuDrawMs + DISPLAY_EMU_EWMA_ALPHA * (drawMs - g_emuDrawMs) : drawMs;
+        g_emuDrawSeeded = true;
     }
+    // Carried to the next iteration as the predictor for that frame's writer.
+    // Every frame updates it, draw or not: a skipped frame still ran the emulator
+    // and still tells us what the PPU was doing, and the next draw frame is better
+    // served by the most recent answer than by one from several frames back.
+    prevFrameFullyRendered = fullyRendered;
 
     // Answered here, not with the other applyXxx handlers: the scope rows are
     // decimated from apu.sampleCount, which describes the frame that just ran and
