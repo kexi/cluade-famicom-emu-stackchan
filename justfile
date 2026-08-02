@@ -100,7 +100,14 @@ verify frames='600' scenario='':
     # 中間ファイルはリポジトリ外の一時ディレクトリに置く (mktemp -d)。ビルド
     # 成果物を作業ツリーに落とすと .gitignore の管理対象が増えるため
     set -euo pipefail
-    test -f m5stack/data/game.nes || ./m5stack/scripts/fetch_rom.sh
+    # 無ければ取得し、あれば中身を検査する。「あれば何もしない」で済ませると、
+    # 途中で壊れた ROM や別の ROM が置かれていても検証がそのまま走る — 下の
+    # 許容窓は ROM 固有なので、それは黙って誤った結論を出す道になる
+    if [ -f m5stack/data/game.nes ]; then
+        ./m5stack/scripts/fetch_rom.sh --check
+    else
+        ./m5stack/scripts/fetch_rom.sh
+    fi
     # シナリオは 3 系列すべてに同じものを渡す。片方だけに入力が入れば当然
     # 食い違うので、ここで組み立てて使い回す
     scen=()
@@ -151,11 +158,19 @@ verify frames='600' scenario='':
     # そのラインの最後のタイルの取り込みタイミングとしてしか現れない。
     # 「ライン一括描画の既知の副作用」として許容し、件数は WARN で報告する。
     #
-    # 領域が game.nes 固有である点に注意。ROM を差し替えるなら、この 135 という
-    # 数字はそのゲームの分割位置に依存するので必ず引き直すこと。x>=248 の側は
-    # タイル境界なので構造的だが、scanline は完全にゲーム依存
-    known_line=135
-    known_x=248
+    # 領域が game.nes 固有である点に注意。scanline はそのゲームの分割位置に
+    # 依存するので、ROM を差し替えるなら必ず引き直すこと。x>=248 の側はタイル
+    # 境界なので構造的だが、scanline は完全にゲーム依存。
+    #
+    # 値をここに直書きせず rom.lock から読むのは、窓と ROM ハッシュを機械的に
+    # 結びつけるため。同じファイルに並んでいれば、ROM を差し替えようとした人の
+    # 目に窓が必ず入る
+    known_line=$(sed -n 's/^KNOWN_LINE=//p' m5stack/scripts/rom.lock)
+    known_x=$(sed -n 's/^KNOWN_X=//p' m5stack/scripts/rom.lock)
+    if [ -z "$known_line" ] || [ -z "$known_x" ]; then
+        echo "verify: KNOWN_LINE/KNOWN_X missing from m5stack/scripts/rom.lock" >&2
+        exit 2
+    fi
     fbdiff=$(join -j1 \
         <(awk '{print $1, $NF}' "$work/1-ref-all.state") \
         <(awk '{print $1, $NF}' "$work/2-emb-all.state") \
