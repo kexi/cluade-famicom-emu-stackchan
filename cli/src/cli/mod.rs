@@ -6,6 +6,7 @@
 mod ctrl;
 mod debug;
 mod discover;
+mod input;
 mod pins;
 mod rom;
 mod sd;
@@ -129,6 +130,10 @@ pub enum Command {
     /// Inspect the emulator's internal state
     #[command(subcommand)]
     Debug(debug::DebugCommand),
+
+    /// Send controller input
+    #[command(subcommand)]
+    Input(input::InputCommand),
 }
 
 /// `rom` の下のコマンド。
@@ -154,6 +159,7 @@ pub fn run(cli: Cli) -> ExitCode {
         Command::Ctrl(command) => ctrl::run(command, &cli.global),
         Command::Pins(command) => pins::run(command, &cli.global),
         Command::Debug(command) => debug::run(command, &cli.global),
+        Command::Input(command) => input::run(command, &cli.global),
     };
 
     match result {

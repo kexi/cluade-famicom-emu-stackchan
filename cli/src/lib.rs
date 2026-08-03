@@ -11,6 +11,7 @@
 pub mod debug_client;
 pub mod discover;
 pub mod exit;
+pub mod input_client;
 pub mod output;
 pub mod proto;
 pub mod rom_client;
