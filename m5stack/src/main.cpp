@@ -672,6 +672,15 @@ void setup() {
     // ここで先に始めておくと、プロコンが自分の中で立ち上がる時間を setup() の
     // 残り (WiFi 接続や SD 走査で数秒) と重ねられる。列挙が始まる頃には
     // コントローラ側の準備が終わっている。
+    //
+    // 2 つ呼ぶのは CoreS3 の回路図 (Sch_M5_CoreS3_v1.0 Page 6) 都合: VUSB への
+    // 5V は BUS_5V →[U14: BUS_OUT_EN]→ BUS_OUT →[U17: USB_OTG_EN]→ VUSB と
+    // スイッチ 2 段直列で、setUsbOutput() が立てるのは BOOST_EN と USB_OTG_EN
+    // だけ。中間の BUS_OUT_EN は setExtOutput() の担当なので、これを欠くと
+    // バッテリー駆動時にポートへ 5V が出ない。
+    // 副作用: BUS_OUT_EN を立てると外部 5V → AXP2101 の充電経路 (U19) が切れる
+    // ため、この構成の間は本体バッテリーへ充電できない (既知の制約に追記済み)。
+    M5.Power.setExtOutput(true);
     M5.Power.setUsbOutput(true);
 
     Serial.begin(115200);
