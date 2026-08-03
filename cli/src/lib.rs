@@ -9,3 +9,4 @@
 //! そちらを引くこと。
 
 pub mod exit;
+pub mod proto;

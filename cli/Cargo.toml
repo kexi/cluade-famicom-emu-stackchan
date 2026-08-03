@@ -24,6 +24,8 @@ default = ["procon"]
 procon = []
 
 [dependencies]
+# ROM 転送の CRC-32 (zlib/IEEE)。firmware が同じ多項式で検証する
+crc32fast = "1.4"
 
 # cli/ の静的解析設定。C++ 側の .clang-tidy / Python 側の ruff.toml [lint] /
 # JS 側の .oxlintrc.json と同じ立ち位置で、just cli-clippy と CI から参照される
