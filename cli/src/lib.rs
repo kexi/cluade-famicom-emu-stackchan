@@ -11,5 +11,6 @@
 pub mod exit;
 pub mod output;
 pub mod proto;
+pub mod rom_client;
 pub mod sd_client;
 pub mod transport;

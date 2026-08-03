@@ -5,6 +5,7 @@
 
 mod ctrl;
 mod pins;
+mod rom;
 mod sd;
 
 use std::sync::LazyLock;
@@ -108,6 +109,10 @@ pub enum Command {
     #[command(subcommand)]
     Sd(sd::SdCommand),
 
+    /// Send a cartridge image to the device
+    #[command(subcommand)]
+    Rom(RomCommand),
+
     /// Reset the console, set the volume, or open the ROM menu
     #[command(subcommand)]
     Ctrl(ctrl::CtrlCommand),
@@ -117,11 +122,25 @@ pub enum Command {
     Pins(pins::PinsCommand),
 }
 
+/// `rom` の下のコマンド。
+///
+/// URL を取りに行く口は持たない。TLS を抱えるとクロスビルドが厄介になり、
+/// 信頼ストアも CLI に固定されて古びる。`curl` に任せてパイプで繋ぐほうがよい
+#[derive(Subcommand, Debug)]
+pub enum RomCommand {
+    /// Send a .nes image to the device
+    ///
+    /// To fetch one from the network, pipe it in:
+    ///   curl -fsSL "$URL" | stackchan rom send - --save game.nes
+    Send(rom::RomSendArgs),
+}
+
 pub fn run(cli: Cli) -> ExitCode {
     let output = cli.global.output();
 
     let result = match &cli.command {
         Command::Sd(command) => sd::run(command, &cli.global),
+        Command::Rom(RomCommand::Send(args)) => rom::run(args, &cli.global),
         Command::Ctrl(command) => ctrl::run(command, &cli.global),
         Command::Pins(command) => pins::run(command, &cli.global),
     };

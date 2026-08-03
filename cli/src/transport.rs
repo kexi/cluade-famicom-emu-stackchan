@@ -318,6 +318,22 @@ impl Device {
         Err(retry.no_answer())
     }
 
+    /// 何度もやり取りする一連の手続き用にソケットを開く。
+    ///
+    /// ROM 転送のように BEGIN から保存イベントまでを 1 本で通す必要がある
+    /// ときに使う。firmware は BEGIN が来たポートに返すので、途中で開き直すと
+    /// 違う場所で待つことになる
+    pub fn open_session(&self) -> Result<Session> {
+        let socket = UdpSocket::bind(("0.0.0.0", 0))?;
+        Ok(Session {
+            socket,
+            host: self.host.clone(),
+            port: self.port,
+            buffer: vec![0u8; 2048],
+            verbose: self.verbose,
+        })
+    }
+
     /// ホスト名が解決できるかを先に確かめる。
     ///
     /// 送信だけなら `send_to` が失敗した時点で判るが、`.local` が引けない
@@ -333,6 +349,73 @@ impl Device {
             )));
         }
         Ok(())
+    }
+}
+
+/// 同じソケットで複数回やり取りする一連の手続き。
+///
+/// `Device::request` が 1 往復ごとにソケットを開き直すのに対し、こちらは
+/// 開いたまま使う。ROM 転送では BEGIN / DATA / END / 保存イベントが同じ
+/// ポートに返る必要があるため
+pub struct Session {
+    socket: UdpSocket,
+    host: String,
+    port: u16,
+    buffer: Vec<u8>,
+    verbose: u8,
+}
+
+impl Session {
+    /// 1 往復。`packet` が空なら送らずに待つだけ (保存イベントのように、
+    /// こちらから促さずに届くものを受けるとき)。
+    ///
+    /// 締切までに `accept` が `Some` を返さなければ `Ok(None)`。無関係な
+    /// データグラムでは締切を消費しない
+    pub fn exchange<T>(
+        &mut self,
+        packet: &[u8],
+        timeout: Duration,
+        mut accept: impl FnMut(&[u8]) -> Option<T>,
+    ) -> Result<Option<T>> {
+        let should_send = !packet.is_empty();
+        if should_send {
+            if self.verbose > 1 {
+                let hex: String = packet.iter().map(|b| format!("{b:02x}")).collect();
+                eprintln!("stackchan: send {} bytes: {hex}", packet.len());
+            }
+            self.socket
+                .send_to(packet, (self.host.as_str(), self.port))?;
+        }
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Ok(None);
+            };
+            let is_expired = remaining.is_zero();
+            if is_expired {
+                return Ok(None);
+            }
+            self.socket.set_read_timeout(Some(remaining))?;
+
+            let received = match self.socket.recv(&mut self.buffer) {
+                Ok(n) => n,
+                Err(e) if is_timeout(&e) => return Ok(None),
+                Err(e) => return Err(e.into()),
+            };
+
+            if self.verbose > 1 {
+                let hex: String = self.buffer[..received]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                eprintln!("stackchan: recv {received} bytes: {hex}");
+            }
+            // 無関係なデータグラムは締切を消費せずに読み飛ばす
+            if let Some(value) = accept(&self.buffer[..received]) {
+                return Ok(Some(value));
+            }
+        }
     }
 }
 
