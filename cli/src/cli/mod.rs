@@ -7,6 +7,7 @@ mod ctrl;
 mod debug;
 mod discover;
 mod input;
+mod interactive;
 mod pins;
 mod rom;
 mod sd;

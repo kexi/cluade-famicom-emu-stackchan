@@ -33,6 +33,41 @@ pub enum InputCommand {
         #[arg(long, default_value_t = 100)]
         hold: u64,
     },
+
+    /// Play with the keyboard: z and x are B and A, arrows are the d-pad,
+    /// Enter is Start and Space is Select
+    ///
+    /// A terminal never reports that a key was let go, so a key counts as held
+    /// until it has been quiet for --sticky milliseconds. Press Ctrl-C to stop.
+    Keys {
+        /// Use only A and B, like the two-button unit on PORT.C
+        #[arg(long)]
+        two_button: bool,
+
+        /// How long a key counts as held after its last repeat, in milliseconds
+        ///
+        /// This has to outlast the delay before the OS starts repeating a
+        /// held key (around 375 ms on macOS), or a held button drops out and
+        /// comes back. Lower it for a snappier release, at that risk.
+        #[arg(long, default_value_t = 450)]
+        sticky: u64,
+
+        /// How often to repeat the state, in Hz
+        #[arg(long, default_value_t = DEFAULT_RATE_HZ)]
+        rate: u32,
+    },
+
+    /// Stream a Nintendo Switch Pro Controller over USB
+    ///
+    /// Press HOME to open the ROM menu. Press Ctrl-C to stop.
+    Procon {
+        /// How often to send, in Hz
+        #[arg(long, default_value_t = DEFAULT_RATE_HZ)]
+        rate: u32,
+    },
+
+    /// List the HID devices that look like a Pro Controller
+    List,
 }
 
 #[derive(Args, Debug)]
@@ -68,6 +103,19 @@ pub fn run(command: &InputCommand, global: &GlobalArgs) -> CommandResult {
     match command {
         InputCommand::Send(args) => send(args, global),
         InputCommand::TestPattern { hold } => test_pattern(*hold, global),
+        InputCommand::Keys {
+            two_button,
+            sticky,
+            rate,
+        } => {
+            check_rate(*rate)?;
+            super::interactive::keys(*two_button, *sticky, *rate, global)
+        }
+        InputCommand::Procon { rate } => {
+            check_rate(*rate)?;
+            super::interactive::procon(*rate, global)
+        }
+        InputCommand::List => super::interactive::list(global),
     }
 }
 

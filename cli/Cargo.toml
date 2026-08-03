@@ -21,7 +21,7 @@ path = "src/main.rs"
 default = ["procon"]
 # Pro コントローラの HID 直読み。Linux の hidapi は libudev を要求し、これは
 # 静的リンクできないため、Linux 向けリリースはこの feature を落として配る
-procon = []
+procon = ["dep:hidapi"]
 
 [dependencies]
 # ROM 転送の CRC-32 (zlib/IEEE)。firmware が同じ多項式で検証する
@@ -35,6 +35,10 @@ mdns-sd = { version = "0.20.3", default-features = false }
 # mdns-sd の受信チャネルのエラー型。「期限が来た」と「デーモンが消えた」を
 # 型で見分けるために要る (mdns-sd は再エクスポートしていない)
 flume = { version = "0.12", default-features = false }
+# 端末の raw mode (input keys)。tcsetattr のためだけなので crossterm は入れない
+libc = "0.2"
+# Pro コントローラの HID 直読み。feature "procon" のときだけ入る
+hidapi = { version = "2.6", optional = true }
 
 # cli/ の静的解析設定。C++ 側の .clang-tidy / Python 側の ruff.toml [lint] /
 # JS 側の .oxlintrc.json と同じ立ち位置で、just cli-clippy と CI から参照される

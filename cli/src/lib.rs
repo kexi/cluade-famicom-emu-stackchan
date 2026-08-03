@@ -12,7 +12,12 @@ pub mod debug_client;
 pub mod discover;
 pub mod exit;
 pub mod input_client;
+pub mod keys;
 pub mod output;
+// hidapi には依存しないので feature で隠さない。レポートの分解は HID 無しでも
+// 試せるようにしておきたい — 実機を繋がないと確かめられないのは接続と
+// ハンドシェイクだけにする
+pub mod procon;
 pub mod proto;
 pub mod rom_client;
 pub mod sd_client;

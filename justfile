@@ -63,12 +63,17 @@ cli-build:
     cd cli && cargo build --release --locked
 
 # CLI の単体テスト (src/) + バイナリを起動する結合テスト (tests/cli.rs)
+#
+# HID 無しの構成も見る。Linux 向けの配布バイナリは procon feature を落とすので
+# (libudev が静的リンクできない)、そちらが壊れていないことを確かめる
 cli-test:
     cd cli && cargo test --locked
+    cd cli && cargo test --locked --no-default-features
 
 # CLI の静的解析 (Cargo.toml の [lints.clippy] 準拠。lint-js と同じく warning も落とす)
 cli-clippy:
     cd cli && cargo clippy --all-targets --locked -- -D warnings
+    cd cli && cargo clippy --all-targets --locked --no-default-features -- -D warnings
 
 # --------------------------------------------------------------------- Web
 
