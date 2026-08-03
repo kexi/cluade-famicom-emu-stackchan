@@ -10,7 +10,9 @@ dev frames='120':
     @just tidy
     @just lint-py
     @just lint-js
+    @just cli-clippy
     @just check
+    @just cli-test
     @just test-ppu-flag
     @just verify {{frames}}
     @just build-web
@@ -50,6 +52,23 @@ secrets:
 # プロコン→UDP 送信 (hidapi 直読み)。host は CoreS3 起動時に画面表示される IP
 procon host:
     uv run tools/procon_udp.py --backend hid --host {{host}}
+
+# --------------------------------------------------------------------- CLI
+
+# 各レシピの --locked は、Cargo.lock と食い違う依存で暗黙に動かないため。
+# 無いと CI が lockfile を勝手に作り直し、手元と別のバージョンで通ってしまう
+
+# 実機操作 CLI をビルド (cli/target/release/stackchan)
+cli-build:
+    cd cli && cargo build --release --locked
+
+# CLI の単体テスト (src/) + バイナリを起動する結合テスト (tests/cli.rs)
+cli-test:
+    cd cli && cargo test --locked
+
+# CLI の静的解析 (Cargo.toml の [lints.clippy] 準拠。lint-js と同じく warning も落とす)
+cli-clippy:
+    cd cli && cargo clippy --all-targets --locked -- -D warnings
 
 # --------------------------------------------------------------------- Web
 
@@ -376,7 +395,8 @@ test-ppu-flag:
     "$work/ref" m5stack/data/game.nes
     "$work/emb" m5stack/data/game.nes
 
-# コードを整形 (C++ は .clang-format、Python は ruff.toml、JS は .oxfmtrc.json 準拠)
+# コードを整形 (C++ は .clang-format、Python は ruff.toml、JS は .oxfmtrc.json、
+# Rust は rustfmt の既定 — 倒す設定が無いので設定ファイルは置いていない)
 #
 # oxfmt に web/*.js を明示するのは、ディレクトリを渡すと index.html まで
 # 整形対象に入るため (HTML の整形は今回の範囲外)
@@ -384,12 +404,14 @@ format:
     clang-format -i core/*.cpp core/*.h m5stack/src/*.cpp m5stack/src/*.h tools/*.cpp
     ruff format tools/
     oxfmt 'web/*.js'
+    cd cli && cargo fmt
 
 # 整形漏れがないか検査 (差分があれば失敗)
 format-check:
     clang-format --dry-run --Werror core/*.cpp core/*.h m5stack/src/*.cpp m5stack/src/*.h tools/*.cpp
     ruff format --check tools/
     oxfmt --check 'web/*.js'
+    cd cli && cargo fmt --check
 
 # Python の静的解析 (ruff.toml 準拠。PEP 8 + pyflakes + import 整列)
 lint-py:

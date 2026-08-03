@@ -1,0 +1,37 @@
+[package]
+name = "stackchan"
+version = "0.1.0"
+edition = "2024"
+# nixpkgs 25.05 が供給する rustc に合わせる (flake.nix 参照)。これより新しい
+# MSRV を要求するクレートは入れられない
+rust-version = "1.86"
+license = "MIT"
+description = "Command-line control for the M5Stack CoreS3 Famicom emulator over UDP"
+repository = "https://github.com/kexi/cluade-famicom-emu-stackchan"
+
+[lib]
+name = "stackchan"
+path = "src/lib.rs"
+
+[[bin]]
+name = "stackchan"
+path = "src/main.rs"
+
+[features]
+default = ["procon"]
+# Pro コントローラの HID 直読み。Linux の hidapi は libudev を要求し、これは
+# 静的リンクできないため、Linux 向けリリースはこの feature を落として配る
+procon = []
+
+[dependencies]
+
+# cli/ の静的解析設定。C++ 側の .clang-tidy / Python 側の ruff.toml [lint] /
+# JS 側の .oxlintrc.json と同じ立ち位置で、just cli-clippy と CI から参照される
+#
+# 軸は他の 3 つと揃えて「実際のバグを拾う」系のみ。clippy の既定は
+# correctness + suspicious + style + complexity + perf だが、style と complexity
+# は書き味を変えるだけの指摘が大半なので落とす (ruff で select を E/W/F/I に
+# 絞り、oxlint を correctness だけにしたのと同じ判断)
+[lints.clippy]
+style = "allow"
+complexity = "allow"

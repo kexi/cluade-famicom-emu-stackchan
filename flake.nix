@@ -38,6 +38,10 @@
             pkgs.ruff            # just format / lint-py (tools/*.py の PEP 8 準拠を検査。ruff.toml 参照)
             pkgsUnstable.oxfmt   # just format / format-check (web/*.js の整形。.oxfmtrc.json 参照)
             pkgsUnstable.oxlint  # just lint-js (web/*.js の静的解析。.oxlintrc.json 参照)
+            pkgs.cargo           # just cli-build / cli-test (cli/ の Rust CLI。cli/Cargo.toml 参照)
+            pkgs.rustc           # 同上。pkgs.cargo は cargo 単体しか入れないため別途必要
+            pkgs.clippy          # just cli-clippy (cli/ の静的解析。Cargo.toml の [lints.clippy] 参照)
+            pkgs.rustfmt         # just format / format-check (cli/ の整形。rustfmt の既定に従うため設定ファイルは無し)
             pkgs.just            # タスクランナー (justfile 参照)
             pkgs.lefthook        # git hook 管理 (lefthook.yml 参照)
             pkgs.gitleaks        # pre-commit での秘密情報スキャン

@@ -28,7 +28,7 @@ just serve            # serves web/ and relays /api/* to the device as UDP
 Now the connector panel drives both emulators at once: tilt the cart and the Stack-chan glitches with the page, blow on it 💨, re-insert (which also presses RESET — reseating alone won't un-crash a wedged CPU, exactly like the real thing), and the master volume slider sets the device speaker. Protocol details (UDP types 0/1/2) are in [m5stack/README.md](m5stack/README.md).
 
 ### Reproducible toolchain (nix)
-The whole toolchain — clang, Emscripten, PlatformIO, uv, just, lefthook, gitleaks — comes from a nix flake (Python scripts run through uv, which resolves the interpreter and dependencies from PEP 723 metadata at run time). With [nix](https://nixos.org) and [direnv](https://direnv.net) installed, `cd` into the repo and everything is provided; otherwise prefix commands with `nix develop --command`. Setup details (direnv/nix-direnv, the pre-commit hook, first-run steps) are in [CONTRIBUTING.md](CONTRIBUTING.md).
+The whole toolchain — clang, Emscripten, PlatformIO, cargo, uv, just, lefthook, gitleaks — comes from a nix flake (Python scripts run through uv, which resolves the interpreter and dependencies from PEP 723 metadata at run time). With [nix](https://nixos.org) and [direnv](https://direnv.net) installed, `cd` into the repo and everything is provided; otherwise prefix commands with `nix develop --command`. Setup details (direnv/nix-direnv, the pre-commit hook, first-run steps) are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 | Task | Command |
 |------|---------|
