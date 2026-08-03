@@ -8,6 +8,8 @@
 //! C++ 側の定数名を各定義のドキュメントに書いてあるので、食い違いを疑ったときは
 //! そちらを引くこと。
 
+pub mod debug_client;
+pub mod discover;
 pub mod exit;
 pub mod output;
 pub mod proto;

@@ -4,6 +4,8 @@
 //! 引けばその配下が全部見える形にして、探索できるようにしている。
 
 mod ctrl;
+mod debug;
+mod discover;
 mod pins;
 mod rom;
 mod sd;
@@ -105,6 +107,9 @@ impl GlobalArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Find devices on the local network
+    Discover(discover::DiscoverArgs),
+
     /// List, boot, rename, or delete the ROMs on the SD card
     #[command(subcommand)]
     Sd(sd::SdCommand),
@@ -120,6 +125,10 @@ pub enum Command {
     /// Break or restore cartridge connector pins
     #[command(subcommand)]
     Pins(pins::PinsCommand),
+
+    /// Inspect the emulator's internal state
+    #[command(subcommand)]
+    Debug(debug::DebugCommand),
 }
 
 /// `rom` の下のコマンド。
@@ -139,10 +148,12 @@ pub fn run(cli: Cli) -> ExitCode {
     let output = cli.global.output();
 
     let result = match &cli.command {
+        Command::Discover(args) => discover::run(args, &cli.global),
         Command::Sd(command) => sd::run(command, &cli.global),
         Command::Rom(RomCommand::Send(args)) => rom::run(args, &cli.global),
         Command::Ctrl(command) => ctrl::run(command, &cli.global),
         Command::Pins(command) => pins::run(command, &cli.global),
+        Command::Debug(command) => debug::run(command, &cli.global),
     };
 
     match result {
