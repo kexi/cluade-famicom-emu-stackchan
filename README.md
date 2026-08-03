@@ -32,6 +32,7 @@ The whole toolchain — clang, Emscripten, PlatformIO, uv, just, lefthook, gitle
 
 | Task | Command |
 |------|---------|
+| Fast host/Web development loop (no flash) | `just dev [frames]` |
 | Build M5Stack firmware | `just build` |
 | Build + flash | `just flash [port]` |
 | Serial monitor | `just monitor` |
@@ -114,9 +115,14 @@ Hotkeys: **F** fullscreen · **R** reset (held = held in reset) · **D** debug p
 Inside the nix dev shell (or with Emscripten installed):
 
 ```sh
+just dev         # format/lint/check, 120-frame host verification, then Web build; never flashes
 just build-web   # → web/nes.js + web/nes.wasm, stamps a cache-busting version into index.html
 just build       # → m5stack firmware (PlatformIO, ESP32-S3)
 ```
+
+Pass a different frame count when a core change needs a longer host run, for example
+`just dev 600`. Use `just build` only for CoreS3-specific compilation, and reserve
+`just flash` for display DMA, audio, timing, memory, and hardware integration checks.
 
 ## Run locally
 
