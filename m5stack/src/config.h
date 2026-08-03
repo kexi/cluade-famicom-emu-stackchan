@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 // ------------------------------------------------------------------ display
@@ -200,6 +201,82 @@ constexpr float AUDIO_DC_POLE = 0.9985f;
 // use the available range while leaving headroom for louder passages.
 constexpr float AUDIO_HEADROOM = 2.5f;
 
+// ----------------------------------------------------------------- SD card
+// The CoreS3's microSD sits on the same SPI bus as the LCD (SCK=36, MISO=35,
+// MOSI=37; only the chip select differs), so a card access issued while a band
+// DMA is in flight would interleave with the panel's transaction. Nothing in
+// the SD driver can see that, which is why the rule is structural instead:
+// every sdRom* call happens on core 1 after joinBand(), with no band
+// outstanding. See sd_rom.h.
+//
+// 25MHz rather than the 40MHz the panel runs at: the card is reached through
+// the same traces plus a socket, the SD spec's high-speed ceiling is 50MHz for
+// SDHC and cheap cards routinely miss it, and nothing here is throughput-bound
+// (a 1MB ROM at 25MHz is ~0.3s of wire time against the ~1-2s the whole save
+// is budgeted for). Drop to 20 or 10MHz if a card proves flaky.
+constexpr uint32_t SD_SPI_FREQ = 25000000;
+// Where ROMs live. A fixed directory, not a configurable root, because the
+// path a network peer can influence is then only ever a basename appended to
+// this constant — traversal is impossible by construction rather than by
+// checking for "..".
+constexpr char SD_ROMS_DIR[] = "/roms";
+// Suffix for a save still in progress. A ".nes" only ever appears under its
+// final name after a successful rename, so an interrupted write cannot be
+// mistaken for a complete image.
+constexpr char SD_PART_SUFFIX[] = ".part";
+// Suffix for the image an overwrite is replacing, held only for the instant
+// between moving the old file aside and the new one landing under its name.
+// Why a distinct suffix rather than reusing ".part": the sweep deletes .part
+// files outright, and a .bak is the opposite — the last complete copy of a ROM
+// whose replacement did not arrive, so it is restored rather than discarded.
+constexpr char SD_BAK_SUFFIX[] = ".bak";
+// Ceiling on a directory listing. The array is a static in main.cpp
+// (64 * 68B ≈ 4.4KB), and a listing that cannot fit the menu's scroll is of no
+// use to anyone; extra files are skipped with a serial warning.
+constexpr int SD_ROM_MAX_FILES = 64;
+// Longest file name handled, including the NUL. FAT short names are 8.3 and
+// VFAT allows 255, but 64 covers every realistic ROM name while keeping the
+// listing array and the type 5 packet entries small.
+constexpr int SD_ROM_NAME_MAX = 64;
+// Slack demanded on top of the image before a save is attempted. FAT allocates
+// in clusters and the directory entry itself costs space, so a save sized to
+// exactly the free bytes can still fail half-written; refusing early keeps
+// that case out of the .part cleanup path.
+constexpr uint32_t SD_SAVE_MARGIN_BYTES = 64 * 1024;
+// Unit of a file read/write. Large enough that the per-call overhead of the
+// FAT layer disappears against the transfer, small enough to sit on the loop
+// task's stack budget without a heap allocation.
+constexpr size_t SD_IO_CHUNK = 4096;
+
+// ------------------------------------------------------------------- menu
+// The ROM picker shown at boot and on a BtnC hold. Drawn with ordinary display
+// primitives rather than the band DMA path: no picture is being emulated while
+// it is up, so there is nothing to hide the transfer under and the blocking
+// push is both simpler and safe next to the SD accesses the menu makes.
+//
+// 24px rows at text size 2 (16px glyphs) leaves 8px of leading, which is what
+// makes a row comfortably tappable on a 320x240 panel without a hit box that
+// disagrees with what is drawn.
+constexpr int MENU_ROW_H = 24;
+constexpr int MENU_TOP_Y = 30;   // below the title line
+constexpr int MENU_VISIBLE_ROWS = 7;
+static_assert(MENU_TOP_Y + MENU_VISIBLE_ROWS * MENU_ROW_H <= 220,
+              "menu rows must leave room for the footer guide at the bottom of the panel");
+// D-pad auto-repeat while a direction is held: the first repeat waits, the rest
+// come quickly. Same shape as every console menu, and the numbers are the usual
+// ones — short enough that a 60-entry card is not a chore, long enough that a
+// deliberate single step does not double-fire.
+constexpr uint32_t MENU_REPEAT_DELAY_MS = 400;
+constexpr uint32_t MENU_REPEAT_MS = 120;
+// Poll period while the menu is up. ~60Hz, so touch and pad feel the same as in
+// game, and slow enough to leave core 1 mostly idle for the UDP replies.
+constexpr uint32_t MENU_TICK_MS = 16;
+// Title shown for the first row (the flash-embedded image). The row reads
+// "<title>[Built-in]" — the title names the game, the fixed tag names where it
+// lives; the tag itself stays in menu.cpp because it never changes. Kept here,
+// not in menu.cpp, because the title must change when data/game.nes does.
+constexpr char MENU_BUILTIN_TITLE[] = "KARYUDO";
+
 // --------------------------------------------------------------------- UDP
 constexpr uint16_t UDP_PORT = 5555;
 constexpr uint8_t UDP_PACKET_SIZE = 8;
@@ -236,6 +313,9 @@ constexpr uint8_t UDP_DEBUG_HEADER = 7;
 constexpr int UDP_DEBUG_CHUNK = 1400;   // stays inside a 1500-byte MTU
 constexpr uint8_t UDP_CTRL_RESET = 0x01;   // byte [6] bit 0
 constexpr uint8_t UDP_CTRL_VOLUME = 0x02;   // byte [6] bit 1, level in byte [7]
+// ROM 選択メニューを開く (ゲーム中のみ意味を持つ)。プロコンの HOME など、
+// NES のパッドビットに居場所のないボタンをメニュー呼び出しに使うための口。
+constexpr uint8_t UDP_CTRL_MENU = 0x04;   // byte [6] bit 2
 
 // Cartridge swap over WiFi. The ROM arrives in chunks because a .nes image is far
 // past any MTU; it is staged in PSRAM and only handed to the core once the whole
@@ -276,10 +356,119 @@ constexpr uint32_t ROM_MAX_SIZE = 1024 * 1024;
 // BEGIN byte [7] bit 0: install the cart without resetting the CPU, the same
 // semantics as the web build's nes_swap_rom.
 constexpr uint8_t ROM_FLAG_SWAP = 0x01;
+// BEGIN byte [7] bit 1: also write the image to the SD card under the name
+// carried in the BEGIN's optional tail (see UDP_ROM_BEGIN_NAMED_SIZE). Without
+// a name the flag is ignored — there would be nothing to call the file.
+//
+// The save is sequenced *before* the install and gates it: when this flag is
+// set and the write fails, the image is not installed either, so the running
+// game keeps going. The request is "put this on the card and play it", and
+// honouring only the second half would stop the current game for a cart that
+// is not on the card — leaving the user with neither after a reboot. The
+// failure is reported in the separate save event (UDP_ROM_SAVE_EVENT_SIZE).
+constexpr uint8_t ROM_FLAG_SAVE_SD = 0x02;
+// BEGIN byte [7] bit 2: do not install the image, only save it. Lets the
+// browser fill the card without interrupting whatever is running, which is the
+// difference between "add to my library" and "play this now".
+constexpr uint8_t ROM_FLAG_NO_LOAD = 0x04;
+// BEGIN with a file name appended:
+//   ... the 16 bytes above ... | nameLen u8 | name[nameLen]
+//
+// Length-discriminated rather than flag-discriminated: a sender that predates
+// this sends exactly UDP_ROM_BEGIN_SIZE bytes, so anything longer is
+// unambiguously the new form and anything equal is unambiguously the old one.
+// A flag would have needed the old firmware to have reserved a bit for it,
+// which it did not.
+//
+// The name is *not* trusted as a path. It is reduced to a basename and put
+// through sdRomSanitizeName() before it touches the filesystem, so at most it
+// determines what the file inside SD_ROMS_DIR is called. A name that sanitises
+// to something different is rejected outright with SdStatus::BadName rather
+// than silently saved under the mangled spelling.
+constexpr uint8_t UDP_ROM_BEGIN_NAMED_SIZE = UDP_ROM_BEGIN_SIZE + 1;   // minimum with an (empty) name field
+// Reported once the SD write has been attempted, in a separate datagram: the
+// END ACK goes out from the UDP task the moment the CRC checks, while the save
+// happens later on core 1 at a frame boundary. Making the sender wait for the
+// ACK until then would hold the transfer open across a ~1-2s card write.
+//   'N','S' | version | UDP_TYPE_ROM | session u16 LE | SdStatus | 0
+constexpr uint8_t UDP_ROM_SAVE_EVENT_SIZE = 8;
 // How long a half-finished transfer keeps owning the staging buffer. A sender
 // that dies mid-ROM would otherwise lock out every later attempt, so a new
 // session may take over once the old one has been quiet this long.
 constexpr uint32_t ROM_SESSION_TIMEOUT_MS = 3000;
+// SD card commands. Separate from type 4 because type 4 is a bulk transfer with
+// its own session state machine, while these are single request/reply pairs
+// against the filesystem — folding them in would mean a LIST could be rejected
+// as BUSY by a half-finished ROM upload it has nothing to do with.
+//
+// Every request is handled on core 1 at a frame boundary, never in the UDP
+// task: the card shares its SPI bus with the panel (see the SD section below),
+// so an access from core 0 could land mid-band. The task therefore only latches
+// the request, and the reply is sent from the frame loop once the work is done.
+// One request is held at a time; a second arriving while the first is pending
+// is answered immediately with SdStatus::Busy.
+//
+// Request layout, all ops:
+//   [0..1] 'N','P'
+//   [2]    version
+//   [3]    UDP_TYPE_SD
+//   [4..5] seq u16 LE      — echoed in every reply, so a late answer to an
+//                            abandoned request is discardable
+//   [6]    op
+//   [7]    0 (reserved)
+//   [8..]  op-specific payload, described per op below
+constexpr uint8_t UDP_TYPE_SD = 5;
+constexpr uint8_t UDP_SD_HEADER = 8;
+// op 0 LIST: no payload.
+constexpr uint8_t UDP_SD_OP_LIST = 0;
+// op 1 LOAD: nameLen u8 | name[nameLen]. Reads the file into staging and
+// installs it, i.e. the network equivalent of picking a row in the menu.
+constexpr uint8_t UDP_SD_OP_LOAD = 1;
+// op 2 DELETE: nameLen u8 | name[nameLen].
+constexpr uint8_t UDP_SD_OP_DELETE = 2;
+// op 3 RENAME: fromLen u8 | from[fromLen] | toLen u8 | to[toLen]. Refuses to
+// overwrite an existing target (SdStatus::Exists) — the confirmation belongs in
+// the UI that has a user to ask.
+constexpr uint8_t UDP_SD_OP_RENAME = 3;
+
+// Reply to LOAD / DELETE / RENAME, one datagram:
+//   [0..1] 'N','S'
+//   [2]    version
+//   [3]    op echo
+//   [4..5] seq echo u16 LE
+//   [6]    SdStatus
+//   [7]    0
+constexpr uint8_t UDP_SD_ACK_SIZE = 8;
+
+// Reply to LIST, split across as many datagrams as the entries need:
+//   [0..1]   'N','S'
+//   [2]      version
+//   [3]      UDP_SD_OP_LIST
+//   [4..5]   seq echo u16 LE
+//   [6]      SdStatus       — anything but Ok means the rest is absent
+//   [7]      0
+//   [8]      part u8        — 0-based index of this datagram
+//   [9]      nparts u8      — total datagrams in this reply
+//   [10..11] total u16 LE   — entries in the whole listing, not in this part
+//   [12..13] count u16 LE   — entries carried by this datagram
+//   [14..21] totalBytes u64 LE  — card capacity
+//   [22..29] freeBytes  u64 LE  — card free space
+//   [30..]   count entries, each: size u32 LE | nameLen u8 | name[nameLen]
+//
+// The capacity fields repeat in every part rather than riding only on part 0,
+// so a receiver that lost part 0 to a dropped datagram still has them once it
+// has retried. nparts is always at least 1: an empty card answers with a single
+// part carrying count=0, which is how "mounted but no ROMs" is told apart from
+// "no reply at all".
+constexpr uint8_t UDP_SD_LIST_HEADER = 30;
+// Ceiling on one LIST datagram, matching the other split replies here.
+constexpr int UDP_SD_CHUNK = 1400;
+// Worst-case bytes one entry occupies: size u32 + nameLen u8 + the longest name
+// the firmware will list.
+constexpr int UDP_SD_ENTRY_MAX = 4 + 1 + SD_ROM_NAME_MAX;
+static_assert(UDP_SD_LIST_HEADER + UDP_SD_ENTRY_MAX <= UDP_SD_CHUNK,
+              "a LIST datagram must hold at least one entry, or the split cannot make progress");
+
 // 'N','P' | version | type | seq u16 LE | mask u64 LE
 constexpr uint8_t UDP_PIN_PACKET_SIZE = 14;
 // Only bits 0..59 are meaningful (pins 1..60); applyPinMask ignores the rest.
@@ -338,6 +527,30 @@ constexpr uint32_t JOY_REPROBE_MS = 1000;
 // and red on G9 back when the unit lived on PORT.B.
 constexpr int DUAL_BTN_PIN_BLUE = 18;   // blue button  -> NES B
 constexpr int DUAL_BTN_PIN_RED = 17;   // red button   -> NES A
+
+// -------------------------------------------------------------- head touch
+// M5Stack 公式 StackChan の頭頂部タッチセンサー (Si12T)。3 ゾーンを前後に
+// 2 回なぞる (なでなで) とゲーム中でも ROM 選択メニューに戻る。
+//
+// Grove と違ってポーリングは core 1 の loop から直接行う: 読むのは 1 バイトの
+// レジスタ 1 つだけで、タスクと atomic を 1 組増やすほどの仕事ではない。
+//
+// 16ms 周期 (毎フレーム相当)。当初は 33ms に絞っていたが、速くゴシゴシした
+// ときに隣接ゾーンが同じポーリングで同時に立ってしまい、移動 (距離) として
+// 数えられず取りこぼした (実機ログで確認)。1 バイト読み ~0.3ms/フレームは
+// フレーム予算 16.6ms に対して誤差の範囲。
+constexpr uint32_t HEAD_TOUCH_POLL_MS = 16;
+// メニューを開くのに要求する「撫でた距離」。距離は隣ゾーンへの立ち上がりと
+// 「前のゾーンが離れて隣が残る」降りの両エッジで伸び、実機では自然なひと
+// 撫でがおよそ 2 になる (シリアルの travel ログで実測)。回数 (ストローク)
+// 数えではなく距離にしたのは、指を離さず連続でゴシゴシする撫で方を 1 回と
+// 数え損ねないため。閾値 4 = ふた撫でぶん。2 (ひと撫で) も試したが敏感
+// すぎたため、誤爆耐性を含めてこの値に落ち着いた (ユーザー実機調整の結果)。
+// 単発の触れは 0〜1 止まりなので届かない。
+constexpr int HEAD_TOUCH_TRAVEL_TO_MENU = 4;
+// 動き (新しいゾーンへの移動) がこれだけ途絶えたら距離を数え直す。指を
+// 置いたまま考えている・単発の一撫でを、後から来る撫でと合算しないため。
+constexpr uint32_t HEAD_TOUCH_TRAVEL_RESET_MS = 1000;
 
 // NES pad bit layout (matches Pad::setButtons and the UDP protocol).
 constexpr uint8_t NES_BTN_A = 0x01;

@@ -11,12 +11,23 @@
 #include <esp_heap_caps.h>
 #include <esp_rom_crc.h>
 #include <atomic>
+#include <cstring>
 #include <new>
 
 #include "../../core/nes.h"
 #include "config.h"
 #include "grove_input.h"
+#include "head_touch.h"
+#include "menu.h"
+#include "sd_rom.h"
 #include "secrets.h"
+
+// What the frame loop is currently doing. The two modes are mutually exclusive
+// owners of the panel and the speaker: Game drives them through the band DMA
+// path and the audio ring, Menu through ordinary blocking primitives with both
+// idle. stopVideoAudio() / startGame() are the handover in each direction.
+enum class AppMode : uint8_t { Menu, Game };
+static AppMode g_mode = AppMode::Game;
 
 // Statically allocated in internal SRAM (not PSRAM): ppu.framebuffer is handed
 // to pushImageDMA, and the LCD DMA engine cannot read from PSRAM reliably.
@@ -35,6 +46,10 @@ static std::atomic<uint32_t> g_lastRxMs{0};
 static std::atomic<uint64_t> g_pinMask{PIN_MASK_ALL_OK};
 // Set by the UDP task, consumed once at a frame boundary by the emulation loop.
 static std::atomic<bool> g_resetRequested{false};
+// Set by the BtnC hold, consumed at a frame boundary. Plain rather than atomic
+// would work — it is written and read on core 1 only — but it is latched the
+// same way as the rest so a future sender on core 0 needs no change here.
+static std::atomic<bool> g_menuRequested{false};
 // Debug snapshot request: the flag plus where to send the answer. Latched the
 // same way as the other controls so the snapshot is taken between frames, when
 // the CPU state is coherent, rather than mid-instruction from the UDP task.
@@ -59,6 +74,49 @@ static uint8_t* g_romBuf = nullptr;
 static uint32_t g_romSize = 0;
 static uint8_t g_romFlags = 0;
 static std::atomic<bool> g_romApplyRequested{false};
+// The other half of the staging interlock, in the opposite direction: core 1
+// sets this while it is filling g_romBuf from the SD card, and the UDP task's
+// BEGIN refuses with BUSY for as long as it is set. g_romApplyRequested alone
+// cannot cover that case — it means "core 0 has published an image", which is
+// exactly not what an SD load does.
+static std::atomic<bool> g_stagingBusy{false};
+// The SD save a completed type 4 transfer asked for, published alongside the
+// image itself. Read only when g_romApplyRequested has been observed with an
+// acquire load, so it needs no ordering of its own.
+static bool g_romSaveToSd = false;
+static char g_romSaveName[SD_ROM_NAME_MAX] = {};
+// Where to report the save's outcome, since the END ACK has already gone out by
+// the time core 1 writes the card.
+static sockaddr_in g_romSaveReplyTo = {};
+
+// What one applyRomRequest() call did, for a caller that has to react to it.
+//
+// Three fields rather than a single "should I start the game" bool because the
+// picker needs to tell the two failure shapes apart: nothing pending at all is
+// not an error, while a push that was pending and did not install has a reason
+// worth putting on screen. `installed` is the only safe basis for a launch —
+// deriving it from the flags at the call site is exactly the bug this replaced,
+// since NO_LOAD is clear on a save-and-play push whose save failed.
+struct RomApplyResult {
+    bool handled = false;   // a staged image was serviced by this call
+    bool installed = false;   // ...and a cart is now loaded from it
+    SdStatus saveStatus = SdStatus::Ok;   // Ok when the card was not asked for anything
+};
+
+// A type 5 request, latched by the UDP task and serviced by the frame loop.
+//
+// The payload is copied out of the datagram rather than pointed into it: the
+// receive buffer is reused by the very next recvfrom(), so by the time core 1
+// looks the name could be part of an unrelated packet. Plain (non-atomic)
+// fields published by the release store on g_sdRequested, exactly as the ROM
+// staging buffer is.
+static std::atomic<bool> g_sdRequested{false};
+static uint8_t g_sdOp = 0;
+static uint16_t g_sdSeq = 0;
+static char g_sdArgA[SD_ROM_NAME_MAX] = {};
+static char g_sdArgB[SD_ROM_NAME_MAX] = {};
+static sockaddr_in g_sdReplyTo = {};
+
 // The UDP socket, shared so loop() can answer directly. lwIP's sendto is
 // thread-safe, and replying from the emulation core avoids handing the snapshot
 // buffer across tasks while it is being filled.
@@ -81,7 +139,12 @@ static bool g_wifiConnected = false;
 
 // Transfer state, owned entirely by the UDP task. Kept at file scope only so the
 // packet handler can be split out of udpTask's loop for readability.
-static bool g_romActive = false;   // a BEGIN has been accepted and not yet finished
+// Written only by the UDP task, but read by core 1's staging claim, so it is
+// atomic. Left with the default (seq_cst) operators everywhere: launchSdRom()
+// needs its claim store and this load to sit in one total order, and
+// acquire/release would not give that — they only order each core's own writes
+// against its own reads, which is exactly not what a two-flag handshake needs.
+static std::atomic<bool> g_romActive{false};   // a BEGIN has been accepted and not yet finished
 static uint16_t g_romSession = 0;
 static uint32_t g_romExpectedSize = 0;
 static uint32_t g_romExpectedCrc = 0;
@@ -89,6 +152,48 @@ static uint8_t g_romPendingFlags = 0;
 static uint16_t g_romNextChunk = 0;   // the chunk index a DATA packet must carry
 static uint32_t g_romReceived = 0;   // bytes staged so far
 static uint32_t g_romLastRxMs = 0;   // for the stale-session takeover
+// The name from a BEGIN's optional tail, held until END publishes it. Empty
+// when the sender used the old fixed-length BEGIN.
+static char g_romPendingName[SD_ROM_NAME_MAX] = {};
+// The BEGIN's source, so the save outcome reaches the same peer that asked for
+// it even if some other host is also talking to the device.
+static sockaddr_in g_romPendingFrom = {};
+// The last session whose END was accepted, so a resent END (its ACK was lost)
+// is answered OK again instead of BUSY or NO_SESSION.
+//
+// Why not reuse g_romActive for this: END deliberately clears it, and it has to
+// — leaving it set would let a stale session block the next BEGIN and would keep
+// DATA writing into a buffer core 1 already owns. The completed session is a
+// separate, narrower fact: "this exact transfer already finished, so say so".
+//
+// Why a single slot rather than a set: the sender is a stop-and-wait loop with
+// one transfer in flight, so the only END that can be resent is the most recent
+// one. Owned entirely by the UDP task, like the rest of the transfer state.
+static bool g_romCompletedValid = false;
+static uint16_t g_romCompletedSession = 0;
+
+// Copy a length-prefixed name field out of a datagram.
+//
+// Returns the number of bytes consumed (the length byte plus the name), or -1
+// when the field runs past what actually arrived. Every string this protocol
+// carries goes through here rather than being read inline, so a lying length
+// byte is rejected in one place instead of in each op's parser.
+static int readNameField(const uint8_t* packet, int received, int offset, char* out, size_t cap) {
+    out[0] = '\0';
+    const bool noLengthByte = offset >= received;
+    if (noLengthByte) return -1;
+    const int len = packet[offset];
+    const bool runsPastDatagram = offset + 1 + len > received;
+    if (runsPastDatagram) return -1;
+    // A name that does not fit is not silently truncated: a truncated name is a
+    // *different* file, and acting on it would delete or overwrite the wrong
+    // one. The caller sees the empty string and answers BadName.
+    const bool tooLong = (size_t)len >= cap;
+    if (tooLong) return -1;
+    memcpy(out, packet + offset + 1, (size_t)len);
+    out[len] = '\0';
+    return 1 + len;
+}
 
 static void sendRomAck(int sock, const sockaddr_in& to, uint8_t op, uint16_t session, uint16_t chunk, uint8_t status) {
     uint8_t ack[UDP_ROM_ACK_SIZE] = {};
@@ -108,33 +213,74 @@ static void sendRomAck(int sock, const sockaddr_in& to, uint8_t op, uint16_t ses
     ::sendto(sock, ack, sizeof(ack), 0, (const sockaddr*)&to, sizeof(to));
 }
 
-// Validate the staged image the same way nes::loadRom will, so a cart that cannot
+// Validate an image the same way nes::loadRom will, so a cart that cannot
 // possibly load is rejected while the sender is still listening — rather than
 // failing on core 1 where the only report would be a serial line.
-static uint8_t checkStagedRom() {
-    const bool magicOk = g_romBuf[0] == 'N' && g_romBuf[1] == 'E' && g_romBuf[2] == 'S' && g_romBuf[3] == 0x1A;
+//
+// Takes the buffer rather than reading g_romBuf directly: the same question has
+// to be answered for an image read off the SD card, which never passes through
+// staging on the UDP task's schedule. Keeping one implementation is what stops
+// the two paths from disagreeing about which mappers this build supports.
+static uint8_t romHeaderStatus(const uint8_t* buf, uint32_t size) {
+    // Takes the size rather than trusting the caller to have checked it: BEGIN
+    // accepts any total from 1 byte up, so a 3-byte transfer reaches END and
+    // would otherwise have its mapper number read out of never-written staging.
+    const bool tooShortForHeader = size < 16;
+    if (tooShortForHeader) return UDP_ROM_STATUS_BAD_HEADER;
+
+    const bool magicOk = buf[0] == 'N' && buf[1] == 'E' && buf[2] == 'S' && buf[3] == 0x1A;
     if (!magicOk) return UDP_ROM_STATUS_BAD_HEADER;
 
     // Archaic iNES: bytes 12-15 should be zero, and when they are not (e.g.
     // "DiskDude!" garbage) flags7's upper nibble is not a mapper number. Mirrors
     // cartridge.cpp's dirtyHeader rule exactly — disagreeing would let a ROM pass
     // here and then fail to load.
-    const bool dirtyHeader = g_romBuf[12] || g_romBuf[13] || g_romBuf[14] || g_romBuf[15];
-    const int mapperNum = (g_romBuf[6] >> 4) | (dirtyHeader ? 0 : (g_romBuf[7] & 0xF0));
+    const bool dirtyHeader = buf[12] || buf[13] || buf[14] || buf[15];
+    const int mapperNum = (buf[6] >> 4) | (dirtyHeader ? 0 : (buf[7] & 0xF0));
     const bool mapperSupported = mapperNum == 0 || mapperNum == 1 || mapperNum == 2 || mapperNum == 3 ||
                                  mapperNum == 4 || mapperNum == 24 || mapperNum == 26;
     if (!mapperSupported) return UDP_ROM_STATUS_UNSUPPORTED_MAPPER;
     return UDP_ROM_STATUS_OK;
 }
 
+// Reserve the PSRAM staging buffer on first use, and report whether it exists.
+//
+// Reserved once and never released: a buffer that comes and goes would race
+// core 1 and fragment PSRAM for nothing. 1MB against 8MB is cheap.
+//
+// Called from both cores — the UDP task on a BEGIN, core 1 before an SD load —
+// but never concurrently: core 1 only asks while holding g_stagingBusy, which
+// the BEGIN path checks first, so the allocation itself needs no lock.
+static bool ensureStagingBuffer() {
+    const bool needBuffer = g_romBuf == nullptr;
+    if (needBuffer) g_romBuf = (uint8_t*)heap_caps_malloc(ROM_MAX_SIZE, MALLOC_CAP_SPIRAM);
+    return g_romBuf != nullptr;
+}
+
 static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* packet, int received) {
     const uint16_t session = (uint16_t)(packet[4] | (packet[5] << 8));
     const uint8_t op = packet[6];
 
-    // The staging buffer belongs to core 1 until it has installed the ROM. Taking
-    // a new transfer now would overwrite the image out from under it.
+    // The staging buffer belongs to core 1 until it has installed the ROM, and
+    // equally while core 1 is filling it from the SD card. Taking a new transfer
+    // in either window would overwrite the image out from under it.
     const bool applyPending = g_romApplyRequested.load(std::memory_order_acquire);
-    if (applyPending) {
+    // seq_cst, unlike the acquire above: this load is the UDP half of
+    // launchSdRom()'s claim handshake, and only a total order over both flags
+    // stops the two cores from each deciding the buffer is theirs.
+    const bool loopOwnsStaging = g_stagingBusy.load(std::memory_order_seq_cst);
+    // Checked before the busy gate, not after: this END's ACK was lost, and the
+    // transfer it belongs to is already accepted — the apply it is waiting on is
+    // the very thing that makes the gate refuse. Answering BUSY here would fail a
+    // transfer the device actually completed, and once the apply finished the
+    // resend would fall through to the NO_SESSION reply instead, so neither
+    // ordering of the retry can succeed without this.
+    const bool endOfCompleted = op == UDP_ROM_OP_END && g_romCompletedValid && session == g_romCompletedSession;
+    if (endOfCompleted) {
+        sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_OK);
+        return;
+    }
+    if (applyPending || loopOwnsStaging) {
         sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_BUSY);
         return;
     }
@@ -163,23 +309,49 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
             sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_TOO_BIG);
             return;
         }
-        // Reserved once and never released: a buffer that comes and goes would
-        // race core 1 and fragment PSRAM for nothing. 1MB against 8MB is cheap.
-        const bool needBuffer = g_romBuf == nullptr;
-        if (needBuffer) {
-            g_romBuf = (uint8_t*)heap_caps_malloc(ROM_MAX_SIZE, MALLOC_CAP_SPIRAM);
+
+        // The mirror image of launchSdRom()'s claim: publish the intent, then
+        // re-read the other core's flag, and stand down if it got there first.
+        // The g_stagingBusy test at the top of this function is not enough on
+        // its own — it is a bare load, so core 1 can pass its own re-check in
+        // the gap between that load and here, leaving both cores believing they
+        // own g_romBuf. Only the symmetric store-then-recheck, in one seq_cst
+        // total order, makes at most one of them win.
+        //
+        // Set before ensureStagingBuffer() for the same reason core 1 allocates
+        // after its claim: the allocation writes g_romBuf, and two concurrent
+        // first-time allocations would leak one buffer and split the cores
+        // across two others.
+        g_romActive.store(true, std::memory_order_seq_cst);
+        const bool loopWon = g_stagingBusy.load(std::memory_order_seq_cst);
+        if (loopWon) {
+            g_romActive.store(false, std::memory_order_seq_cst);
+            sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_BUSY);
+            return;
         }
-        if (!g_romBuf) {
+        if (!ensureStagingBuffer()) {
+            g_romActive.store(false, std::memory_order_seq_cst);
             sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_ALLOC);
             return;
         }
 
-        g_romActive = true;
+        // A fresh BEGIN retires the completed-session memory, including the case
+        // where the sender reuses the same session number: from here on this
+        // session means the transfer starting now, and answering a later END of
+        // it from the old record would report success for bytes never received.
+        g_romCompletedValid = false;
         g_romSession = session;
         g_romExpectedSize = total;
         g_romExpectedCrc = (uint32_t)packet[12] | ((uint32_t)packet[13] << 8) | ((uint32_t)packet[14] << 16) |
                            ((uint32_t)packet[15] << 24);
         g_romPendingFlags = packet[7];
+        // Length-discriminated, not flag-discriminated: a sender that predates
+        // the SD support sends exactly UDP_ROM_BEGIN_SIZE bytes and gets the old
+        // behaviour, with no bit it would have had to reserve in advance.
+        g_romPendingName[0] = '\0';
+        const bool hasNameField = received >= UDP_ROM_BEGIN_NAMED_SIZE;
+        if (hasNameField) readNameField(packet, received, UDP_ROM_BEGIN_SIZE, g_romPendingName, SD_ROM_NAME_MAX);
+        g_romPendingFrom = from;
         g_romNextChunk = 0;
         g_romReceived = 0;
         g_romLastRxMs = millis();
@@ -257,7 +429,7 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
             sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_CRC);
             return;
         }
-        const uint8_t headerStatus = checkStagedRom();
+        const uint8_t headerStatus = romHeaderStatus(g_romBuf, g_romReceived);
         const bool unloadable = headerStatus != UDP_ROM_STATUS_OK;
         if (unloadable) {
             g_romActive = false;
@@ -267,12 +439,92 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
 
         g_romSize = g_romReceived;
         g_romFlags = g_romPendingFlags;
+        // A save with nothing to call the file is not a save. Dropping the flag
+        // rather than inventing a name keeps the card free of images the user
+        // cannot recognise later.
+        const bool nameGiven = g_romPendingName[0] != '\0';
+        g_romSaveToSd = (g_romPendingFlags & ROM_FLAG_SAVE_SD) != 0 && nameGiven;
+        memcpy(g_romSaveName, g_romPendingName, sizeof(g_romSaveName));
+        g_romSaveReplyTo = g_romPendingFrom;
         g_romActive = false;
-        // Publishes the buffer and the two plain globals above to core 1.
+        // Recorded before the ACK goes out, so even a retry that races the reply
+        // finds the transfer already marked complete.
+        g_romCompletedValid = true;
+        g_romCompletedSession = session;
+        // Publishes the buffer and the plain globals above to core 1.
         g_romApplyRequested.store(true, std::memory_order_release);
         sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_OK);
         return;
     }
+}
+
+// ------------------------------------------------------------- SD commands
+
+// Single-datagram reply, used by LOAD / DELETE / RENAME and by a LIST that
+// failed before it had anything to list.
+static void sendSdAck(int sock, const sockaddr_in& to, uint8_t op, uint16_t seq, SdStatus status) {
+    uint8_t ack[UDP_SD_ACK_SIZE] = {};
+    ack[0] = 'N';
+    ack[1] = 'S';
+    ack[2] = UDP_PROTOCOL_VERSION;
+    ack[3] = op;
+    ack[4] = seq & 0xFF;
+    ack[5] = seq >> 8;
+    ack[6] = (uint8_t)status;
+    ::sendto(sock, ack, sizeof(ack), 0, (const sockaddr*)&to, sizeof(to));
+}
+
+// Latch a type 5 request for the frame loop.
+//
+// Nothing here touches the card: the SPI bus is shared with the panel, and this
+// runs on core 0 where there is no way to know whether a band is in flight. The
+// only work done on this side is validating that the datagram is self-consistent
+// and copying the arguments somewhere the receive buffer's reuse cannot reach.
+static void handleSdPacket(int sock, const sockaddr_in& from, const uint8_t* packet, int received) {
+    const uint16_t seq = (uint16_t)(packet[4] | (packet[5] << 8));
+    const uint8_t op = packet[6];
+
+    const bool known = op == UDP_SD_OP_LIST || op == UDP_SD_OP_LOAD || op == UDP_SD_OP_DELETE || op == UDP_SD_OP_RENAME;
+    if (!known) return;
+
+    // One outstanding request at a time. Queueing would need a depth, a policy
+    // for overflow and an ordering guarantee across two cores, for a protocol
+    // whose sender is a stop-and-wait loop that has no reason to pipeline.
+    const bool alreadyPending = g_sdRequested.load(std::memory_order_acquire);
+    if (alreadyPending) {
+        sendSdAck(sock, from, op, seq, SdStatus::Busy);
+        return;
+    }
+
+    char argA[SD_ROM_NAME_MAX] = {};
+    char argB[SD_ROM_NAME_MAX] = {};
+    const bool needsName = op != UDP_SD_OP_LIST;
+    if (needsName) {
+        const int consumed = readNameField(packet, received, UDP_SD_HEADER, argA, sizeof(argA));
+        const bool malformed = consumed < 0 || argA[0] == '\0';
+        if (malformed) {
+            sendSdAck(sock, from, op, seq, SdStatus::BadName);
+            return;
+        }
+        const bool needsSecondName = op == UDP_SD_OP_RENAME;
+        if (needsSecondName) {
+            const int consumedB = readNameField(packet, received, UDP_SD_HEADER + consumed, argB, sizeof(argB));
+            const bool malformedB = consumedB < 0 || argB[0] == '\0';
+            if (malformedB) {
+                sendSdAck(sock, from, op, seq, SdStatus::BadName);
+                return;
+            }
+        }
+    }
+
+    g_sdOp = op;
+    g_sdSeq = seq;
+    memcpy(g_sdArgA, argA, sizeof(g_sdArgA));
+    memcpy(g_sdArgB, argB, sizeof(g_sdArgB));
+    g_sdReplyTo = from;
+    // Publishes the fields above to core 1, the same pairing the ROM staging
+    // buffer uses.
+    g_sdRequested.store(true, std::memory_order_release);
 }
 
 // ---------------------------------------------------------------- UDP task
@@ -342,12 +594,17 @@ static void udpTask(void*) {
             handleRomPacket(sock, from, packet, received);
             continue;   // not controller input: leave g_lastRxMs alone
         }
+        if (type == UDP_TYPE_SD) {
+            handleSdPacket(sock, from, packet, received);
+            continue;   // not controller input: leave g_lastRxMs alone
+        }
         if (type == UDP_TYPE_CTRL) {
             const uint8_t cmd = packet[6];
             // Latch rather than act here: this runs on core 0 while the emulator
             // is mid-frame on core 1, so the work happens at a frame boundary.
             if (cmd & UDP_CTRL_RESET) g_resetRequested.store(true, std::memory_order_relaxed);
             if (cmd & UDP_CTRL_VOLUME) g_volume.store(packet[7], std::memory_order_relaxed);
+            if (cmd & UDP_CTRL_MENU) g_menuRequested.store(true, std::memory_order_relaxed);
             continue;
         }
 
@@ -388,6 +645,10 @@ static bool connectWifi() {
 }
 
 static void joinBand();
+// Defined with the rest of the mode handover, below the audio and display state
+// they touch; declared here because setup() picks the starting mode.
+static void startGame();
+static void enterMenu();
 
 static void haltWithError(const char* text) {
     // A band may still be in flight: applyRomRequest() can reach here mid-frame,
@@ -438,6 +699,27 @@ void setup() {
     // Before WiFi: the Grove controllers work regardless of network state.
     groveInputInit();
 
+    // Mount the card here, while the display is still being driven by ordinary
+    // blocking primitives. Doing it after the frame loop has started would mean
+    // reaching for the shared SPI bus with a band possibly in flight; setup()
+    // has no bands outstanding by construction, so this is the one place where
+    // the ordering costs nothing to guarantee.
+    // 内部 I2C 上のセンサーなので、外部 I2C を張り替える groveInputInit() とは
+    // 独立に呼べる。StackChan ボディが無ければ検出に失敗して以降無効になるだけで、
+    // 素の CoreS3 の起動には影響しない。
+    headTouchInit();
+
+    sdRomInit();
+    int sdRomsFound = 0;
+    if (sdRomMounted()) {
+        static SdRomEntry entries[SD_ROM_MAX_FILES];
+        sdRomsFound = sdRomScan(entries, SD_ROM_MAX_FILES);
+        Serial.printf("SD: %d ROM(s) in %s\n", sdRomsFound, SD_ROMS_DIR);
+        for (int i = 0; i < sdRomsFound; i++) {
+            Serial.printf("SD:   %s (%u bytes)\n", entries[i].name, (unsigned)entries[i].size);
+        }
+    }
+
     g_wifiConnected = connectWifi();
     if (g_wifiConnected) {
         M5.Display.fillScreen(TFT_BLACK);
@@ -455,21 +737,25 @@ void setup() {
     g_nes.apu.setSampleRate(AUDIO_SAMPLE_RATE);
     g_nes.powerOn();
 
-    // Prime the speaker queue with silence so the first real chunks arrive with
-    // margin instead of racing an already-empty hardware buffer.
-    for (int i = 0; i < 2; i++) {
-        memset(g_chunk[g_chunkIndex], 0, sizeof(g_chunk[0]));
-        M5.Speaker.playRaw(g_chunk[g_chunkIndex], AUDIO_CHUNK_SAMPLES, AUDIO_SAMPLE_RATE, false, 1, SPEAKER_CHANNEL);
-        g_chunkIndex = (g_chunkIndex + 1) % AUDIO_CHUNK_SLOTS;
-    }
-
     // NB: no startWrite() here. Holding the bus open across the whole run leaves
     // the panel's address window owned by whatever ran last, so pushes land at
     // the wrong offset; pushImageDMA sets the window itself per call.
     Serial.printf("DISPLAY: %dx%d rot=%d push=(%d,%d,%d,%d)\n", M5.Display.width(), M5.Display.height(),
                   M5.Display.getRotation(), SCREEN_X_OFFSET, 0, NES_WIDTH, NES_HEIGHT);
 
-    M5.Display.fillScreen(TFT_BLACK);
+    // The picker only earns the boot delay when there is something on the card
+    // to pick. With no card, or an empty /roms, the only choice it could offer
+    // is the built-in image that was just loaded, so a device without an SD
+    // card boots exactly as it always has — straight into the game.
+    const bool haveChoice = sdRomsFound > 0;
+    if (haveChoice) {
+        enterMenu();
+        // Left up to the picker: it draws the whole panel, and a WiFi warning in
+        // the footer would land under the guide line it draws there.
+        return;
+    }
+
+    startGame();
     if (!g_wifiConnected) {
         M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
         showMessage("WiFi: failed", 228, 1);
@@ -481,13 +767,32 @@ void setup() {
 // Buttons that live on the CoreS3 itself: the three touch zones below the
 // screen. Start/Select have no home on the Grove units (the joystick's centre
 // press doubles as Start, but Select needs somewhere), and a long-press on the
-// right zone is the RESET button for standalone play.
+// right zone opens the ROM picker for standalone play.
+//
+// That hold used to be RESET. It was reassigned because the picker is the only
+// standalone way to reach a different cart, while RESET is still reachable —
+// over UDP type 2 from the browser, and from the picker itself by choosing the
+// running ROM again, which is a power-on rather than a reset but gets the user
+// to the same place. A device with no other button to spare has to spend the
+// one it has on the thing that cannot be done another way.
 static uint8_t touchButtonBits() {
     uint8_t bits = 0;
     if (M5.BtnA.isPressed()) bits |= NES_BTN_SELECT;
     if (M5.BtnB.isPressed()) bits |= NES_BTN_START;
-    if (M5.BtnC.wasHold()) g_resetRequested.store(true, std::memory_order_relaxed);
+    if (M5.BtnC.wasHold()) g_menuRequested.store(true, std::memory_order_relaxed);
     return bits;
+}
+
+// StackChan の頭を撫でる操作。BtnC 長押しと同じラッチを立てるだけで、実際の
+// 遷移は loop() のフレーム境界に任せる。
+//
+// 呼ぶのは applyInput() の中、つまり Game モードのフレームだけ。メニュー中は
+// loop() が先に return しているのでポーリング自体が走らず、パネルと SPI を
+// 触っているメニューの裏で I2C が動くこともない。
+static void applyHeadTouch() {
+    const bool swiped = headTouchSwiped();
+    if (!swiped) return;
+    g_menuRequested.store(true, std::memory_order_relaxed);
 }
 
 // Pad 1 is the OR of every local source (Grove units, touch zones) and the UDP
@@ -500,6 +805,9 @@ static void applyInput() {
     const uint8_t udp1 = udpStale ? 0 : g_padBits[1].load(std::memory_order_relaxed);
     g_nes.pad[0].setButtons(udp0 | groveInputBits() | touchButtonBits());
     g_nes.pad[1].setButtons(udp1);
+    // パッドのビットには寄与しない (撫でるのはメニューを開く操作であって
+    // ボタンではない) が、同じ「毎フレームの入力取り込み」の一部なのでここに置く。
+    applyHeadTouch();
 }
 
 // Push connector state into the core, but only on an actual change: applyPinMask
@@ -552,17 +860,18 @@ static void applyResetRequest() {
     Serial.println("RESET: console reset");
 }
 
-// Install a ROM that arrived over UDP, if one is waiting.
+// Hand an image to the core, whatever it came from.
 //
-// Runs at a frame boundary for the same reason as the reset above: the UDP task
-// stages the image mid-frame, and swapping the mapper out from under a running
-// instruction would fault. The acquire load pairs with the UDP task's release
-// store, so every staged byte is visible here.
-static void applyRomRequest() {
-    const bool requested = g_romApplyRequested.load(std::memory_order_acquire);
-    if (!requested) return;
-
-    const bool wantSwap = (g_romFlags & ROM_FLAG_SWAP) != 0;
+// Split out of applyRomRequest() because the SD path installs the same way from
+// a buffer that never went through the UDP session machinery: the mapper swap,
+// the fallback to the embedded image and the pace invalidation are properties of
+// *installing a cart*, not of how its bytes arrived. Returns whether the
+// requested image loaded — false still leaves a playable console, either the
+// previous cart (swap path) or the embedded ROM.
+//
+// Must be called at a frame boundary: swapping the mapper out from under a
+// running instruction would fault.
+static bool installRom(const uint8_t* data, uint32_t size, bool wantSwap) {
     bool ok = false;
     // The core allocates PRG/CHR through InternalRamAllocator, which throws when
     // internal SRAM runs out. A ROM the device cannot fit must leave the current
@@ -573,7 +882,7 @@ static void applyRomRequest() {
             // failed load leaves the running game untouched. The two therefore
             // coexist briefly and the new PRG may land in PSRAM — accepted, since
             // continuing to play matters more than that cart's speed.
-            auto m = nes::loadRom(g_romBuf, g_romSize);
+            auto m = nes::loadRom(data, size);
             if (m) {
                 g_nes.mapper = std::move(m);
                 g_nes.refreshMapperCaps();
@@ -593,7 +902,7 @@ static void applyRomRequest() {
             // which builds the replacement while the old one is still held, and on
             // this part that peak is enough to exhaust SRAM on a large ROM.
             g_nes.mapper.reset();
-            ok = g_nes.loadRom(g_romBuf, g_romSize);   // powerOn + refreshChrWindow included
+            ok = g_nes.loadRom(data, size);   // powerOn + refreshChrWindow included
         }
     } catch (const std::bad_alloc&) {
         ok = false;
@@ -621,13 +930,87 @@ static void applyRomRequest() {
     // described by the average built before this point.
     invalidateEmuDrawPace();
 
-    if (ok) Serial.printf("ROM: applied %u bytes%s\n", (unsigned)g_romSize, wantSwap ? " (no reset)" : "");
-    else Serial.printf("ROM: failed %u bytes\n", (unsigned)g_romSize);
+    if (ok) Serial.printf("ROM: applied %u bytes%s\n", (unsigned)size, wantSwap ? " (no reset)" : "");
+    else Serial.printf("ROM: failed %u bytes\n", (unsigned)size);
+    return ok;
+}
+
+// Install a ROM that arrived over UDP, if one is waiting.
+//
+// Runs at a frame boundary for the same reason as the reset above: the UDP task
+// stages the image mid-frame, and swapping the mapper out from under a running
+// instruction would fault. The acquire load pairs with the UDP task's release
+// store, so every staged byte is visible here.
+//
+// Reports what the push actually did, because "a ROM was waiting" and "a cart is
+// now loaded" are different questions and only this function can answer the
+// second: the caller cannot re-derive it from the flags, since a save that was
+// asked for and failed suppresses the install below. The picker needs the
+// difference to decide whether to start the game or stay up with the reason.
+static RomApplyResult applyRomRequest() {
+    RomApplyResult result = {};
+    const bool requested = g_romApplyRequested.load(std::memory_order_acquire);
+    if (!requested) return result;
+    result.handled = true;
+
+    // Ok when nothing was asked of the card, so the install condition below can
+    // be read without a second "was a save even wanted" test.
+    SdStatus& saveStatus = result.saveStatus;
+
+    // Saved before installing, for two reasons. The image is still exactly what
+    // the sender verified — installRom() does not modify staging, but a future
+    // change to it must not be able to alter what lands on the card. And a
+    // NO_LOAD transfer has no install to sequence against at all.
+    if (g_romSaveToSd) {
+        // The panel and the card share the SPI bus, so the in-flight band has to
+        // be off the wire before the write starts. This is what makes the whole
+        // save legal here and illegal in the UDP task.
+        joinBand();
+        char clean[SD_ROM_NAME_MAX];
+        sdRomSanitizeName(g_romSaveName, clean, sizeof(clean));
+        // Rejected rather than saved under the cleaned spelling: the sender then
+        // knows the name it will find on the card is not the one it asked for,
+        // and can offer the user the corrected one instead of guessing later.
+        const bool nameMangled = strcmp(clean, g_romSaveName) != 0;
+        saveStatus = nameMangled ? SdStatus::BadName : sdRomSave(clean, g_romBuf, g_romSize);
+        // A separate datagram, because the END ACK went out from the UDP task
+        // the moment the CRC checked — holding that ACK until the card write
+        // finished would stall the sender across a ~1-2s write.
+        const bool canReply = g_udpSock >= 0;
+        if (canReply) {
+            uint8_t event[UDP_ROM_SAVE_EVENT_SIZE] = {};
+            event[0] = 'N';
+            event[1] = 'S';
+            event[2] = UDP_PROTOCOL_VERSION;
+            event[3] = UDP_TYPE_ROM;
+            event[4] = g_romSession & 0xFF;
+            event[5] = g_romSession >> 8;
+            event[6] = (uint8_t)saveStatus;
+            ::sendto(g_udpSock, event, sizeof(event), 0, (const sockaddr*)&g_romSaveReplyTo, sizeof(g_romSaveReplyTo));
+        }
+        Serial.printf("ROM: save '%s' -> %s\n", g_romSaveName, sdStatusText(saveStatus));
+    }
+
+    // "Add to my library" rather than "play this now": the running game keeps
+    // going, and the picker (if it is up) picks the new file up on its next
+    // scan. A NO_LOAD transfer therefore never installs — the sender asked for a
+    // file, not for a cart swap, and interrupting the game would be a surprise.
+    //
+    // A save that was asked for and failed skips the install for the same
+    // reason. The request was "put this on the card and play it"; delivering
+    // only the second half stops the game the user was playing and hands them a
+    // cart that is not on the card either, so the next reboot has neither. Doing
+    // nothing leaves the running game alone, and the save event above has
+    // already told the sender why.
+    const bool saveFailed = saveStatus != SdStatus::Ok;
+    const bool installWanted = (g_romFlags & ROM_FLAG_NO_LOAD) == 0 && !saveFailed;
+    if (installWanted) result.installed = installRom(g_romBuf, g_romSize, (g_romFlags & ROM_FLAG_SWAP) != 0);
 
     // Cleared last: until this store the UDP task treats the buffer as ours and
     // refuses new transfers. Clearing it earlier would let a BEGIN overwrite the
     // image we are still reading.
     g_romApplyRequested.store(false, std::memory_order_release);
+    return result;
 }
 
 // Answer a debug snapshot request, if one is pending.
@@ -842,6 +1225,12 @@ static uint32_t g_divisor = DISPLAY_DIVISOR_INITIAL;
 // handler in the middle of a frame.
 static bool g_pushOutstanding = false;
 
+// Which band the next kick ships. File scope for the same reason as the flag
+// above: leaving the frame loop for the menu has to reset it, or the first band
+// pushed after coming back would land mid-picture and paint one band of the new
+// game over three of the old.
+static int g_bandIndex = 0;
+
 // Close the open band transaction, if there is one, and wait for its DMA.
 // Panel_LCD::end_transaction() waits on the bus, so this both joins the transfer
 // and releases the SPI lock; waitDMA() alone would leave the lock held.
@@ -871,6 +1260,349 @@ static void pushBand(int band) {
     M5.Display.startWrite();
     M5.Display.pushImageDMA(SCREEN_X_OFFSET, bandY, NES_WIDTH, bandRows,
                             g_nes.ppu.framebuffer + (size_t)bandY * NES_WIDTH);
+}
+
+// Bring the panel and the speaker back to the state setup() left them in, so
+// something other than the frame loop can own them.
+//
+// The three steps are not independent and the order matters. The band DMA has
+// to be joined first or the SPI bus stays locked and anything drawn afterwards
+// interleaves with a transfer still on the wire. The band index has to be reset
+// or the next picture starts from whichever band the loop was interrupted at.
+// And the ring has to be emptied rather than merely stopped: it holds up to
+// ~186ms of the previous game's audio, which would otherwise play out over the
+// first frames of the next one.
+//
+// Why not simply not stop the speaker: M5.Speaker.stop() drops what is already
+// queued in the hardware, and playRaw's queued buffers reference g_chunk slots
+// that the next game's drain will begin overwriting.
+static void stopVideoAudio() {
+    joinBand();
+    g_bandIndex = 0;
+    M5.Speaker.stop(SPEAKER_CHANNEL);
+    g_ringRead = 0;
+    g_ringWrite = 0;
+    // The DC blocker's state describes the signal that just stopped; carrying it
+    // into silence would decay as an audible thump at the start of the next one.
+    g_dcX1 = 0.0f;
+    g_dcY1 = 0.0f;
+}
+
+// Hand the panel and the speaker back to the frame loop.
+//
+// The silence priming moved here from setup(): it is a property of *starting a
+// game*, and after a menu the speaker queue is as empty as it is at boot, so
+// the first real chunks would race the hardware buffer exactly the same way.
+static void startGame() {
+    // Drop any menu request that arrived while the picker was up. Type 2 latches
+    // on core 0 whatever the mode is, so a HOME pressed during browsing (or a
+    // duplicate of the one that opened the picker) is still set here, and the
+    // very next loop() would read it and throw the user straight back out of the
+    // game they just chose.
+    //
+    // Cleared here rather than in menuLoop() because this is the single point
+    // every launch passes through — the picker alone has five (BtnC resume, a
+    // type 5 LOAD, an install-flagged push, the built-in ROM, a picked row), and
+    // the resume path was the only one that had remembered to do it.
+    g_menuRequested.store(false, std::memory_order_relaxed);
+
+    // Prime the speaker queue with silence so the first real chunks arrive with
+    // margin instead of racing an already-empty hardware buffer.
+    for (int i = 0; i < 2; i++) {
+        memset(g_chunk[g_chunkIndex], 0, sizeof(g_chunk[0]));
+        M5.Speaker.playRaw(g_chunk[g_chunkIndex], AUDIO_CHUNK_SAMPLES, AUDIO_SAMPLE_RATE, false, 1, SPEAKER_CHANNEL);
+        g_chunkIndex = (g_chunkIndex + 1) % AUDIO_CHUNK_SLOTS;
+    }
+    // The menu owns the whole panel, including the columns either side of the
+    // 256px picture, so it has to be cleared here rather than left for the first
+    // band to overwrite — which it never would.
+    M5.Display.fillScreen(TFT_BLACK);
+    // The frames right after a launch are a boot sequence, not the steady state
+    // the guard's average was built from.
+    invalidateEmuDrawPace();
+    g_mode = AppMode::Game;
+}
+
+// Leave the game and put the picker up.
+static void enterMenu() {
+    stopVideoAudio();
+    menuEnter();
+    g_mode = AppMode::Menu;
+}
+
+// Read a ROM off the card into staging and install it.
+//
+// Staging is shared with the UDP receive path, so g_stagingBusy is held for the
+// whole read-plus-install: a BEGIN that arrived between the read and the install
+// would otherwise overwrite the image while installRom() is walking it.
+static SdStatus launchSdRom(const char* name) {
+    // Claim first, then re-check. Checking before claiming leaves a window: a
+    // BEGIN that passed its own g_stagingBusy test just before the store below
+    // would start filling g_romBuf while sdRomLoad() is reading into it, and the
+    // installed image would be a splice of both transfers.
+    //
+    // Why not acquire/release: the pairing here is store-then-load on one flag
+    // against store-then-load on another, and release/acquire orders neither
+    // core's store ahead of its own subsequent load. Only a single total order
+    // over the four operations rules out both cores concluding they won, which
+    // is what seq_cst buys. g_romActive covers a transfer that is mid-flight but
+    // has not published yet, which g_romApplyRequested alone would miss.
+    g_stagingBusy.store(true, std::memory_order_seq_cst);
+    const bool udpOwnsStaging = g_romApplyRequested.load(std::memory_order_seq_cst) || g_romActive.load();
+    if (udpOwnsStaging) {
+        // Reporting Busy rather than waiting keeps the menu responsive and gives
+        // the PC side something it can retry on.
+        g_stagingBusy.store(false, std::memory_order_release);
+        return SdStatus::Busy;
+    }
+
+    // Allocated only after the claim is uncontested. Why not before, which reads
+    // more naturally: ensureStagingBuffer() writes g_romBuf, so calling it ahead
+    // of the claim lets both cores allocate concurrently on the very first
+    // transfer — one malloc leaks and the two cores go on to use different
+    // buffers, which is the same mixed-ROM outcome the claim exists to prevent.
+    if (!ensureStagingBuffer()) {
+        g_stagingBusy.store(false, std::memory_order_release);
+        return SdStatus::IoError;
+    }
+
+    size_t size = 0;
+    SdStatus status = sdRomLoad(name, g_romBuf, ROM_MAX_SIZE, &size);
+    if (status == SdStatus::Ok) {
+        // Checked before installing so an unsupported mapper is reported as such
+        // instead of surfacing as a generic load failure after the current cart
+        // has already been dropped.
+        const uint8_t header = romHeaderStatus(g_romBuf, (uint32_t)size);
+        if (header != UDP_ROM_STATUS_OK) status = SdStatus::BadRom;
+        // No swap: a ROM chosen from the picker is a fresh power-on, which is
+        // what putting a different cartridge in means. ROM_FLAG_SWAP exists for
+        // the browser's live cart-swap experiment, not for this.
+        else if (!installRom(g_romBuf, (uint32_t)size, false)) status = SdStatus::BadRom;
+    }
+    g_stagingBusy.store(false, std::memory_order_release);
+    Serial.printf("SD: launch %s -> %s\n", name, sdStatusText(status));
+    return status;
+}
+
+// Set when a type 5 op changed what a listing would show, so the picker knows
+// to rescan. Not a rescan from within the handler: the handler may run in Game
+// mode, where there is no listing to refresh.
+static bool g_sdListingChanged = false;
+
+// Send a LIST reply, split across as many datagrams as the entries need.
+//
+// The whole listing is built once and then sliced, rather than scanning the
+// card per datagram: a rescan between parts could see a different set of files
+// and produce a reply whose parts do not describe one moment in time.
+static void sendSdListing(const sockaddr_in& to, uint16_t seq) {
+    if (g_udpSock < 0) return;
+
+    static SdRomEntry entries[SD_ROM_MAX_FILES];
+    // Called unconditionally rather than behind sdRomMounted(): the scan now
+    // remounts a card that was inserted after boot (rate-limited internally), and
+    // guarding it here would keep answering NotMounted to a card that is present.
+    const int count = sdRomScan(entries, SD_ROM_MAX_FILES);
+    // Asked after the scan, not before: the scan is what discovers a card that
+    // has gone away (it drops the mount when /roms is neither openable nor
+    // creatable), so testing first would answer Ok with an empty listing for a
+    // card that is no longer there.
+    if (!sdRomMounted()) {
+        sendSdAck(g_udpSock, to, UDP_SD_OP_LIST, seq, SdStatus::NotMounted);
+        return;
+    }
+    uint64_t totalBytes = 0, freeBytes = 0;
+    sdRomSpace(&totalBytes, &freeBytes);
+
+    // How many entries fit one datagram, worst case. Computed against the
+    // longest name rather than the actual ones so the part count can be decided
+    // before any packing happens, which is what lets nparts be correct in part 0.
+    const int perPart = (UDP_SD_CHUNK - UDP_SD_LIST_HEADER) / UDP_SD_ENTRY_MAX;
+    // At least one part even for an empty card: "mounted, no ROMs" has to be
+    // distinguishable from "no reply arrived".
+    const int nparts = count > 0 ? (count + perPart - 1) / perPart : 1;
+
+    uint8_t datagram[UDP_SD_LIST_HEADER + UDP_SD_CHUNK];
+    for (int part = 0; part < nparts; part++) {
+        const int first = part * perPart;
+        int here = count - first;
+        if (here > perPart) here = perPart;
+        if (here < 0) here = 0;
+
+        datagram[0] = 'N';
+        datagram[1] = 'S';
+        datagram[2] = UDP_PROTOCOL_VERSION;
+        datagram[3] = UDP_SD_OP_LIST;
+        datagram[4] = seq & 0xFF;
+        datagram[5] = seq >> 8;
+        datagram[6] = (uint8_t)SdStatus::Ok;
+        datagram[7] = 0;
+        datagram[8] = (uint8_t)part;
+        datagram[9] = (uint8_t)nparts;
+        datagram[10] = (uint8_t)(count & 0xFF);
+        datagram[11] = (uint8_t)(count >> 8);
+        datagram[12] = (uint8_t)(here & 0xFF);
+        datagram[13] = (uint8_t)(here >> 8);
+        // Repeated in every part rather than riding only on part 0, so a
+        // receiver that lost part 0 still has the capacity once it has retried.
+        for (int i = 0; i < 8; i++) datagram[14 + i] = (uint8_t)(totalBytes >> (i * 8));
+        for (int i = 0; i < 8; i++) datagram[22 + i] = (uint8_t)(freeBytes >> (i * 8));
+
+        size_t offset = UDP_SD_LIST_HEADER;
+        for (int i = 0; i < here; i++) {
+            const SdRomEntry& e = entries[first + i];
+            const size_t nameLen = strlen(e.name);
+            datagram[offset++] = (uint8_t)(e.size & 0xFF);
+            datagram[offset++] = (uint8_t)((e.size >> 8) & 0xFF);
+            datagram[offset++] = (uint8_t)((e.size >> 16) & 0xFF);
+            datagram[offset++] = (uint8_t)((e.size >> 24) & 0xFF);
+            datagram[offset++] = (uint8_t)nameLen;
+            memcpy(datagram + offset, e.name, nameLen);
+            offset += nameLen;
+        }
+        ::sendto(g_udpSock, datagram, offset, 0, (const sockaddr*)&to, sizeof(to));
+    }
+    Serial.printf("SD: listed %d entries in %d part(s)\n", count, nparts);
+}
+
+// Service a latched type 5 request at a frame boundary.
+//
+// Every card access in this function is legal only because of the joinBand()
+// at the top: the panel and the card share the SPI bus, and this is the point
+// at which core 1 can guarantee nothing is on the wire.
+static void applySdRequest() {
+    const bool requested = g_sdRequested.load(std::memory_order_acquire);
+    if (!requested) return;
+
+    joinBand();
+
+    const uint8_t op = g_sdOp;
+    const uint16_t seq = g_sdSeq;
+    if (op == UDP_SD_OP_LIST) {
+        sendSdListing(g_sdReplyTo, seq);
+        g_sdRequested.store(false, std::memory_order_release);
+        return;
+    }
+
+    SdStatus status = SdStatus::IoError;
+    bool listingChanged = false;
+    if (op == UDP_SD_OP_LOAD) {
+        status = launchSdRom(g_sdArgA);
+        // A LOAD from the browser is a "play this now", the network equivalent
+        // of picking the row. Leaving the picker up on success would show the
+        // user a menu for a game that is already running.
+        const bool shouldStart = status == SdStatus::Ok && g_mode == AppMode::Menu;
+        if (shouldStart) startGame();
+    } else if (op == UDP_SD_OP_DELETE) {
+        status = sdRomDelete(g_sdArgA);
+        listingChanged = status == SdStatus::Ok;
+    } else if (op == UDP_SD_OP_RENAME) {
+        status = sdRomRename(g_sdArgA, g_sdArgB);
+        listingChanged = status == SdStatus::Ok;
+    }
+    if (listingChanged) g_sdListingChanged = true;
+
+    if (g_udpSock >= 0) sendSdAck(g_udpSock, g_sdReplyTo, op, seq, status);
+    // Cleared last, for the same reason the ROM latch is: until this store the
+    // UDP task refuses further requests, which is what keeps g_sdArgA/B stable
+    // for the duration of the work above.
+    g_sdRequested.store(false, std::memory_order_release);
+}
+
+// One frame of the picker. Returns once the mode has been decided, so the
+// caller's only job is to stop emulating while this is up.
+static void menuLoop() {
+    M5.update();
+    // The Grove pad and the UDP pad both drive the picker, so a user with a
+    // joystick plugged in never has to reach for the touch strip.
+    const uint32_t sinceRx = millis() - g_lastRxMs.load(std::memory_order_relaxed);
+    const bool udpStale = sinceRx > INPUT_TIMEOUT_MS;
+    const uint8_t udpBits = udpStale ? 0 : g_padBits[0].load(std::memory_order_relaxed);
+    uint8_t nav = udpBits | groveInputBits();
+    if (M5.BtnB.isPressed()) nav |= NES_BTN_START;
+
+    // A hold on BtnC while the picker is up means "never mind": go back to
+    // whatever was already loaded rather than making the user pick it again.
+    const bool resumeRequested = M5.BtnC.wasHold();
+    if (resumeRequested) {
+        // The latch clear this used to do itself now lives in startGame(), which
+        // every launch path shares.
+        startGame();
+        return;
+    }
+
+    const MenuResult result = menuTick(nav);
+    if (result.action == MenuResult::Action::None) {
+        // Type 4 and type 5 keep working while the picker is up, and both stage
+        // into the same buffer this mode reads from, so they are serviced on the
+        // same frame boundary they would be in Game.
+        const RomApplyResult push = applyRomRequest();
+        applySdRequest();
+        applyVolumeRequest();
+        // A type 5 LOAD starts the game from inside applySdRequest(), so the
+        // mode may already have changed. Everything below is menu upkeep and
+        // would drag the user straight back out of the game they just launched.
+        const bool leftMenu = g_mode != AppMode::Menu;
+        if (leftMenu) return;
+        // A ROM sent with the install flag is a "play this now", so honour it
+        // from the picker as well: the browser's send button should not behave
+        // differently depending on whether the user happens to be browsing.
+        //
+        // Keyed on what the push actually installed, not on the flags it carried:
+        // a save-and-play whose card write failed installs nothing, and starting
+        // the game anyway would drop the user into the *previous* cart with no
+        // hint that the ROM they just sent went nowhere.
+        if (push.installed) {
+            startGame();
+            return;
+        }
+        // The save the sender asked for is the only reason a push can be handled
+        // without installing while NO_LOAD is clear, so it is also the only case
+        // with something to explain. Shown here rather than in applyRomRequest()
+        // because the status line belongs to the picker: in Game mode the same
+        // failure is reported over UDP alone and the running cart is untouched.
+        const bool pushWantedPlay = push.handled && (g_romFlags & ROM_FLAG_NO_LOAD) == 0;
+        if (pushWantedPlay) {
+            // Two ways to get here, and the save status only describes one of
+            // them: a card write that failed, or an image the core refused
+            // (unsupported mapper, or no SRAM left for its banks). Ok therefore
+            // means the install itself was what failed.
+            const bool saveFailed = push.saveStatus != SdStatus::Ok;
+            // Returns without the redraw below, which would overwrite the status
+            // line with menuEnter()'s default hint on this very frame.
+            menuShowError(saveFailed ? sdStatusText(push.saveStatus) : "ROM load failed");
+            return;
+        }
+        // A save-only push (or an SD delete/rename) changed what the listing
+        // should show, so redraw it rather than leaving a stale row on screen.
+        const bool listingStale = push.handled || g_sdListingChanged;
+        if (listingStale) {
+            g_sdListingChanged = false;
+            menuEnter();
+        }
+        delay(MENU_TICK_MS);
+        return;
+    }
+
+    if (result.action == MenuResult::Action::LaunchEmbedded) {
+        const size_t embeddedSize = (size_t)(rom_end - rom_start);
+        const bool ok = installRom(rom_start, (uint32_t)embeddedSize, false);
+        if (!ok) {
+            menuShowError("built-in ROM failed");
+            return;
+        }
+        startGame();
+        return;
+    }
+
+    const SdStatus status = launchSdRom(result.sdName);
+    if (status != SdStatus::Ok) {
+        // Stay in the picker: the previous cart is still loaded, so the user can
+        // read the reason and choose again rather than being dropped into a game
+        // they did not ask for.
+        menuShowError(sdStatusText(status));
+        return;
+    }
+    startGame();
 }
 
 // Servo the playback rate to what the emulator actually produces.
@@ -953,6 +1685,15 @@ static uint32_t updatePlaybackRate(uint32_t current, int produced, int64_t frame
 }
 
 void loop() {
+    // Handled before anything else, and with an early return, because the rest
+    // of this function is the Game mode: it emulates a frame, kicks a band and
+    // paces to 60Hz, none of which mean anything while the picker owns the panel.
+    const bool inMenu = g_mode == AppMode::Menu;
+    if (inMenu) {
+        menuLoop();
+        return;
+    }
+
     static int64_t nextFrameUs = esp_timer_get_time();
     // Wall-clock length of the previous loop iteration, measured at the top so
     // it naturally includes the pacing sleep and the early-return taken when a
@@ -999,7 +1740,19 @@ void loop() {
     applyInput();
     applyPinChanges();
     applyResetRequest();
+    // Before the ROM handler and the emulation below, so the frame that opens
+    // the picker does not also run a frame of the game whose audio and video
+    // stopVideoAudio() has just torn down.
+    const bool menuRequested = g_menuRequested.exchange(false, std::memory_order_relaxed);
+    if (menuRequested) {
+        enterMenu();
+        return;
+    }
     applyRomRequest();
+    // After the ROM handler, not before: both may touch the card, and doing the
+    // type 4 save first means a LIST issued right behind a save already sees the
+    // new file.
+    applySdRequest();
     applyVolumeRequest();
     updateWaveCapture();
 
@@ -1013,13 +1766,12 @@ void loop() {
     // which is what keeps the rows behind the in-flight bands stable; repainting
     // on every frame would let the emulator overwrite rows the DMA engine has not
     // read yet and tear the picture.
-    static int bandIndex = 0;
     const bool drawThisFrame = (thisFrame % g_divisor) == 0;
     // Bands still owed from the previous picture. A static_assert ties the
     // divisor floor to the segment count, so at the configured divisor this is
     // always zero on a draw frame; the flush below is the defence for a divisor
     // that does not satisfy that relation.
-    const bool pictureInFlight = bandIndex != 0;
+    const bool pictureInFlight = g_bandIndex != 0;
     g_nes.ppu.renderThisFrame = drawThisFrame;
 
     const int64_t emuStartUs = esp_timer_get_time();
@@ -1029,9 +1781,9 @@ void loop() {
     const bool mustFlushBeforeRepaint = drawThisFrame && pictureInFlight;
     if (mustFlushBeforeRepaint) {
         joinBand();
-        while (bandIndex != 0) {
-            pushBand(bandIndex);
-            bandIndex = (bandIndex + 1) % DISPLAY_DMA_SEGMENTS;
+        while (g_bandIndex != 0) {
+            pushBand(g_bandIndex);
+            g_bandIndex = (g_bandIndex + 1) % DISPLAY_DMA_SEGMENTS;
             M5.Display.endWrite();
         }
     }
@@ -1209,9 +1961,9 @@ void loop() {
 
     const bool hasBandToPush = drawThisFrame || pictureInFlight;
     if (hasBandToPush) {
-        pushBand(bandIndex);
+        pushBand(g_bandIndex);
         g_pushOutstanding = true;
-        bandIndex = (bandIndex + 1) % DISPLAY_DMA_SEGMENTS;
+        g_bandIndex = (g_bandIndex + 1) % DISPLAY_DMA_SEGMENTS;
     }
     const int64_t dmaEndUs = esp_timer_get_time();
 

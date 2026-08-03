@@ -83,6 +83,30 @@ BUTTON_MAP = {
     7: NES_START,  # plus
 }
 
+# HOME is deliberately absent from this map, so the SDL backend cannot open the
+# menu the way the hidapi one does.
+#
+# Why not just add an index: the available evidence contradicts itself, and none
+# of it was gathered by pressing HOME. The map above is a raw
+# `pygame.joystick.Joystick` layout, not SDL_GameController's. SDL 2.28's HIDAPI
+# Switch driver would put HOME at 5 (it passes the GameController enum straight
+# through as the raw index, with A=0 and minus=4), while the two macOS IOKit rows
+# in SDL_GameControllerDB put it at 9 and at 12. The verified entries above
+# (minus=6, plus=7) match none of the three.
+#
+# The pad here reports buttons=20 / hats=0, which is the HIDAPI driver's
+# signature — yet that driver's layout disagrees with the very entries this table
+# was built from on real hardware. Until someone presses HOME and reads the index
+# back, that conflict is unresolved, and the index also shifts between USB and
+# Bluetooth (distinct GUIDs) and across controller firmware. Worse, 12 collides
+# with the D-pad on the builds that report it as buttons 11-14 just below.
+#
+# A wrong guess costs more than the missing feature: the misread button is one a
+# player holds during normal play, so it would drop them out of a running game at
+# random. A HOME that only works over USB is a documented limitation; a D-pad
+# press that quits to the menu is a bug nobody would connect to this table. Use
+# --backend hid for HOME, or open the picker with a long press on BtnC.
+#
 # Some SDL builds expose the D-pad as buttons 11-14 instead of a hat.
 # Used only when the device reports no hats at all.
 DPAD_BUTTON_MAP = {
@@ -127,6 +151,9 @@ HID_SHARED_BUTTONS = {
     0x01: NES_SELECT,  # minus
     0x02: NES_START,  # plus
 }
+# HOME は NES のパッドビットに居場所がないので、pad1 ではなく UDP type 2 の
+# 「メニューを開く」制御として別送りする。
+HID_SHARED_HOME = 0x10
 HID_LEFT_BUTTONS = {
     0x02: NES_UP,
     0x01: NES_DOWN,
@@ -141,7 +168,7 @@ STICK_THRESHOLD = 500
 
 
 def decode_standard_report(report):
-    """Turn one 0x30 input report into a NES button byte."""
+    """Turn one 0x30 input report into a (NES button byte, HOME held) pair."""
     is_usable = len(report) >= 12 and report[0] == REPORT_ID_STANDARD
     if not is_usable:
         return None
@@ -161,6 +188,8 @@ def decode_standard_report(report):
         if left & mask:
             pad1 |= nes_bit
 
+    home_held = bool(shared & HID_SHARED_HOME)
+
     # Left stick is additive with the D-pad, mirroring the SDL backend.
     stick_x = report[6] | ((report[7] & 0x0F) << 8)
     stick_y = (report[7] >> 4) | (report[8] << 4)
@@ -174,7 +203,7 @@ def decode_standard_report(report):
     if stick_y < STICK_CENTER - STICK_THRESHOLD:
         pad1 |= NES_DOWN
 
-    return pad1
+    return pad1, home_held
 
 
 class HidProController:
@@ -186,6 +215,7 @@ class HidProController:
         self.device.set_nonblocking(1)
         self.packet_counter = 0
         self.last_pad1 = 0
+        self.last_home = False
         self.name = "Nintendo Switch Pro Controller (hidapi/USB)"
 
     def _send_subcommand(self, subcommand, argument):
@@ -241,10 +271,10 @@ class HidProController:
         while True:
             report = self.device.read(64)
             if not report:
-                return self.last_pad1
-            pad1 = decode_standard_report(report)
-            if pad1 is not None:
-                self.last_pad1 = pad1
+                return self.last_pad1, self.last_home
+            decoded = decode_standard_report(report)
+            if decoded is not None:
+                self.last_pad1, self.last_home = decoded
 
     def close(self):
         self.device.close()
@@ -269,6 +299,25 @@ def build_packet(seq, pad1, pad2=0):
     )
 
 
+# UDP type 2 (control) の「メニューを開く」ビット。config.h の UDP_CTRL_MENU と
+# 対で、ゲーム中のみ意味を持つ (メニュー表示中は実機側で読み捨てられる)。
+TYPE_CTRL = 2
+CTRL_MENU = 0x04
+
+
+def build_menu_packet(seq):
+    """Pack a type 2 control frame asking the device to open the ROM picker."""
+    return struct.pack(
+        "<2sBBHBB",
+        PROTOCOL_MAGIC,
+        PROTOCOL_VERSION,
+        TYPE_CTRL,
+        seq & 0xFFFF,
+        CTRL_MENU,
+        0,
+    )
+
+
 def make_socket(host):
     """Create the UDP socket, enabling broadcast when the target needs it."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -289,6 +338,12 @@ class PacketSender:
 
     def send(self, pad1, pad2=0):
         packet = build_packet(self.seq, pad1, pad2)
+        self.seq = (self.seq + 1) & 0xFFFF
+        self.sock.sendto(packet, (self.host, self.port))
+        return packet
+
+    def send_menu(self):
+        packet = build_menu_packet(self.seq)
         self.seq = (self.seq + 1) & 0xFFFF
         self.sock.sendto(packet, (self.host, self.port))
         return packet
@@ -495,11 +550,12 @@ def run_hid_loop(sender, rate_hz, controller):
     """Timing loop for the hidapi backend, matching the SDL loop's cadence."""
     interval = 1.0 / rate_hz
     last_pad1 = None
+    last_home = False
     next_tick = time.monotonic()
 
     while True:
         try:
-            pad1 = controller.read_buttons()
+            pad1, home = controller.read_buttons()
         except OSError as error:
             # Unplugging the pad surfaces as a read error on macOS.
             print(f"コントローラの読み取りに失敗しました: {error}", file=sys.stderr)
@@ -507,6 +563,14 @@ def run_hid_loop(sender, rate_hz, controller):
             if has_stale_state:
                 sender.send(0)
             return 1
+
+        # HOME はパッドビットではなく「メニューを開く」制御として押下エッジで
+        # 1 回だけ送る (押しっぱなしでも連射しない)。
+        is_home_pressed = home and not last_home
+        last_home = home
+        if is_home_pressed:
+            sender.send_menu()
+            print("HOME -> menu")
 
         is_changed = pad1 != last_pad1
         if is_changed:
@@ -639,6 +703,9 @@ def run_loop(sender, rate_hz, backend="auto"):
             f"hats={joystick.get_numhats()} axes={joystick.get_numaxes()}"
         )
         print("バックエンド: SDL (pygame)")
+        print(
+            "注意     : HOME でのメニュー呼び出しは USB (--backend hid) のみ対応です。"
+        )
     print(f"宛先     : {sender.host}:{sender.port}")
     print(f"レート   : {rate_hz} Hz")
     print("Ctrl-C で終了します。")
