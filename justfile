@@ -4,6 +4,17 @@
 default:
     @just --list
 
+# 実機へ書き込まず、ホストと Web で日常的な変更を検証する
+dev frames='120':
+    @just format-check
+    @just tidy
+    @just lint-py
+    @just lint-js
+    @just check
+    @just test-ppu-flag
+    @just verify {{frames}}
+    @just build-web
+
 # ---------------------------------------------------------------- M5Stack
 
 # M5Stack CoreS3 向けビルド
