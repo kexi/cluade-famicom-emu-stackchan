@@ -18,12 +18,14 @@ Open any .NES file (iNES format) with "Open ROM". Works on desktop and Android C
 - **The cartridge connector fault model runs on the device too.** All 60 pins can be broken at runtime; the healthy path costs a single branch, so full speed is kept until you start breaking pins.
 
 ### Browser → device mirroring
-Serve the web UI locally and add `?device=<CoreS3 IP>` (the IP is shown on the device at boot):
+Serve the web UI locally and add `?device=<CoreS3 mDNS name or IP>` (both are shown on the device at boot):
 
 ```sh
 just serve            # serves web/ and relays /api/* to the device as UDP
-# then open http://localhost:8000/?device=192.168.x.x
+# then open http://localhost:8000/?device=stackchan-xxxxxx.local
 ```
+
+The device advertises itself over mDNS as `stackchan-<last 3 bytes of its MAC>.local`, so the name survives a DHCP lease change. `dns-sd -B _nes._udp` lists every board on the LAN. See [m5stack/README.md](m5stack/README.md) for details.
 
 Now the connector panel drives both emulators at once: tilt the cart and the Stack-chan glitches with the page, blow on it 💨, re-insert (which also presses RESET — reseating alone won't un-crash a wedged CPU, exactly like the real thing), and the master volume slider sets the device speaker. Protocol details (UDP types 0/1/2) are in [m5stack/README.md](m5stack/README.md).
 
@@ -88,7 +90,7 @@ Load an FCEUX **.fm2** movie with the TAS button. Playback power-cycles with the
 | Parameter | Effect |
 |-----------|--------|
 | `rom=<URL>` | Fetch and boot a .NES file from a URL (the host must allow CORS — GitHub raw does) |
-| `device=<IP>` | Mirror connector faults, reset and volume to an M5Stack on the LAN (needs `just serve`) |
+| `device=<name\|IP>` | Mirror connector faults, reset and volume to an M5Stack on the LAN — `stackchan-xxxxxx.local` or a literal IP (needs `just serve`) |
 | `debug=1` | Start with the debug panel open |
 | `pin=0` / `pin=1` | Hide / show the connector panel (shown by default) |
 | `clock=<Hz>` | Clock frequency, 1–1789773 |
@@ -131,7 +133,7 @@ just serve       # http://localhost:8000/ — also relays /api/* to the device
 ```
 
 - Desktop: http://localhost:8000/
-- With a CoreS3 on the same network: http://localhost:8000/?device=<device IP>
+- With a CoreS3 on the same network: http://localhost:8000/?device=stackchan-xxxxxx.local
 
 ## Deploy (GitHub Pages)
 
