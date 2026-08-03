@@ -5,6 +5,7 @@
 
 mod ctrl;
 mod pins;
+mod sd;
 
 use std::sync::LazyLock;
 
@@ -103,6 +104,10 @@ impl GlobalArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// List, boot, rename, or delete the ROMs on the SD card
+    #[command(subcommand)]
+    Sd(sd::SdCommand),
+
     /// Reset the console, set the volume, or open the ROM menu
     #[command(subcommand)]
     Ctrl(ctrl::CtrlCommand),
@@ -116,6 +121,7 @@ pub fn run(cli: Cli) -> ExitCode {
     let output = cli.global.output();
 
     let result = match &cli.command {
+        Command::Sd(command) => sd::run(command, &cli.global),
         Command::Ctrl(command) => ctrl::run(command, &cli.global),
         Command::Pins(command) => pins::run(command, &cli.global),
     };

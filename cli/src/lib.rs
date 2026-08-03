@@ -11,4 +11,5 @@
 pub mod exit;
 pub mod output;
 pub mod proto;
+pub mod sd_client;
 pub mod transport;
