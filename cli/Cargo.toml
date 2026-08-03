@@ -26,6 +26,9 @@ procon = []
 [dependencies]
 # ROM 転送の CRC-32 (zlib/IEEE)。firmware が同じ多項式で検証する
 crc32fast = "1.4"
+# 引数パース。env feature は STACKCHAN_HOST を受けるため、
+# wrap_help は --help を端末幅に合わせるため
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
 
 # cli/ の静的解析設定。C++ 側の .clang-tidy / Python 側の ruff.toml [lint] /
 # JS 側の .oxlintrc.json と同じ立ち位置で、just cli-clippy と CI から参照される

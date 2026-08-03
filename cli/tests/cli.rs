@@ -56,10 +56,31 @@ fn help_goes_to_stdout_and_exits_zero() {
         assert!(stderr(&out).is_empty(), "flag {flag} wrote to stderr");
 
         let text = stdout(&out);
-        assert!(text.starts_with("Usage: stackchan"), "flag {flag}");
+        assert!(text.contains("Usage: stackchan"), "flag {flag}");
         assert!(text.contains("Exit status:"), "flag {flag}");
         assert!(text.contains("Report bugs to:"), "flag {flag}");
     }
+}
+
+/// サブコマンドにも `--help` が届き、その配下だけが見える
+#[test]
+fn subcommands_have_their_own_help() {
+    let text = stdout(&run(&["ctrl", "--help"]));
+    assert!(text.contains("reset"), "ctrl help should list reset");
+    assert!(text.contains("volume"), "ctrl help should list volume");
+    assert!(text.contains("menu"), "ctrl help should list menu");
+}
+
+/// `--help` に内部向けの日本語コメントが漏れていないこと。
+/// clap は doc comment をそのままヘルプに出すので、理由を `///` に書くと
+/// 利用者の画面に出てしまう
+#[test]
+fn help_is_free_of_internal_commentary() {
+    let text = stdout(&run(&["--help"]));
+    let has_japanese = text
+        .chars()
+        .any(|c| matches!(c as u32, 0x3040..=0x30FF | 0x4E00..=0x9FFF));
+    assert!(!has_japanese, "internal notes leaked into --help:\n{text}");
 }
 
 /// 終了コード規約は対外的な約束なので、`--help` の記述と実際の値が食い違わない
@@ -82,10 +103,121 @@ fn usage_errors_go_to_stderr_only_and_exit_two() {
         // stdout が汚れていると、--json を付けた呼び出しでパースが壊れる
         assert!(stdout(&out).is_empty(), "args {args:?} wrote to stdout");
 
+        // 引数パーサ由来のエラーも GNU の `program: message` に揃える。
+        // 自前のエラーと形が違うと、呼び出し側が 2 通りの書式を相手にする
         let text = stderr(&out);
-        assert!(text.starts_with("stackchan: "), "args {args:?}: {text}");
-        assert!(text.contains("Try 'stackchan --help'"), "args {args:?}");
+        assert!(
+            text.starts_with("stackchan: "),
+            "args {args:?} did not use the GNU format: {text}"
+        );
     }
+}
+
+/// 診断は「何が足りないか」を言わなければ意味がない。描画の 1 行目を機械的に
+/// 取ると、サブコマンド未指定はコマンドの説明文が、必須引数の不足は引数名を
+/// 落とした文が出てしまう
+#[test]
+fn usage_diagnostics_say_what_is_actually_wrong() {
+    let out = run(&["ctrl"]);
+    assert_eq!(out.status.code(), Some(2));
+    let text = stderr(&out);
+    assert!(
+        text.starts_with("stackchan: missing command"),
+        "a missing subcommand should say so, got: {text}"
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_stackchan"))
+        .args(["ctrl", "volume", "--host", "127.0.0.1"])
+        .output()
+        .expect("failed to run the stackchan binary");
+    assert_eq!(out.status.code(), Some(2));
+    let text = stderr(&out);
+    assert!(
+        text.contains("LEVEL"),
+        "the missing argument must be named, got: {text}"
+    );
+}
+
+/// マスクの上位 4bit は firmware が落とすので、判定・出力・送信で同じ
+/// 正規化済みの値を使う。分かれていると `pins set ffffffffffffffff` が
+/// 「全ピン正常」を送りながら reset を送らず、出力にも嘘のマスクが出る
+#[test]
+fn pin_masks_are_normalised_before_they_are_reported() {
+    let out = Command::new(env!("CARGO_BIN_EXE_stackchan"))
+        .args([
+            "pins",
+            "set",
+            "ffffffffffffffff",
+            "--host",
+            "127.0.0.1",
+            "--json",
+        ])
+        .output()
+        .expect("failed to run the stackchan binary");
+
+    let text = stdout(&out);
+    assert!(
+        text.contains("\"mask\":\"0fffffffffffffff\""),
+        "the reported mask must be the one actually sent: {text}"
+    );
+    // 全ピン正常なので reseat 扱いになり、リセットも送られる
+    assert!(text.contains("\"reset\":true"), "got: {text}");
+}
+
+/// 自前のエラーは GNU の `program: message` 書式で stderr に出す
+#[test]
+fn our_own_errors_use_the_gnu_message_format() {
+    // --host も STACKCHAN_HOST も無い状態にする
+    let out = Command::new(env!("CARGO_BIN_EXE_stackchan"))
+        .args(["ctrl", "reset"])
+        .env_remove("STACKCHAN_HOST")
+        .output()
+        .expect("failed to run the stackchan binary");
+
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stdout(&out).is_empty());
+    let text = stderr(&out);
+    assert!(text.starts_with("stackchan: "), "got: {text}");
+    assert!(
+        text.contains("--host"),
+        "the message should say how to fix it"
+    );
+}
+
+/// 値域の違反は使用法エラー (2)。デバイスに送る前に弾く
+#[test]
+fn out_of_range_values_are_a_usage_error() {
+    let out = Command::new(env!("CARGO_BIN_EXE_stackchan"))
+        .args(["ctrl", "volume", "999", "--host", "127.0.0.1"])
+        .output()
+        .expect("failed to run the stackchan binary");
+    assert_eq!(out.status.code(), Some(2));
+
+    for pin in ["0", "61"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_stackchan"))
+            .args(["pins", "break", pin, "--host", "127.0.0.1"])
+            .output()
+            .expect("failed to run the stackchan binary");
+        assert_eq!(out.status.code(), Some(2), "pin {pin}");
+    }
+}
+
+/// `--json` を付けたらエラーも stdout に JSON で出す。成功だけ JSON、失敗だけ
+/// テキストだと、呼び出し側が 2 通りのパーサを持つことになる
+#[test]
+fn json_mode_reports_errors_as_json_too() {
+    let out = Command::new(env!("CARGO_BIN_EXE_stackchan"))
+        .args(["ctrl", "reset", "--json"])
+        .env_remove("STACKCHAN_HOST")
+        .output()
+        .expect("failed to run the stackchan binary");
+
+    assert_eq!(out.status.code(), Some(2), "the exit code must not change");
+    let text = stdout(&out);
+    assert!(text.contains("\"ok\":false"), "got: {text}");
+    assert!(text.contains("\"exit\":2"), "got: {text}");
+    // 人が見る stderr にも同じことを書く
+    assert!(stderr(&out).starts_with("stackchan: "));
 }
 
 /// GNU では先に現れた方が勝ち、残りは無視される。ここは単体テストでは
@@ -100,7 +232,7 @@ fn the_first_of_help_or_version_wins() {
 
     let help_first = stdout(&run(&["--help", "--version"]));
     assert!(
-        help_first.starts_with("Usage: stackchan"),
+        help_first.contains("Usage: stackchan"),
         "--help --version should print the help, got: {help_first}"
     );
 }
@@ -111,8 +243,9 @@ fn the_first_of_help_or_version_wins() {
 fn the_terminator_keeps_operands_as_commands() {
     let out = run(&["--", "frobnicate"]);
     assert_eq!(out.status.code(), Some(2));
+    // 文言はパーサ実装のものなので、名前が診断に現れることだけを見る
     assert!(
-        stderr(&out).contains("unrecognised command 'frobnicate'"),
+        stderr(&out).contains("frobnicate"),
         "operand after -- was dropped: {}",
         stderr(&out)
     );
@@ -142,9 +275,22 @@ fn the_terminator_protects_hyphen_leading_operands() {
     let out = run(&["--", "--help"]);
     assert_eq!(out.status.code(), Some(2), "-- --help must not print help");
     assert!(stdout(&out).is_empty(), "-- --help printed help to stdout");
-    assert!(stderr(&out).contains("unrecognised command '--help'"));
 
     let out = run(&["--", "-x.nes"]);
     assert_eq!(out.status.code(), Some(2));
-    assert!(stderr(&out).contains("unrecognised command '-x.nes'"));
+    assert!(stderr(&out).contains("-x.nes"), "got: {}", stderr(&out));
+}
+
+/// `--` の先はサブコマンドの値として届く。届かないと `sd rm -- -x.nes` の
+/// ような、ハイフン始まりのファイル名を扱う操作が成立しない
+#[test]
+fn hyphen_leading_values_survive_the_terminator() {
+    // pins は数値しか取らないので、値として扱われた結果「数値ではない」で
+    // 落ちることを見る (オプション扱いなら別の診断になる)
+    let out = Command::new(env!("CARGO_BIN_EXE_stackchan"))
+        .args(["pins", "break", "--host", "127.0.0.1", "--", "-5"])
+        .output()
+        .expect("failed to run the stackchan binary");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr(&out).contains("-5"), "got: {}", stderr(&out));
 }

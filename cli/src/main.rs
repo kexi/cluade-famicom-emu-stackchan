@@ -1,201 +1,105 @@
 //! `stackchan` — M5Stack CoreS3 のファミコンエミュレータを操作する CLI。
 //!
-//! この段階では足場だけで、実装済みなのは `--help` と `--version` に限られる。
-//! サブコマンドは順次生えるが、GNU の作法 (`--version` の書式、EXIT STATUS の
-//! 明示、エラーは `program: message` で stderr) は最初から満たしておく。
+//! GNU の作法に従う: `--version` の書式、`--help` の EXIT STATUS 節と
+//! バグ報告先、エラーは `program: message` で stderr、使用法エラーは exit 2。
 
-use std::io::Write;
+mod cli;
 
-use stackchan::exit::{EXIT_STATUS_HELP, ExitCode};
+use clap::Parser;
 
-/// GNU coding standards の `--version` 書式。1 行目がプログラム名とバージョン、
-/// 続けて著作権・ライセンス・無保証の告知。
-///
-/// 実行時 format ではなく `concat!` でリテラルに畳んでいるのは、この文字列が
-/// 起動直後に一度出るだけで、組み立てる理由が無いため
-const VERSION_TEXT: &str = concat!(
-    env!("CARGO_PKG_NAME"),
-    " ",
-    env!("CARGO_PKG_VERSION"),
-    "\n",
-    "Copyright (C) 2026 GOROman\n",
-    "License MIT: <https://opensource.org/licenses/MIT>\n",
-    "This is free software: you are free to change and redistribute it.\n",
-    "There is NO WARRANTY, to the extent permitted by law.",
-);
-
-const USAGE: &str = "\
-Usage: stackchan [OPTION]... COMMAND [ARG]...
-
-Control an M5Stack CoreS3 running the Famicom emulator over its UDP protocol.
-
-Commands:
-  (none yet -- this build only implements --help and --version)
-
-Options:
-  -h, --help     display this help and exit
-  -V, --version  output version information and exit";
-
-const AFTER_HELP: &str = "\
-Report bugs to: <https://github.com/kexi/cluade-famicom-emu-stackchan/issues>";
+use stackchan::exit::ExitCode;
 
 fn main() {
     // `args()` は非 UTF-8 の引数で panic する (Unix のファイル名は任意バイト列を
     // 取りうるので実際に起こる)。panic は終了コード 101 になり、規約の外の値が
-    // 呼び出し側に漏れる。`args_os()` で受けて、変換に失敗したら使用法エラーとして
-    // 返す
+    // 呼び出し側に漏れるので、`args_os()` で受けて使用法エラーとして返す
     let mut args = Vec::new();
-    for raw in std::env::args_os().skip(1) {
+    for raw in std::env::args_os() {
         match raw.into_string() {
             Ok(arg) => args.push(arg),
             Err(bad) => {
-                let message = format!("argument is not valid UTF-8: {}", bad.to_string_lossy());
-                std::process::exit(usage_error(&message).code());
+                let program = env!("CARGO_PKG_NAME");
+                eprintln!(
+                    "{program}: argument is not valid UTF-8: {}",
+                    bad.to_string_lossy()
+                );
+                eprintln!("Try '{program} --help' for more information.");
+                std::process::exit(ExitCode::Usage.code());
             }
         }
     }
-    std::process::exit(run(&args).code());
+
+    // clap の使用法エラーは自前で受ける。既定でも exit 2 だが、書式を
+    // `program: message` に揃えるため
+    let parsed = match cli::Cli::try_parse_from(&args) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            // --help / --version は「エラー」として返るが、明示的に求められた
+            // 出力なので stdout に出して 0 で抜ける。
+            //
+            // DisplayHelpOnMissingArgumentOrSubcommand をここに含めないのは、
+            // 引数なしの起動は「ヘルプの要求」ではなく使用法エラーだから。
+            // 0 で抜けると、スクリプトが「コマンドを渡し忘れた」ことに気づけない
+            let is_help_or_version = matches!(
+                e.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            );
+            if is_help_or_version {
+                // 明示的に stdout へ書く。clap の `Error::print()` は種別によって
+                // stderr を選ぶことがあるが、GNU は --help / --version を stdout に
+                // 出すよう求めている (`stackchan --help | less` が成立しなくなる)
+                print!("{e}");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                std::process::exit(ExitCode::Success.code());
+            }
+            // clap の既定書式は `error: ...` だが、GNU は `program: message` を
+            // 求める。自前のエラーと形が揃っていないと、呼び出し側は 2 通りの
+            // 書式を相手にすることになる
+            let program = env!("CARGO_PKG_NAME");
+            eprintln!("{program}: {}", usage_message(&e));
+            eprintln!("Try '{program} --help' for more information.");
+            std::process::exit(ExitCode::Usage.code());
+        }
+    };
+
+    std::process::exit(cli::run(parsed).code());
 }
 
-/// 引数を捌いて終了コードを返す。`main` から分けてあるのは、`std::process::exit`
-/// を呼ぶ前の判断をテストから叩けるようにするため
-fn run(args: &[String]) -> ExitCode {
-    // 走査は「先頭から順に」でなければならない。`--help` と `--version` は
-    // 見つけた時点で残りを無視するので、どちらが先に現れたかで結果が決まる
-    // (`--version --help` は version)。全体を検索してから判定すると、引数の
-    // 順序と無関係にどちらか一方が常に勝ってしまう
-    let mut operands: Vec<&String> = Vec::new();
-    let mut options_ended = false;
+/// clap のエラーを 1 行の診断にまとめる。
+///
+/// 単純に描画の 1 行目を取ると意味を失うものがある:
+/// - サブコマンド未指定は 1 行目が**コマンドの説明文**で、エラーに見えない
+/// - 必須引数の不足は、足りない引数の名前が次の行にある
+///
+/// そのため種別ごとに扱う
+fn usage_message(error: &clap::Error) -> String {
+    use clap::error::ErrorKind;
 
-    for arg in args {
-        // `--` はオプション解析の終端であって、以降を捨てるものではない。
-        // 後続はオペランド (コマンド名やその引数) として残す。SD のファイル名は
-        // firmware が `[A-Za-z0-9._-]` を許すので `-x.nes` が実在しうる
-        let is_terminator = !options_ended && arg == "--";
-        if is_terminator {
-            options_ended = true;
-            continue;
+    match error.kind() {
+        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => "missing command".to_string(),
+        ErrorKind::MissingRequiredArgument | ErrorKind::MissingSubcommand => {
+            let rendered = error.render().to_string();
+            // 「何が足りないか」は次行以降にあるので、空行までを 1 行にまとめる
+            let detail: Vec<&str> = rendered
+                .lines()
+                .map(|line| line.trim_start_matches("error: ").trim())
+                .take_while(|line| !line.is_empty())
+                .filter(|line| !line.is_empty())
+                .collect();
+            let has_detail = !detail.is_empty();
+            if has_detail {
+                return detail.join(" ");
+            }
+            "missing a required argument".to_string()
         }
-
-        let is_option = !options_ended && arg.starts_with('-') && arg.len() > 1;
-        if !is_option {
-            operands.push(arg);
-            continue;
-        }
-
-        let wants_help = arg == "-h" || arg == "--help";
-        if wants_help {
-            println!("{USAGE}\n\n{EXIT_STATUS_HELP}\n\n{AFTER_HELP}");
-            return ExitCode::Success;
-        }
-
-        let wants_version = arg == "-V" || arg == "--version";
-        if wants_version {
-            println!("{VERSION_TEXT}");
-            return ExitCode::Success;
-        }
-
-        return usage_error(&format!("unrecognised option '{arg}'"));
-    }
-
-    // 使用法エラーは stdout を汚さず stderr へ。出力先を分けておかないと、
-    // `--json` を付けた呼び出しで stdout をパースする側がエラー文を JSON として
-    // 読もうとして壊れる
-    match operands.first() {
-        None => usage_error("missing command"),
-        Some(unknown) => usage_error(&format!("unrecognised command '{unknown}'")),
-    }
-}
-
-/// GNU の `program: message` 書式で stderr に出し、使用法エラーとして返す
-fn usage_error(message: &str) -> ExitCode {
-    let program = env!("CARGO_PKG_NAME");
-    let mut stderr = std::io::stderr();
-    let _ = writeln!(stderr, "{program}: {message}");
-    let _ = writeln!(stderr, "Try '{program} --help' for more information.");
-    ExitCode::Usage
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn args(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| (*s).to_string()).collect()
-    }
-
-    #[test]
-    fn help_and_version_succeed() {
-        for flag in ["-h", "--help", "-V", "--version"] {
-            assert_eq!(run(&args(&[flag])), ExitCode::Success, "flag {flag}");
-        }
-    }
-
-    #[test]
-    fn no_command_is_a_usage_error() {
-        assert_eq!(run(&args(&[])), ExitCode::Usage);
-    }
-
-    #[test]
-    fn unknown_command_is_a_usage_error() {
-        assert_eq!(run(&args(&["frobnicate"])), ExitCode::Usage);
-    }
-
-    // `--` の後ろは値であってオプションではない。ここを取り違えると
-    // `sd rm -- --help` がファイルを消さずにヘルプを出してしまう
-    #[test]
-    fn options_after_the_terminator_are_not_interpreted() {
-        assert_eq!(run(&args(&["--", "--help"])), ExitCode::Usage);
-        assert_eq!(run(&args(&["--", "-V"])), ExitCode::Usage);
-    }
-
-    // `--` は解析を止めるだけで、後続を捨てはしない。捨ててしまうと
-    // `sd rm -- -x.nes` のファイル名が消え、段階1 以降のディスパッチが成立しない
-    #[test]
-    fn the_terminator_keeps_operands() {
-        // オペランドが残っていれば「コマンド名として認識できない」に倒れる。
-        // 捨てられていると「コマンドが無い」になってしまう
-        assert_eq!(run(&args(&["--", "frobnicate"])), ExitCode::Usage);
-        assert_eq!(run(&args(&["--", "-x.nes"])), ExitCode::Usage);
-    }
-
-    // GNU では先に現れた方が勝ち、残りは無視される
-    #[test]
-    fn the_first_of_help_or_version_wins() {
-        // 出力の中身は結合テスト (tests/cli.rs) で見る。ここでは順序を入れ替えても
-        // どちらも成功で返ること = 片方が常に勝つ実装になっていないことを押さえる
-        assert_eq!(run(&args(&["--version", "--help"])), ExitCode::Success);
-        assert_eq!(run(&args(&["--help", "--version"])), ExitCode::Success);
-    }
-
-    #[test]
-    fn unknown_option_is_a_usage_error() {
-        assert_eq!(run(&args(&["--nope"])), ExitCode::Usage);
-        assert_eq!(run(&args(&["-z"])), ExitCode::Usage);
-    }
-
-    // 単独の `-` は慣例的に stdin を指すオペランドで、オプションではない
-    // (`rom send -` で使う)
-    #[test]
-    fn a_lone_dash_is_an_operand() {
-        assert_eq!(run(&args(&["-"])), ExitCode::Usage);
-    }
-
-    #[test]
-    fn version_text_follows_the_gnu_layout() {
-        let mut lines = VERSION_TEXT.lines();
-        assert_eq!(lines.next(), Some("stackchan 0.1.0"));
-        assert!(
-            lines
+        _ => {
+            let rendered = error.render().to_string();
+            rendered
+                .lines()
                 .next()
-                .is_some_and(|l| l.starts_with("Copyright (C) "))
-        );
-        assert!(lines.next().is_some_and(|l| l.starts_with("License MIT:")));
-    }
-
-    // --help がバグ報告先を欠くと GNU の要件を満たさない
-    #[test]
-    fn help_points_at_the_bug_tracker() {
-        assert!(AFTER_HELP.contains("Report bugs to:"));
+                .unwrap_or("invalid arguments")
+                .trim_start_matches("error: ")
+                .to_string()
+        }
     }
 }
