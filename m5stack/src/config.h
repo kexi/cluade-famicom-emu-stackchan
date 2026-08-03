@@ -552,6 +552,68 @@ constexpr int HEAD_TOUCH_TRAVEL_TO_MENU = 4;
 // 置いたまま考えている・単発の一撫でを、後から来る撫でと合算しないため。
 constexpr uint32_t HEAD_TOUCH_TRAVEL_RESET_MS = 1000;
 
+// ----------------------------------------------------------------- USB pad
+// USB-C 直結の Nintendo Switch Pro Controller。CoreS3 の USB-C ポートを
+// ホストモードで使い、有線プロコンをそのままファミコンのパッドとして読む。
+//
+// Why not USB HID クラスドライバ: プロコンは HID インターフェースを名乗るが
+// レポートディスクリプタが実態と合っておらず (Nintendo 独自プロトコル)、
+// 汎用 HID パーサを通しても意味のあるボタンが取れない。エンドポイントだけ
+// 借りて生バイトを自前で解釈するほうが短く確実。
+//
+// Why not BLE 接続: プロコンの BLE は Nintendo 独自のペアリング手順が要る上、
+// WiFi と同じ 2.4GHz 帯を食う。このファームは UDP パッドと Web UI で WiFi を
+// 常用するので、無線を増やさない有線を選んだ。
+constexpr uint16_t USB_PAD_VID = 0x057E;   // Nintendo Co., Ltd.
+constexpr uint16_t USB_PAD_PID = 0x2009;   // Switch Pro Controller (有線・USB)
+
+// 左スティックを十字キーに写すときのデッドゾーン。プロコンの 0x3F レポートは
+// 各軸 uint16 (中心 ~0x8000) なので、±0x8000 レンジの 25% にあたる。Grove
+// ジョイスティックの JOY_DEADZONE (±128 の ~31%) より気持ち緩く、ドリフトは
+// 拾わずに軽い倒しでも反応する幅。
+constexpr int USB_PAD_STICK_DEADZONE = 0x2000;
+
+// スティック Y 軸の向き。0x3F レポートの Y が「上で増える」のか「下で増える」
+// のかは実機未検証なので、逆に感じたらここを反転する (Grove の JOY_INVERT_Y と
+// 同じ役割)。
+constexpr bool USB_PAD_INVERT_Y = true;
+
+// ハンドシェイク (0x80 0x02 = HANDSHAKE) の応答待ちと再送回数。プロコンは挿して
+// から内部の初期化が終わるまで数百 ms 無反応なことがあるため、1 回で諦めずに
+// 再送する。500ms x 5 = 2.5 秒あればコールドスタートでも十分間に合う。
+constexpr uint32_t USB_PAD_HANDSHAKE_RETRY_MS = 500;
+constexpr int USB_PAD_HANDSHAKE_RETRIES = 5;
+
+// 列挙済みデバイスの再走査周期。NEW_DEV イベントを取りこぼした状態 (ハンド
+// シェイク失敗や STALL で一度手放した直後) から抜けるための保険で、Grove の
+// JOY_REPROBE_MS と同じ 1 秒。挿しっぱなしのデバイスには NEW_DEV が二度と
+// 来ないので、これが無いと抜き差しするまで復帰できない。
+constexpr uint32_t USB_PAD_RESCAN_MS = 1000;
+// 再走査で見るデバイス数の上限。ハブ非対応なので実際には 1 台だが、
+// usb_host_device_addr_list_fill() に渡す配列長として少し余裕を持たせる。
+constexpr int USB_PAD_MAX_DEVICES = 4;
+
+// USB ホストのタスクスタック。どちらも ESP-IDF の usb_host サンプルが使う
+// 4096 をそのまま採る。実処理は 64 バイトのレポートを解釈するだけで、深い
+// 再帰も大きなローカルも無い。
+constexpr uint32_t USB_LIB_TASK_STACK = 4096;
+constexpr uint32_t USB_PAD_TASK_STACK = 4096;
+// 優先度。core 0 の序列は UDP 5 > Speaker 4 > Grove 3。
+// - usbh (2): usb_host_lib_handle_events() を回すだけのデーモン。実際に仕事を
+//   するのは列挙・切断の瞬間だけなので、Grove より下でよい
+// - usbpad (3): Grove と同格の「入力ソース」。音声 (4) を遅らせてはいけない
+//   点も Grove と同じ理由で、同じ優先度に置く
+// 型が UBaseType_t でなく unsigned なのは、config.h が cstdint だけで完結して
+// いるため: 優先度 2 つのために FreeRTOS のヘッダを引き込むと、この定数表を
+// 読むすべての翻訳単位がそれを背負うことになる。
+constexpr unsigned USB_LIB_TASK_PRIO = 2;
+constexpr unsigned USB_PAD_TASK_PRIO = 3;
+
+// 画面右マージンに USB パッドの状態 (WAIT/ENUM/HS/RUN + ビット) を出す。
+// 実機で配線と Y 軸の向きを詰めるための足場で、シリアルが USB ホスト化で
+// 死んでいる以上これが唯一の観測窓になる。実機検証が済んだら 0 にしてよい。
+#define USB_PAD_DEBUG 1
+
 // NES pad bit layout (matches Pad::setButtons and the UDP protocol).
 constexpr uint8_t NES_BTN_A = 0x01;
 constexpr uint8_t NES_BTN_B = 0x02;

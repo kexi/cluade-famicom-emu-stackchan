@@ -21,6 +21,7 @@
 #include "menu.h"
 #include "sd_rom.h"
 #include "secrets.h"
+#include "usb_pad.h"
 
 // What the frame loop is currently doing. The two modes are mutually exclusive
 // owners of the panel and the speaker: Game drives them through the band DMA
@@ -667,6 +668,12 @@ void setup() {
     auto cfg = M5.config();
     M5.begin(cfg);
 
+    // USB-C の VBUS を上げる。usbPadInit() は setup() の末尾まで待つが、給電だけ
+    // ここで先に始めておくと、プロコンが自分の中で立ち上がる時間を setup() の
+    // 残り (WiFi 接続や SD 走査で数秒) と重ねられる。列挙が始まる頃には
+    // コントローラ側の準備が終わっている。
+    M5.Power.setUsbOutput(true);
+
     Serial.begin(115200);
 
     M5.Display.setRotation(1);
@@ -743,6 +750,12 @@ void setup() {
     Serial.printf("DISPLAY: %dx%d rot=%d push=(%d,%d,%d,%d)\n", M5.Display.width(), M5.Display.height(),
                   M5.Display.getRotation(), SCREEN_X_OFFSET, 0, NES_WIDTH, NES_HEIGHT);
 
+    // ここまで来れば起動ログは全部出し終えている。ESP32-S3 の USB PHY は 1 つ
+    // しかないので、これ以降 USB Serial/JTAG は死ぬ (PC へのログも自動書き込みも
+    // 効かない) — だから setup() のどこでもなく、最後に呼ぶ。デバッグに要る
+    // 情報 (IP、SD の ROM 一覧、DISPLAY:) はこの手前で吐き切ってある。
+    usbPadInit();
+
     // The picker only earns the boot delay when there is something on the card
     // to pick. With no card, or an empty /roms, the only choice it could offer
     // is the built-in image that was just loaded, so a device without an SD
@@ -795,7 +808,7 @@ static void applyHeadTouch() {
     g_menuRequested.store(true, std::memory_order_relaxed);
 }
 
-// Pad 1 is the OR of every local source (Grove units, touch zones) and the UDP
+// Pad 1 is the OR of every local source (Grove units, USB pad, touch zones) and the UDP
 // sender. Only the UDP bits are subject to the staleness timeout — a physical
 // button that is held down should stay down.
 static void applyInput() {
@@ -803,7 +816,7 @@ static void applyInput() {
     const bool udpStale = sinceRx > INPUT_TIMEOUT_MS;
     const uint8_t udp0 = udpStale ? 0 : g_padBits[0].load(std::memory_order_relaxed);
     const uint8_t udp1 = udpStale ? 0 : g_padBits[1].load(std::memory_order_relaxed);
-    g_nes.pad[0].setButtons(udp0 | groveInputBits() | touchButtonBits());
+    g_nes.pad[0].setButtons(udp0 | groveInputBits() | usbPadBits() | touchButtonBits());
     g_nes.pad[1].setButtons(udp1);
     // パッドのビットには寄与しない (撫でるのはメニューを開く操作であって
     // ボタンではない) が、同じ「毎フレームの入力取り込み」の一部なのでここに置く。
@@ -1512,12 +1525,12 @@ static void applySdRequest() {
 // caller's only job is to stop emulating while this is up.
 static void menuLoop() {
     M5.update();
-    // The Grove pad and the UDP pad both drive the picker, so a user with a
-    // joystick plugged in never has to reach for the touch strip.
+    // The Grove pad, the USB pad and the UDP pad all drive the picker, so a user
+    // with a controller plugged in never has to reach for the touch strip.
     const uint32_t sinceRx = millis() - g_lastRxMs.load(std::memory_order_relaxed);
     const bool udpStale = sinceRx > INPUT_TIMEOUT_MS;
     const uint8_t udpBits = udpStale ? 0 : g_padBits[0].load(std::memory_order_relaxed);
-    uint8_t nav = udpBits | groveInputBits();
+    uint8_t nav = udpBits | groveInputBits() | usbPadBits();
     if (M5.BtnB.isPressed()) nav |= NES_BTN_START;
 
     // A hold on BtnC while the picker is up means "never mind": go back to
@@ -1682,6 +1695,35 @@ static uint32_t updatePlaybackRate(uint32_t current, int produced, int64_t frame
     if (target < low) target = low;
     if (target > high) target = high;
     return (uint32_t)(target + 0.5f);
+}
+
+// USB パッドの状態を画面右の余白に出す。USB ホストモードに入るとシリアルが
+// 死ぬので、実機で列挙・ハンドシェイク・ビット割り当てを詰めるための唯一の
+// 観測窓がこれになる。
+//
+// 描く場所は NES 画面 (x=32..287) の右外側、x=290 から。バンド DMA が触るのは
+// 常に x=SCREEN_X_OFFSET..+NES_WIDTH-1 なので、左右の余白は誰とも競合しない。
+// 呼び出し側が joinBand() の直後に置いているのは、SPI バスのロックを跨がない
+// ためで、領域が別なだけでは足りない。
+static void drawUsbPadOverlay() {
+#if USB_PAD_DEBUG
+    // 1 秒周期。デバッグ表示のために毎フレーム SPI を叩く価値はない。
+    static uint32_t lastMs = 0;
+    const uint32_t now = millis();
+    const bool tooSoon = now - lastMs < 1000;
+    if (tooSoon) return;
+    lastMs = now;
+
+    M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    M5.Display.setTextSize(1);
+    // 幅を固定して詰める: 右余白は 32px しかなく、短い文字列に切り替わったとき
+    // 前の描画が残ると読めなくなる。
+    char line[12];
+    snprintf(line, sizeof(line), "%-4s", usbPadDebugStatus());
+    M5.Display.drawString(line, SCREEN_X_OFFSET + NES_WIDTH + 2, 2);
+    snprintf(line, sizeof(line), "%02X  ", usbPadBits());
+    M5.Display.drawString(line, SCREEN_X_OFFSET + NES_WIDTH + 2, 12);
+#endif
 }
 
 void loop() {
@@ -1958,6 +2000,10 @@ void loop() {
     // joins first.
     joinBand();
     const int64_t joinEndUs = esp_timer_get_time();
+
+    // 直前の joinBand() と次の pushBand() のあいだ、バンドが 1 つも飛んでいない
+    // この一点だけが、フレームループからパネルに触れてよい場所。
+    drawUsbPadOverlay();
 
     const bool hasBandToPush = drawThisFrame || pictureInFlight;
     if (hasBandToPush) {
