@@ -1,0 +1,117 @@
+# 実機操作 CLI (cli/) の配布バイナリを 3 ターゲット分作り、GitHub Release に
+# 上げる。ツールチェーンはローカルおよび他の CI ジョブと同じ nix flake から
+# 供給するので、配られるバイナリは手元と同じ rustc でビルドされる。
+#
+# クロスコンパイルはしない。3 ターゲットすべてにネイティブランナーがあり、
+# クロスにすると flake に pkgsCross とリンカ設定が要る (62 行の flake が
+# 倍近くなる)。cross も使わない — Docker を要求し、nix devShell の外に
+# 別のツールチェーン供給経路を作ることになる。
+#
+# 手動起動なのは、タグを焼く前に全アセットが揃っていることを確かめたいため。
+# `on: release: [published]` だと、アセットのアップロード前にタグが公開される
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to create or reuse (e.g. cli-v0.1.0)"
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  build:
+    strategy:
+      # 1 ターゲットが落ちても残りは見たい。揃わなければ publish が走らない
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            # macOS の HID は IOKit なのでシステム依存が無く、feature を保てる
+            features: ""
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            # Linux の hidapi は libudev (hidraw backend) を dlopen するので
+            # 静的リンクできない。配布物が実行環境の libudev.so.1 に依存すると
+            # 「ダウンロードしても動かない」が起きるため、HID を落として配る。
+            # input procon / input list はその旨を出して exit 1 で答える
+            features: "--no-default-features"
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            features: "--no-default-features"
+
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cli/target
+          key: cargo-release-${{ matrix.target }}-${{ hashFiles('cli/Cargo.lock', 'flake.lock') }}
+
+      # --locked は Cargo.lock と食い違う依存で暗黙に配らないため。
+      # 配布物なので、手元で試した版がそのまま出ることが要る
+      - name: Build
+        run: nix develop --command cargo build --release --locked --manifest-path cli/Cargo.toml ${{ matrix.features }}
+
+      # 出せたものが動くことだけは確かめる。実機は要らない
+      - name: Smoke test
+        run: |
+          ./cli/target/release/stackchan --version
+          ./cli/target/release/stackchan --help > /dev/null
+
+      # ランナーのアーキテクチャで名前が衝突しないよう、ターゲット名を付ける
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp cli/target/release/stackchan "dist/stackchan-${{ matrix.target }}"
+          cd dist && shasum -a 256 "stackchan-${{ matrix.target }}" > "stackchan-${{ matrix.target }}.sha256"
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: stackchan-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      # gh release create は draft → upload → publish を内部で踏むので、
+      # Immutable Releases の下でもアセットが揃ってからタグが公開される。
+      # 既にタグがあるときは upload に切り替える (作り直しは履歴を壊す)
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          ls -la dist/
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "$TAG" \
+              --notes "Device CLI binaries. The Linux builds have no HID support (\`input procon\` and \`input list\`); see cli/README.md."
+          fi
