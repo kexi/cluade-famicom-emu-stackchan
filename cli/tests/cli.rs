@@ -294,3 +294,41 @@ fn hyphen_leading_values_survive_the_terminator() {
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("-5"), "got: {}", stderr(&out));
 }
+
+/// `--timeout` は「1 回の応答をどれだけ待つか」を置き換える。
+///
+/// 受け付けられるだけでは足りない — 値が transport まで届かないと、
+/// オプションはあるのに何も変わらないという最悪の形になる。所要時間で
+/// 効果を見る
+#[test]
+fn the_timeout_option_shortens_the_wait() {
+    use std::time::Instant;
+
+    // TEST-NET-1 (RFC 5737)。返事は来ないので必ず締切まで待つ
+    let started = Instant::now();
+    let out = run(&["--host", "192.0.2.1", "--timeout", "0.5", "sd", "ls"]);
+    let elapsed = started.elapsed();
+
+    assert_eq!(out.status.code(), Some(3), "expected a timeout exit");
+    // SD は 3 回試すので 0.5s × 3 = 1.5s 前後。既定 (3s × 3 = 9s) との差は
+    // 大きく、取り違えようがない
+    assert!(
+        elapsed.as_secs_f64() < 4.0,
+        "--timeout did not reach the transport: took {elapsed:?}"
+    );
+}
+
+/// 0 と負数は「待たない」になり、応答を待つコマンドが必ず失敗する。
+/// 無限大や NaN は `Duration::from_secs_f64` がパニックする
+#[test]
+fn the_timeout_option_rejects_values_it_cannot_honour() {
+    for bad in ["0", "-1", "abc", "inf", "NaN", "1e9"] {
+        let out = run(&["--host", "192.0.2.1", "--timeout", bad, "sd", "ls"]);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "--timeout {bad} was not refused: {}",
+            stderr(&out)
+        );
+    }
+}

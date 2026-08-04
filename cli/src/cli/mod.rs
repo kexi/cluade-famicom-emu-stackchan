@@ -75,6 +75,12 @@ pub struct GlobalArgs {
     #[arg(short = 'p', long, env = "STACKCHAN_PORT", default_value_t = DEFAULT_PORT, global = true)]
     pub port: u16,
 
+    // 置き換えるのは 1 回の応答をどれだけ待つかだけで、再送間隔や BUSY を
+    // 待つ上限は据え置く (transport::Device::set_timeout 参照)
+    /// Seconds to wait for a single reply, overriding the per-command default
+    #[arg(short = 't', long, env = "STACKCHAN_TIMEOUT", global = true, value_parser = parse_timeout)]
+    pub timeout: Option<f64>,
+
     /// Machine-readable output
     #[arg(long, global = true)]
     pub json: bool,
@@ -86,6 +92,27 @@ pub struct GlobalArgs {
     /// Trace what is sent and received (-vv adds a hex dump)
     #[arg(short = 'v', long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
+}
+
+/// `--timeout` の値域。
+///
+/// 0 と負数を弾くのは、`Duration` にすると「待たない」になり、応答を待つ
+/// コマンドが必ず失敗するため。上限を置くのは、`Duration::from_secs_f64` が
+/// 表現できない値 (無限大・NaN・u64 秒を超える値) でパニックするため —
+/// 使用法エラーとして返すほうが、AI に叩かせたときに直せる
+fn parse_timeout(raw: &str) -> Result<f64, String> {
+    const MAX_SECONDS: f64 = 3600.0;
+
+    let seconds: f64 = raw
+        .parse()
+        .map_err(|_| format!("'{raw}' is not a number of seconds"))?;
+    let is_in_range = seconds.is_finite() && seconds > 0.0 && seconds <= MAX_SECONDS;
+    if !is_in_range {
+        return Err(format!(
+            "timeout must be greater than 0 and at most {MAX_SECONDS} seconds"
+        ));
+    }
+    Ok(seconds)
 }
 
 impl GlobalArgs {
@@ -103,7 +130,10 @@ impl GlobalArgs {
                 ExitCode::Usage,
             ));
         };
-        Device::new(host, self.port, self.verbose).map_err(|e| (format!("{e}"), ExitCode::Failure))
+        let mut device = Device::new(host, self.port, self.verbose)
+            .map_err(|e| (format!("{e}"), ExitCode::Failure))?;
+        device.set_timeout(self.timeout.map(std::time::Duration::from_secs_f64));
+        Ok(device)
     }
 }
 

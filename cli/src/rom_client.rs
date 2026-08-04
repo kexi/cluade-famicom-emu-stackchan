@@ -302,8 +302,9 @@ fn send_until_ack(
     // 「予算超過だから失敗」と覆すことはしない — firmware 側では既に
     // 適用が予約されているかもしれないため
     let allowed = (budget.remaining() + 1).min(RETRIES as u32) as u8;
+    let timeout = socket.timeout_or(TIMEOUT);
     for attempt in 0..allowed.max(1) {
-        let found = socket.exchange(packet, TIMEOUT, |reply| {
+        let found = socket.exchange(packet, timeout, |reply| {
             let ack = rom::parse_ack(reply, session, op)?;
             // ステータスによらず番号で照合する。firmware は順序ずれの通知でも
             // **受け取ったチャンク番号をそのままエコーする** (`main.cpp:395`)

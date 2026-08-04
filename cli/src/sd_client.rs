@@ -83,9 +83,10 @@ pub fn list(device: &mut Device) -> Result<SdListing> {
     with_busy_retry(|| {
         let seq = device.next_seq();
         let packet = sd::list(seq);
+        let timeout = device.timeout_or(TIMEOUT);
 
         let listing: BusyOr<SdListing> =
-            device.request_parts(&packet, TIMEOUT, retry_for(SdOp::List), || {
+            device.request_parts(&packet, timeout, retry_for(SdOp::List), || {
                 // パートは試行ごとに集め直す。1 つ落ちたら全体を捨てて再送する
                 // ほうが、少なく見える一覧を返すよりよい
                 let mut parts: Vec<SdListPart> = Vec::new();
@@ -144,8 +145,9 @@ fn simple_op(
     with_busy_retry(|| {
         let seq = device.next_seq();
         let packet = build(seq).map_err(SdError::Local)?;
+        let timeout = device.timeout_or(TIMEOUT);
 
-        let ack: BusyOr<SdAck> = device.request(&packet, TIMEOUT, retry_for(op), |reply| {
+        let ack: BusyOr<SdAck> = device.request(&packet, timeout, retry_for(op), |reply| {
             let ack = sd::parse_ack(reply, seq, op)?;
             // BUSY を待ち直してよいのは冪等な操作だけ。
             //

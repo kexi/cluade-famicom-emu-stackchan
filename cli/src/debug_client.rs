@@ -133,10 +133,11 @@ pub type Result<T> = std::result::Result<T, DebugError>;
 pub fn snapshot(device: &mut Device, want_waves: bool) -> Result<(Snapshot, Registers)> {
     let seq = device.next_seq();
     let packet = debug::request_snapshot(seq, want_waves);
+    let timeout = device.timeout_or(TIMEOUT);
 
     // 取り直しても「さっきの状態」は返らないので 1 回きり
     let body: Vec<u8> =
-        device.request_parts(&packet, TIMEOUT, Retry::Idempotent { attempts: 1 }, || {
+        device.request_parts(&packet, timeout, Retry::Idempotent { attempts: 1 }, || {
             let mut parts: Vec<DebugPart> = Vec::new();
             move |reply: &[u8]| {
                 let Some(part) = debug::parse_part(reply, seq) else {
