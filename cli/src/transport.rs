@@ -17,7 +17,7 @@
 //!    「送ったが結果が判らない」を「失敗した」と報告してはいけない。
 
 use std::io;
-use std::net::{ToSocketAddrs, UdpSocket};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
 use crate::exit::ExitCode;
@@ -104,12 +104,29 @@ impl Retry {
     }
 }
 
+/// 解決したアドレスを持ち回してよい時間。
+///
+/// **毎回引き直す実装から変えた理由は実測。** macOS の `getaddrinfo` は
+/// `.local` を 1 回引くのに約 5 秒かかる (`192.168.x.x` は 0ms)。60Hz で
+/// 送るコマンドは 1 秒ぶんの入力に 5 分かかり、ROM 転送は 48KB に 3 分かかって
+/// いた — どちらも実機で踏んだ。
+///
+/// キャッシュせずに済ませられないのは、`send` が呼ばれる頻度が op によって
+/// 桁違いだから。`ctrl reset` の 1 発と `input procon` の毎秒 120 発を
+/// 同じ経路が扱う。
+///
+/// 5 秒にしたのは、これが「解決 1 回ぶんの時間」だから。これより短くすると
+/// 解決が解決を追いかけ、長くすると DHCP でアドレスが変わったときに古い
+/// 宛先へ送り続ける窓が広がる。DHCP のリース更新は分単位なので、5 秒の
+/// 取りこぼしはユーザーが「反応しない」と感じる前に自然に直る
+const ADDRESS_TTL: Duration = Duration::from_secs(5);
+
 /// デバイスとの通信。
 ///
-/// ホストは文字列のまま持つ。`SocketAddr` に解決してキャッシュすると、DHCP で
-/// アドレスが変わったときに黙って古い宛先へ送り続ける (`serve_web.py` は
-/// `sendto` に文字列を渡して毎回 OS に解決させており、その挙動を保つ)。
-/// `input procon` のような長時間動くコマンドで効いてくる
+/// ホストは文字列のまま持ち、解決結果は `ADDRESS_TTL` だけ使い回す。
+/// `SocketAddr` を永続的にキャッシュすると、DHCP でアドレスが変わったときに
+/// 黙って古い宛先へ送り続ける (`serve_web.py` は `sendto` に文字列を渡して
+/// 毎回 OS に解決させており、その意図を期限付きで保つ)
 pub struct Device {
     host: String,
     port: u16,
@@ -117,6 +134,10 @@ pub struct Device {
     /// 応答を待たない送信専用。開きっぱなしでよい
     sender: UdpSocket,
     verbose: u8,
+    /// `--timeout` の指定。op ごとの既定を置き換える
+    timeout: Option<Duration>,
+    /// 直近の解決結果と、それを引いた時刻
+    resolved: Option<(SocketAddr, Instant)>,
 }
 
 impl Device {
@@ -129,11 +150,28 @@ impl Device {
             seq: 0,
             sender,
             verbose,
+            timeout: None,
+            resolved: None,
         })
     }
 
     pub fn with_default_port(host: &str, verbose: u8) -> Result<Self> {
         Self::new(host, DEFAULT_PORT, verbose)
+    }
+
+    /// 1 回の応答待ちの締切を上書きする。
+    ///
+    /// 置き換えるのは「1 回の応答をどれだけ待つか」だけで、再送間隔や
+    /// BUSY を待つ上限には触らない。1 つの数字で全部を殴らせないため —
+    /// ROM の 0.3s と SD の BUSY 12s は意味が違い、前者を伸ばしたいときに
+    /// 後者まで伸びると転送が固まったまま返らなくなる
+    pub fn set_timeout(&mut self, timeout: Option<Duration>) {
+        self.timeout = timeout;
+    }
+
+    /// op ごとの既定に `--timeout` を被せる
+    pub fn timeout_or(&self, default: Duration) -> Duration {
+        self.timeout.unwrap_or(default)
     }
 
     pub fn host(&self) -> &str {
@@ -148,6 +186,30 @@ impl Device {
 
     fn target(&self) -> (&str, u16) {
         (self.host.as_str(), self.port)
+    }
+
+    /// 送り先のアドレス。`ADDRESS_TTL` を過ぎていれば引き直す。
+    ///
+    /// 解決に失敗したときに古いアドレスへ倒さないのは、失敗の理由が
+    /// 「機体が居なくなった」のときに、居ない宛先へ送り続けて成功したように
+    /// 見えるため。エラーを返して呼び出し側に判断させる
+    fn address(&mut self) -> Result<SocketAddr> {
+        let is_fresh = self
+            .resolved
+            .is_some_and(|(_, at)| at.elapsed() < ADDRESS_TTL);
+        if is_fresh {
+            return Ok(self.resolved.expect("just checked").0);
+        }
+
+        let mut addrs = self.target().to_socket_addrs()?;
+        let Some(addr) = addrs.next() else {
+            return Err(TransportError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("could not resolve '{}'", self.host),
+            )));
+        };
+        self.resolved = Some((addr, Instant::now()));
+        Ok(addr)
     }
 
     fn trace(&self, message: &str) {
@@ -169,7 +231,8 @@ impl Device {
     /// firmware 側も ACK を返さない
     pub fn send(&mut self, packet: &[u8]) -> Result<()> {
         self.trace_bytes("send", packet);
-        self.sender.send_to(packet, self.target())?;
+        let to = self.address()?;
+        self.sender.send_to(packet, to)?;
         Ok(())
     }
 
@@ -202,7 +265,8 @@ impl Device {
                 ));
             }
             self.trace_bytes("send", packet);
-            socket.send_to(packet, self.target())?;
+            let to = self.address()?;
+            socket.send_to(packet, to)?;
 
             let deadline = Instant::now() + timeout;
             loop {
@@ -276,7 +340,8 @@ impl Device {
             let mut collect = new_collector();
 
             self.trace_bytes("send", packet);
-            socket.send_to(packet, self.target())?;
+            let to = self.address()?;
+            socket.send_to(packet, to)?;
 
             let deadline = Instant::now() + timeout;
             let mut refused = None;
@@ -331,6 +396,9 @@ impl Device {
             port: self.port,
             buffer: vec![0u8; 2048],
             verbose: self.verbose,
+            timeout: self.timeout,
+            // 解決済みなら引き継ぐ。転送のたびに 1 回ぶん引き直すのを避ける
+            resolved: self.resolved,
         })
     }
 
@@ -338,16 +406,12 @@ impl Device {
     ///
     /// 送信だけなら `send_to` が失敗した時点で判るが、`.local` が引けない
     /// 環境ではエラーが「送れなかった」ではなく「答えが来ない」に見えて
-    /// しまうことがあるので、必要な場面では明示的に呼ぶ
-    pub fn resolve(&self) -> Result<()> {
-        let mut addrs = self.target().to_socket_addrs()?;
-        let has_an_address = addrs.next().is_some();
-        if !has_an_address {
-            return Err(TransportError::Io(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("could not resolve '{}'", self.host),
-            )));
-        }
+    /// しまうことがあるので、必要な場面では明示的に呼ぶ。
+    ///
+    /// 結果は捨てずにキャッシュへ入れる — 捨てると直後の `send` が
+    /// もう一度引き直し、`.local` では 5 秒を 2 回払うことになる
+    pub fn resolve(&mut self) -> Result<()> {
+        self.address()?;
         Ok(())
     }
 }
@@ -363,9 +427,41 @@ pub struct Session {
     port: u16,
     buffer: Vec<u8>,
     verbose: u8,
+    /// `--timeout` の指定。開いた `Device` から引き継ぐ
+    timeout: Option<Duration>,
+    /// 直近の解決結果と、それを引いた時刻 (`Device` と同じ扱い)
+    resolved: Option<(SocketAddr, Instant)>,
 }
 
 impl Session {
+    /// op ごとの既定に `--timeout` を被せる
+    pub fn timeout_or(&self, default: Duration) -> Duration {
+        self.timeout.unwrap_or(default)
+    }
+
+    /// 送り先のアドレス。`Device::address` と同じ理由で期限付きに持ち回す。
+    ///
+    /// ROM 転送はチャンクごとにここを通るので、毎回引き直すと `.local` では
+    /// 1 チャンクあたり 5 秒が上乗せされる (48KB で実測 194 秒だった)
+    fn address(&mut self) -> Result<SocketAddr> {
+        let is_fresh = self
+            .resolved
+            .is_some_and(|(_, at)| at.elapsed() < ADDRESS_TTL);
+        if is_fresh {
+            return Ok(self.resolved.expect("just checked").0);
+        }
+
+        let mut addrs = (self.host.as_str(), self.port).to_socket_addrs()?;
+        let Some(addr) = addrs.next() else {
+            return Err(TransportError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("could not resolve '{}'", self.host),
+            )));
+        };
+        self.resolved = Some((addr, Instant::now()));
+        Ok(addr)
+    }
+
     /// 1 往復。`packet` が空なら送らずに待つだけ (保存イベントのように、
     /// こちらから促さずに届くものを受けるとき)。
     ///
@@ -383,8 +479,8 @@ impl Session {
                 let hex: String = packet.iter().map(|b| format!("{b:02x}")).collect();
                 eprintln!("stackchan: send {} bytes: {hex}", packet.len());
             }
-            self.socket
-                .send_to(packet, (self.host.as_str(), self.port))?;
+            let to = self.address()?;
+            self.socket.send_to(packet, to)?;
         }
 
         let deadline = Instant::now() + timeout;
@@ -502,13 +598,61 @@ mod tests {
 
     #[test]
     fn resolve_reports_a_name_it_cannot_look_up() {
-        let device = Device::new("no-such-host.invalid", 5555, 0).unwrap();
+        let mut device = Device::new("no-such-host.invalid", 5555, 0).unwrap();
         assert!(device.resolve().is_err());
     }
 
     #[test]
     fn resolve_accepts_an_address_literal() {
-        let device = Device::new("127.0.0.1", 5555, 0).unwrap();
+        let mut device = Device::new("127.0.0.1", 5555, 0).unwrap();
         assert!(device.resolve().is_ok());
+    }
+
+    /// 解決結果を持ち回さないと `.local` では 1 回 5 秒が毎送信に乗る
+    /// (実測: macOS の getaddrinfo)。ROM 転送 48KB が 194 秒かかっていた
+    #[test]
+    fn the_address_is_reused_within_its_ttl() {
+        let mut device = Device::new("127.0.0.1", 5555, 0).unwrap();
+        let first = device.address().expect("127.0.0.1 resolves");
+        let at = device.resolved.expect("resolving stores the address").1;
+
+        let second = device.address().expect("still resolves");
+        assert_eq!(first, second);
+        assert_eq!(
+            device.resolved.expect("still cached").1,
+            at,
+            "the address was looked up again inside its TTL"
+        );
+    }
+
+    /// 期限が切れたら引き直す。切れないと DHCP でアドレスが変わったときに
+    /// 古い宛先へ送り続ける
+    #[test]
+    fn the_address_is_looked_up_again_once_it_expires() {
+        let mut device = Device::new("127.0.0.1", 5555, 0).unwrap();
+        device.address().expect("127.0.0.1 resolves");
+
+        // 期限切れを作る。実時間を待たずに、記録した時刻を過去へずらす
+        let (addr, at) = device.resolved.expect("resolving stores the address");
+        let expired = at
+            .checked_sub(ADDRESS_TTL + Duration::from_secs(1))
+            .expect("the test clock can go back");
+        device.resolved = Some((addr, expired));
+
+        device.address().expect("still resolves");
+        assert_ne!(
+            device.resolved.expect("still cached").1,
+            expired,
+            "an expired address was not looked up again"
+        );
+    }
+
+    /// 解決できなくなったら、古いアドレスへ倒さずにエラーを返す。
+    /// 倒すと「機体が居なくなった」ときに送り続けて成功に見える
+    #[test]
+    fn a_name_that_stops_resolving_is_an_error_not_a_stale_address() {
+        let mut device = Device::new("no-such-host.invalid", 5555, 0).unwrap();
+        assert!(device.address().is_err());
+        assert!(device.resolved.is_none(), "a failure must not be cached");
     }
 }
