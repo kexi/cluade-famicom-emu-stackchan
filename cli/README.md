@@ -21,10 +21,26 @@ ROM の書き込み・入れ替え・起動、SD 管理、本体制御、内部�
 just cli-build                       # cli/target/release/stackchan ができる
 ```
 
-リリースバイナリは GitHub Releases から取れる (macOS arm64 / Linux x64 / Linux arm64)。
-**Linux 版は Pro コントローラ対応 (HID) を落としてある** — `hidapi` が要求する
-`libudev` が静的リンクできないため。`input procon` と `input list` だけが使えず、
-他は全部動く。自前でビルドすれば Linux でも HID は使える。
+このドキュメントは `stackchan` を PATH から呼べる前提で書いてある。
+通していないなら `cli/target/release/stackchan` と読み替えるか、繋いでおく。
+
+```sh
+ln -s "$PWD/cli/target/release/stackchan" ~/.local/bin/stackchan
+```
+
+**リリースバイナリ**は GitHub Releases から取れる。名前はターゲットを含む
+(`stackchan-aarch64-apple-darwin` など)。同名の `.sha256` を添えてある。
+
+| ターゲット | HID (Pro コントローラ) |
+|---|---|
+| `aarch64-apple-darwin` | あり |
+| `x86_64-unknown-linux-gnu` | **なし** |
+| `aarch64-unknown-linux-gnu` | **なし** |
+
+Linux 版で HID を落としているのは、`hidapi` が要求する `libudev` を静的
+リンクできないため。配布物が実行環境の `libudev.so.1` に依存すると
+「落としても動かない」が起きる。使えなくなるのは `input procon` と
+`input list` だけで、他は全部動く。自前でビルドすれば Linux でも HID は使える。
 
 ## 接続先の指定
 
@@ -264,6 +280,11 @@ just format                          # rustfmt を含む整形
 プロトコル定数の正本は `m5stack/src/config.h`。`cli/src/proto/constants.rs` は
 その写しで、各定数のドキュメントに対応する C++ 側の名前を書いてある。
 食い違いを疑ったときはそちらを引くこと。
+
+写しが古びていないことは `cli/tests/proto_matches_config_h.rs` が機械的に
+確かめる (`just cli-test` に含まれる)。定数を足したらこのファイルの
+`mirrored()` にも足すこと — 足し忘れても既存の検査は通るので、
+「増えたぶんだけ検査から漏れる」が起きうる。
 
 実機が要らない検証はモックデバイス (`cli/tests/mock_*.rs`) が担う。パケットロス、
 BUSY、順序ずれ、部分欠落といった実機で故意に起こしにくい状況は、そちらのほうが
