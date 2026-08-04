@@ -14,7 +14,7 @@ Open any .NES file (iNES format) with "Open ROM". Works on desktop and Android C
 - The same C++ core, compiled with `-DNES_EMBEDDED`: CPU-ahead batched execution with catch-up at register accesses, a per-scanline PPU renderer, and a 256-entry CPU dispatch table with the hottest opcodes in IRAM. **Bit-exact against the web core's dot-accurate renderer** (verified frame-by-frame on host), currently ~33 fps on the 240 MHz ESP32-S3.
 - 256×240 RGB565 pushed to the LCD by DMA, fully overlapped with emulation; adaptive display divisor trades refresh rate for emulation speed.
 - Audio through the built-in speaker with a ring buffer; playback rate follows the measured frame rate so it stays continuous instead of underrunning.
-- Controller input over UDP — `just procon <device-ip>` streams a Nintendo Switch Pro Controller from your PC (`tools/procon_udp.py`).
+- Controller input over UDP — `stackchan input procon` streams a Nintendo Switch Pro Controller from your PC, `stackchan input keys` plays from the keyboard, and `stackchan input send A B START` scripts presses.
 - **The cartridge connector fault model runs on the device too.** All 60 pins can be broken at runtime; the healthy path costs a single branch, so full speed is kept until you start breaking pins.
 
 ### Browser → device mirroring
@@ -29,6 +29,19 @@ The device advertises itself over mDNS as `stackchan-<last 3 bytes of its MAC>.l
 
 Now the connector panel drives both emulators at once: tilt the cart and the Stack-chan glitches with the page, blow on it 💨, re-insert (which also presses RESET — reseating alone won't un-crash a wedged CPU, exactly like the real thing), and the master volume slider sets the device speaker. Protocol details (UDP types 0/1/2) are in [m5stack/README.md](m5stack/README.md).
 
+### Device CLI (`cli/`)
+A single Rust binary that speaks the device's UDP protocol directly, so ROM writes, swaps and launches can be driven from a script — or an AI — instead of a browser. No relay process is involved: `stackchan sd ls` talks to the board, not to `just serve`.
+
+```sh
+just cli-build                                  # cli/target/release/stackchan
+stackchan discover                              # find boards on the LAN over mDNS
+stackchan sd ls --json | jq .                   # every command has a machine-readable form
+stackchan rom send game.nes --save game.nes     # write to the SD card and boot it
+stackchan input send A B START                  # press buttons without a terminal
+```
+
+Exit codes separate "the device refused it" (1) from "no answer" (3) and from **"sent, outcome unknown"** (4) — the last one matters for delete and rename, which must never be retransmitted. Prebuilt binaries for macOS (Apple Silicon) and Linux (x64, arm64) are on the Releases page; see [cli/README.md](cli/README.md).
+
 ### Reproducible toolchain (nix)
 The whole toolchain — clang, Emscripten, PlatformIO, cargo, uv, just, lefthook, gitleaks — comes from a nix flake (Python scripts run through uv, which resolves the interpreter and dependencies from PEP 723 metadata at run time). With [nix](https://nixos.org) and [direnv](https://direnv.net) installed, `cd` into the repo and everything is provided; otherwise prefix commands with `nix develop --command`. Setup details (direnv/nix-direnv, the pre-commit hook, first-run steps) are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -37,10 +50,12 @@ The whole toolchain — clang, Emscripten, PlatformIO, cargo, uv, just, lefthook
 | Fast host/Web development loop (no flash) | `just dev [frames]` |
 | Build M5Stack firmware | `just build` |
 | Build + flash | `just flash [port]` |
-| Serial monitor | `just monitor` |
+| Serial monitor | `just monitor [port]` |
 | Fetch default ROM | `just fetch-rom` |
 | WiFi credentials template | `just secrets` (edit `m5stack/src/secrets.h`) |
-| Pro Controller → UDP | `just procon <device-ip>` |
+| Build the device CLI | `just cli-build` |
+| Device CLI (SD / ROM / debug / input) | `stackchan --help`, [cli/README.md](cli/README.md) |
+| Pro Controller → UDP | `just procon <device>` |
 | Build web (WASM) | `just build-web` |
 | Serve web + device relay | `just serve` |
 | Core syntax check (both modes) | `just check` |
@@ -156,7 +171,8 @@ core/     C++ emulator core (shared by web and M5Stack)
   cartridge.cpp  iNES loader + mappers 0-4
   nes.cpp        bus, 60-pin fault model, oscilloscope probe, WASM C API
 m5stack/  CoreS3 frontend (PlatformIO) — display DMA, speaker, UDP input, pin mirror
-tools/    procon_udp.py (Pro Controller → UDP), serve_web.py (web server + device relay)
+cli/      Rust CLI — the UDP protocol as a single binary (SD, ROM, debug, mDNS, input)
+tools/    serve_web.py (web server + device relay)
 web/      frontend (index.html / main.js / i18n.js / audio-worklet.js) + WASM output
 flake.nix / justfile   reproducible toolchain and task runner
 build.sh  Emscripten build + version stamping

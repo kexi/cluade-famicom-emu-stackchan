@@ -191,14 +191,23 @@ M5Stack 公式の StackChan ボディには頭頂部に静電容量式のタッ�
 ## Mac 側ツール
 
 ```sh
-uv run tools/procon_udp.py --host <CoreS3 の IP>
+just cli-build                                          # 初回のみ
+stackchan --host stackchan-xxxxxx.local input procon    # Switch Pro Controller
+stackchan --host stackchan-xxxxxx.local input keys      # キーボード
 ```
 
-Switch Pro Controller の入力を UDP で送信する。
-`uv` は `nix develop` で入り、依存 (pygame) はスクリプト内の
-PEP 723 メタデータから uv が解決する。pip install は不要。
+実機を操作する口はすべて `cli/` の CLI に集約してある。ROM の書き込み・
+入れ替え・起動、SD 管理、本体制御、内部状態の観測まで同じバイナリで扱う。
+使い方は [cli/README.md](../cli/README.md)。
+
+Pro コントローラ入力はかつて `tools/procon_udp.py` が担っていたが、
+CLI の `input procon` に移して削除した (`git log -- tools/procon_udp.py`)。
 
 ## UDP プロトコル
+
+この仕様の実装は 3 つある。正本は `src/config.h` の定数で、
+Rust 側は `cli/src/proto/`、Python 側は `tools/serve_web.py`。
+食い違いを疑ったときは `src/config.h` を引くこと。
 
 ポート 5555。オフセット 3 が **type** で、パケット種別を表す。
 旧クライアントはここを `reserved = 0` として送っていたため、

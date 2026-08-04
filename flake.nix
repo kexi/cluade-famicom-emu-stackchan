@@ -2,7 +2,12 @@
   description = "Famicom emulator dev environment (web + M5Stack CoreS3)";
 
   inputs = {
-    # unstable は darwin で pygame-ce のビルドが壊れているため 25.05 に固定
+    # 25.05 に固定。元の理由は「unstable は darwin で pygame-ce のビルドが
+    # 壊れている」で、pygame は tools/procon_udp.py の SDL バックエンドが
+    # 使っていた。そのスクリプトを CLI へ移して削除したので pygame 依存は
+    # 消えており、この固定を外せる見込みがある — ただし unstable へ上げると
+    # emscripten や platformio まで一斉に動くので、影響範囲を測れる別の変更
+    # として扱う (このリポジトリの他のツールは全部この pkgs から来ている)
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
     # oxlint / oxfmt 専用の第 2 入力。25.05 には oxfmt が無く oxlint も 0.16.7 と
     # 古いため (設定形式が現行と別物)、この 2 つだけ unstable から取る。
