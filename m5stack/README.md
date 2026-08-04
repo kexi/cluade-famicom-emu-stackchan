@@ -22,7 +22,8 @@ pio run -t upload
 
 1. microSD をマウントし、`/roms/` の `.nes` を走査してシリアルに一覧を出力
 2. `Connecting to <SSID>...` を表示して WiFi 接続
-3. 接続できたら自 IP を約 2 秒表示 (この IP を Mac 側ツールに渡す)
+3. 接続できたら mDNS 名 (`stackchan-xxxxxx.local`) と自 IP を約 3 秒表示
+   (どちらを Mac 側ツールに渡してもよい)
 4. 埋め込み ROM をロード
 5. SD に ROM が 1 本以上あれば ROM 選択メニューを表示、無ければそのままゲーム開始
 
@@ -32,6 +33,32 @@ WiFi に失敗してもゲームは起動する (Grove コントローラーは�
 **SD カードが無くても従来どおり動く。** カード未挿入、マウント失敗、`/roms/` が空、
 いずれの場合もメニューを出さずに埋め込み ROM で起動する。メニューは選ぶものが
 実際にあるときだけ起動を待たせる。
+
+## mDNS (`stackchan-xxxxxx.local`)
+
+WiFi 接続後、mDNS で `.local` 名を広告する。DHCP で IP が変わっても同じ名前で
+届くので、Mac 側ツールには IP の代わりにこの名前を渡せる。
+
+```sh
+ping stackchan-a1b2c3.local
+dns-sd -B _nes._udp              # LAN 上の全機体を列挙
+dns-sd -G v4 stackchan-a1b2c3.local
+```
+
+- **`xxxxxx` は STA MAC の下位 3 バイト**。個体ごとに変わるので複数台を同じ
+  LAN に置いても衝突しない。ESP-IDF の mdns は Bonjour と違い衝突時に `-2` を
+  付けないため、名前側で衝突を避けている
+- **ルーターの DHCP クライアント一覧にも同じ名前で出る** (`WiFi.setHostname()`)。
+  mDNS が使えない環境ではこちらから IP を引ける
+- `MDNS.begin()` が失敗しても停止しない。WiFi 失敗でもゲームが起動するのと
+  同じ方針で、mDNS 無しでも IP 直打ちで到達できる
+- 起動画面に IP を残してあるのは、VPN 接続中や「プライベート Wi-Fi アドレス」
+  有効時に `.local` の解決だけがブロックされることがあるため
+
+`tools/serve_web.py` の中継は IP と `*.local` のみ受け付ける (`HOST_RE`)。
+一般のホスト名を渡せないようにする制限であって、宛先を LAN 内に限定するもの
+ではない (IP 直指定は元から通り、名前は送信のたびに解決される)。中継自体が
+`127.0.0.1` にのみバインドしているのが本来の境界。
 
 ## SD カードの ROM
 
@@ -85,8 +112,8 @@ I/O エラーを検知した場合は 1 度だけ自動で再マウントする 
 
 ## Web UI からの SD 管理
 
-`just serve` して `http://localhost:8000/?device=<CoreS3 の IP>` を開くと、
-`?device=` を付けたときだけ SD パネルが出る。
+`just serve` して `http://localhost:8000/?device=stackchan-xxxxxx.local` を開くと、
+`?device=` を付けたときだけ SD パネルが出る (IP を直接指定してもよい)。
 
 - **一覧・容量** — ファイル名とサイズ、カードの空き / 総容量を表示。「再読込」で更新
 - **起動** — その ROM を実機でロードして開始 (type 5 LOAD)
@@ -341,7 +368,8 @@ Web 版のカセット端子 UI を実機にミラーできる。サイコロ (�
 
 ```sh
 just serve                       # web/ を配信しつつ UDP 中継も行う
-# ブラウザで http://localhost:8000/?device=<CoreS3 の IP>
+# ブラウザで http://localhost:8000/?device=stackchan-xxxxxx.local
+# (起動画面に出る IP を直接指定してもよい)
 ```
 
 `?device=` は `localStorage` に保存されるので次回以降は省略できる

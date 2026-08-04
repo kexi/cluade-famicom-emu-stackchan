@@ -49,7 +49,8 @@ secrets:
 
 # ------------------------------------------------------------------- 入力
 
-# プロコン→UDP 送信 (hidapi 直読み)。host は CoreS3 起動時に画面表示される IP
+# プロコン→UDP 送信 (hidapi 直読み)。host は CoreS3 起動時に画面表示される
+# IP または mDNS 名 (stackchan-xxxxxx.local)
 procon host:
     uv run tools/procon_udp.py --backend hid --host {{host}}
 
@@ -82,11 +83,12 @@ build-web:
     ./build.sh
 
 # Web 版をローカル配信 + 端子状態を実機へ UDP 中継 (http://localhost:8000)
-# 実機に反映するには http://localhost:8000/?device=<CoreS3 の IP> を開く
+# 実機に反映するには http://localhost:8000/?device=stackchan-xxxxxx.local を開く
+# (起動画面に出る IP を直接指定してもよい)
 serve port='8000':
     uv run tools/serve_web.py --port {{port}}
 
-# 実機の SD カード内の ROM 一覧を表示 (host は CoreS3 の IP)
+# 実機の SD カード内の ROM 一覧を表示 (host は CoreS3 の IP または mDNS 名)
 #
 # 中継サーバー (just serve) が別途動いている前提。ブラウザを開かずに
 # 「カードに何が入っているか」だけ見たいとき用で、UI から辿るより速い。

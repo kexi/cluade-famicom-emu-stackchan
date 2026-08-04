@@ -581,4 +581,21 @@ constexpr uint32_t CPU_CYCLES_PER_US = 240;
 
 // --------------------------------------------------------------------- WiFi
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
-constexpr uint32_t IP_DISPLAY_MS = 2000;
+// Three lines now (mDNS name, IP, port) rather than two, so the reader needs
+// slightly longer than the 2000ms this held while it was IP-only.
+constexpr uint32_t IP_DISPLAY_MS = 3000;
+
+// mDNS hostname is "<prefix>-<low 3 bytes of the STA MAC>". The per-device
+// suffix is what makes a fixed name unnecessary: ESP-IDF's mdns does not
+// append "-2" on a conflict the way Bonjour's responder does, so two boards
+// sharing one name would just fight over it. Deriving the suffix from the MAC
+// sidesteps the collision instead of resolving it.
+constexpr char MDNS_HOST_PREFIX[] = "stackchan";
+// How long setup() waits for udpTask to bind before deciding the socket is not
+// coming up. Only socket() + bind() stand between the task starting and the
+// signal, so this is orders of magnitude more than the happy path needs; it is
+// sized as a give-up bound for a broken socket, not as an expected wait.
+constexpr uint32_t UDP_READY_TIMEOUT_MS = 500;
+// Matches default_hostname[32] in the Arduino core (WiFiGeneric.cpp:283);
+// anything longer is truncated there anyway.
+constexpr size_t MDNS_HOSTNAME_MAX = 32;
