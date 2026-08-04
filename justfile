@@ -35,9 +35,27 @@ build-profile:
 flash-profile port='':
     cd m5stack && pio run -e m5stack-cores3-profile -t upload {{ if port == '' { '' } else { '--upload-port ' + port } }}
 
-# シリアルモニタ (Ctrl+C で終了)
-monitor port='/dev/cu.usbmodem1101':
-    cd m5stack && pio device monitor -b 115200 -p {{port}}
+# シリアルモニタ (ポートは自動検出、指定も可: just monitor /dev/cu.usbmodem2101)
+#
+# ポート名は機体と USB の挿し口で変わるので (実機で 1101 と 2101 の両方を見た)、
+# 固定値を既定に置くと大半の環境で「そんなポートは無い」と言われる。
+#
+# pio の自動検出には任せられない。`pio run -t upload` は hwid を見て ESP32 を
+# 選ぶが、`pio device monitor` にその絞り込みが無く、列挙順の先頭 —
+# macOS では /dev/cu.debug-console — を掴んで termios エラーで落ちる。
+# 303A:1001 は Espressif の USB JTAG/serial で、CoreS3 はこれを名乗る
+monitor port='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    port='{{port}}'
+    if [ -z "$port" ]; then
+        port=$(pio device list --json-output | python3 -c "import json,sys; print(next((d['port'] for d in json.load(sys.stdin) if '303A:1001' in d.get('hwid','')), ''))")
+    fi
+    if [ -z "$port" ]; then
+        echo "CoreS3 が見つかりません (USB 接続を確認するか、just monitor <port> で指定してください)" >&2
+        exit 1
+    fi
+    cd m5stack && pio device monitor -b 115200 -p "$port"
 
 # デフォルトROM (game.nes) を取得
 fetch-rom:
@@ -51,8 +69,11 @@ secrets:
 
 # プロコン→UDP 送信 (hidapi 直読み)。host は CoreS3 起動時に画面表示される
 # IP または mDNS 名 (stackchan-xxxxxx.local)
+#
+# 先に just cli-build が要る。CLI を使うのは、実機と話す口を 1 つにするため
+# (旧 tools/procon_udp.py はこれに置き換えて削除した)
 procon host:
-    uv run tools/procon_udp.py --backend hid --host {{host}}
+    cli/target/release/stackchan --host {{host}} input procon
 
 # --------------------------------------------------------------------- CLI
 
@@ -90,14 +111,10 @@ serve port='8000':
 
 # 実機の SD カード内の ROM 一覧を表示 (host は CoreS3 の IP または mDNS 名)
 #
-# 中継サーバー (just serve) が別途動いている前提。ブラウザを開かずに
-# 「カードに何が入っているか」だけ見たいとき用で、UI から辿るより速い。
-# 実機と直接 UDP で話さず /api/sd/list を叩くのは、type 5 の分割応答の
-# 組み立てを serve_web.py が既に持っているため
-sd-list host port='8000':
-    curl -sS -X POST http://localhost:{{port}}/api/sd/list \
-        -H 'Content-Type: application/json' \
-        -d '{"host":"{{host}}"}'
+# 先に just cli-build が要る。CLI が type 5 の分割応答を自前で組み立てるので、
+# 中継サーバー (just serve) もブラウザも要らず実機と直接話す
+sd-list host:
+    cli/target/release/stackchan --host {{host}} sd ls
 
 # -------------------------------------------------------------------- 検証
 
