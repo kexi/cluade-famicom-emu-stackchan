@@ -302,11 +302,31 @@ fn hyphen_leading_values_survive_the_terminator() {
 /// 効果を見る
 #[test]
 fn the_timeout_option_shortens_the_wait() {
+    use std::net::UdpSocket;
     use std::time::Instant;
 
-    // TEST-NET-1 (RFC 5737)。返事は来ないので必ず締切まで待つ
+    // 返事をしないソケットを立てて、そこへ送らせる。
+    //
+    // TEST-NET-1 (192.0.2.1) だと、既定経路の無いコンテナでは send_to が
+    // ENETUNREACH で即座に失敗し、締切を待たずに exit 1 になる。ここで
+    // 見たいのは待ち時間なので、宛先は必ず届いて必ず黙っている先にする
+    let silent = UdpSocket::bind(("127.0.0.1", 0)).expect("binding a local socket");
+    let port = silent
+        .local_addr()
+        .expect("the socket has an address")
+        .port();
+
     let started = Instant::now();
-    let out = run(&["--host", "192.0.2.1", "--timeout", "0.5", "sd", "ls"]);
+    let out = run(&[
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &port.to_string(),
+        "--timeout",
+        "0.5",
+        "sd",
+        "ls",
+    ]);
     let elapsed = started.elapsed();
 
     assert_eq!(out.status.code(), Some(3), "expected a timeout exit");
@@ -331,4 +351,55 @@ fn the_timeout_option_rejects_values_it_cannot_honour() {
             stderr(&out)
         );
     }
+}
+
+/// 読み手が先に閉じたパイプで panic しない。
+///
+/// Rust は起動時に SIGPIPE を無視するので、既定のままだと `println!` /
+/// `eprintln!` が書き込みエラーで panic し、**exit 101** になる。101 は
+/// 終了コード規約の外の値で、`--help` に書いた契約を破る。
+///
+/// `head` で打ち切ったときは SIGPIPE (141) で死ぬのが Unix のツールとして
+/// 正しい。101 でなければよいので、成功 (0) も 141 も受ける
+#[test]
+fn a_closed_pipe_does_not_panic() {
+    use std::net::UdpSocket;
+    use std::process::Stdio;
+
+    // 返事をしないソケットへ送らせる (経路の無い環境で即座に失敗しないように)
+    let silent = UdpSocket::bind(("127.0.0.1", 0)).expect("binding a local socket");
+    let port = silent
+        .local_addr()
+        .expect("the socket has an address")
+        .port();
+
+    // -vv のトレースはパイプへ流れ続ける。読み手が読まずに閉じるので EPIPE を踏む
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stackchan"))
+        .args([
+            "-vv",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--timeout",
+            "1",
+            "sd",
+            "ls",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the stackchan binary");
+
+    // 読まずに閉じる。以降の書き込みは EPIPE になる
+    drop(child.stdout.take());
+    drop(child.stderr.take());
+
+    let status = child.wait().expect("failed to wait for the child");
+    let code = status.code();
+    assert_ne!(
+        code,
+        Some(101),
+        "a closed pipe made the process panic; SIGPIPE is probably still ignored"
+    );
 }

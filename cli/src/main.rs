@@ -9,7 +9,32 @@ use clap::Parser;
 
 use stackchan::exit::ExitCode;
 
+/// パイプの読み手が先に閉じたときに、素直に死ぬようにする。
+///
+/// Rust の標準ライブラリは起動時に `SIGPIPE` を無視する。ライブラリとして
+/// 使われたときに、書き込み失敗をプロセスの死ではなくエラーとして扱えるように
+/// するためだが、CLI では裏目に出る — `println!` / `eprintln!` は書き込み
+/// エラーで panic するので、`stackchan -vv sd ls 2>&1 | head -1` が **exit 101**
+/// になる。101 は終了コード規約 (0/1/2/3/4) の外の値で、`--help` に書いた
+/// 契約を破る。
+///
+/// 既定動作に戻せば、`head` や `less` で打ち切ったときに `grep` や `cat` と
+/// 同じく SIGPIPE で死ぬ。これは Unix のツールとして期待される振る舞い。
+///
+/// `output.rs` の `println!` だけを書き込みエラーに強い形へ変えても足りない。
+/// トレース (`transport.rs` の `eprintln!`)、進捗表示 (`rom.rs`)、clap が出す
+/// ヘルプなど、書き込む場所は全体に散っている
+fn restore_sigpipe() {
+    // SAFETY: シグナルハンドラを既定に戻すだけ。main の先頭で、スレッドを
+    // 立てる前に 1 回だけ呼ぶ
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 fn main() {
+    restore_sigpipe();
+
     // `args()` は非 UTF-8 の引数で panic する (Unix のファイル名は任意バイト列を
     // 取りうるので実際に起こる)。panic は終了コード 101 になり、規約の外の値が
     // 呼び出し側に漏れるので、`args_os()` で受けて使用法エラーとして返す
