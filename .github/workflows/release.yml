@@ -98,13 +98,11 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # gh release create は draft → upload → publish を内部で踏むので、
-      # 全アセットが揃った publish の瞬間にだけタグが焼かれる。途中で落ちても
-      # タグは残らず、同じタグでやり直せる。
+      # 段取りは「タグを排他的に作る → Release を publish → 失敗したらタグを消す」。
       #
-      # 既存の Release があるときは上書きせずに失敗させる。Immutable Releases
-      # の下では publish 済みのタグとアセットが凍結されるので、--clobber は
-      # どのみち通らない。「消してやり直す」もタグを再利用できないので使えない。
+      # Immutable Releases の下では publish 済みの Release はタグもアセットも
+      # 凍結されるので、上書きも「消してやり直す」も使えない。だから既に
+      # Release があるタグでは何もしない (タグ作成が失敗するので自然にそうなる)。
       # 出し直したいときは新しいバージョンのタグを切る
       - name: Publish
         env:
@@ -114,24 +112,44 @@ jobs:
           set -euo pipefail
           ls -la dist/
 
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            echo "::error::release $TAG already exists; publish a new version tag instead (immutable releases cannot be overwritten)"
+          # タグの作成そのものを「既にあれば失敗する」操作にする。
+          #
+          # 「先に存在を確かめてから作る」は競合に開いている — 確認と作成の間に
+          # 誰かが同じタグを作ると、gh release create はそれを使い、
+          # --target は既存のタグを動かさないので、ビルドしたものと違う
+          # コミットを指す Release ができる。
+          #
+          # git/refs の POST は既存の ref に対して 422 を返すので、この 1 回で
+          # 「作れた = このワークフローのものだ」が確定する。認証切れや
+          # ネットワーク障害も同じく失敗になるので、取り違えて先へ進むこともない
+          # (存在確認を見送る形だと、これらのエラーが「無い」に見える)
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/refs" \
+                --method POST \
+                --field "ref=refs/tags/$TAG" \
+                --field "sha=$GITHUB_SHA" > /dev/null; then
+            echo "::error::could not create tag $TAG at $GITHUB_SHA (it may already exist; publish a new version tag instead)"
             exit 1
           fi
 
-          # Release を持たないタグも断る。Release の有無だけを見ると、タグだけが
-          # 先にある状態を見逃す — そのとき gh release create はタグを作らずに
-          # 既存のものを使い、--target は既に存在するタグを動かさない。
-          # ビルドしたコミットとは別の場所を指す Release ができあがる
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > /dev/null 2>&1; then
-            echo "::error::tag $TAG already exists without a release; it would not be moved to $GITHUB_SHA"
-            exit 1
-          fi
+          # ここから先で落ちたらタグを消す。残すと、直して再実行しようとした
+          # ときに同じタグが使えない (Immutable Releases 下ではタグの再利用も
+          # 効かないので、バージョンが 1 つ無駄になる)。
+          #
+          # publish 後は消さない — その時点で Release は成立している
+          published=""
+          cleanup() {
+            if [ -z "$published" ]; then
+              echo "::warning::publish failed; removing the tag $TAG so the version can be reused"
+              gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" --method DELETE > /dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
 
-          # --target を明示するのは、タグを「このワークフローを起動した
-          # コミット」に付けるため。省略するとデフォルトブランチの HEAD に
-          # 付き、ビルドしたものと違うコミットにタグが乗りうる
+          # --verify-tag で「今作ったタグがある」ことを確かめてから publish する。
+          # 無ければ gh がタグを作りにいくが、それはこの時点では起こりえない
+          # 状態なので、黙って進むより止まるほうがよい
           gh release create "$TAG" dist/* \
-            --target "$GITHUB_SHA" \
+            --verify-tag \
             --title "$TAG" \
             --notes "Device CLI binaries. The Linux builds have no HID support (\`input procon\` and \`input list\`); see cli/README.md."
+          published=yes
