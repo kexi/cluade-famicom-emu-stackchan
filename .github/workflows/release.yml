@@ -99,8 +99,13 @@ jobs:
           merge-multiple: true
 
       # gh release create は draft → upload → publish を内部で踏むので、
-      # Immutable Releases の下でもアセットが揃ってからタグが公開される。
-      # 既にタグがあるときは upload に切り替える (作り直しは履歴を壊す)
+      # 全アセットが揃った publish の瞬間にだけタグが焼かれる。途中で落ちても
+      # タグは残らず、同じタグでやり直せる。
+      #
+      # 既存の Release があるときは上書きせずに失敗させる。Immutable Releases
+      # の下では publish 済みのタグとアセットが凍結されるので、--clobber は
+      # どのみち通らない。「消してやり直す」もタグを再利用できないので使えない。
+      # 出し直したいときは新しいバージョンのタグを切る
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -109,9 +114,13 @@ jobs:
           set -euo pipefail
           ls -la dist/
           if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
-          else
-            gh release create "$TAG" dist/* \
-              --title "$TAG" \
-              --notes "Device CLI binaries. The Linux builds have no HID support (\`input procon\` and \`input list\`); see cli/README.md."
+            echo "::error::release $TAG already exists; publish a new version tag instead (immutable releases cannot be overwritten)"
+            exit 1
           fi
+          # --target を明示するのは、タグを「このワークフローを起動した
+          # コミット」に付けるため。省略するとデフォルトブランチの HEAD に
+          # 付き、ビルドしたものと違うコミットにタグが乗りうる
+          gh release create "$TAG" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --notes "Device CLI binaries. The Linux builds have no HID support (\`input procon\` and \`input list\`); see cli/README.md."
