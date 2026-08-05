@@ -113,10 +113,21 @@ jobs:
         run: |
           set -euo pipefail
           ls -la dist/
+
           if gh release view "$TAG" > /dev/null 2>&1; then
             echo "::error::release $TAG already exists; publish a new version tag instead (immutable releases cannot be overwritten)"
             exit 1
           fi
+
+          # Release を持たないタグも断る。Release の有無だけを見ると、タグだけが
+          # 先にある状態を見逃す — そのとき gh release create はタグを作らずに
+          # 既存のものを使い、--target は既に存在するタグを動かさない。
+          # ビルドしたコミットとは別の場所を指す Release ができあがる
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > /dev/null 2>&1; then
+            echo "::error::tag $TAG already exists without a release; it would not be moved to $GITHUB_SHA"
+            exit 1
+          fi
+
           # --target を明示するのは、タグを「このワークフローを起動した
           # コミット」に付けるため。省略するとデフォルトブランチの HEAD に
           # 付き、ビルドしたものと違うコミットにタグが乗りうる
