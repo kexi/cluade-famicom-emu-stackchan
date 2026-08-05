@@ -269,13 +269,14 @@ mod tests {
         assert!(err.to_string().contains("cannot browse"));
     }
 
-    /// LAN に何も無い環境でも、時間内に空で返ること。CI でも走る
+    /// LAN に何も無い環境でも、時間内に返ること。CI でも走る
     #[test]
     fn browsing_an_empty_network_returns_nothing_rather_than_hanging() {
         let started = Instant::now();
-        let found = browse(Duration::from_millis(300)).expect("browsing should work");
-        // 何も無いはず (CI に stackchan はいない) だが、いても失敗にはしない
-        let _ = found;
+        // 結果は問わない。機体がいれば見つかるし、multicast を塞いだコンテナや
+        // 使えるインターフェースの無い環境では Unavailable が返る — どちらも
+        // 環境の違いであって、ここで見たい「期限を守る」とは別のこと
+        let _ = browse(Duration::from_millis(300));
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "browsing should respect its deadline"

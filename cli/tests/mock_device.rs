@@ -14,7 +14,7 @@ use std::thread;
 use std::time::Duration;
 
 use stackchan::exit::ExitCode;
-use stackchan::proto::constants::{SD_LIST_HEADER, SD_OP_LIST};
+use stackchan::proto::constants::{SD_HEADER, SD_LIST_HEADER, SD_OP_LIST};
 use stackchan::sd_client::{self, SdError};
 use stackchan::transport::{Device, TransportError};
 
@@ -70,6 +70,16 @@ impl MockDevice {
                 seen.lock().unwrap().push(request.clone());
                 counter.fetch_add(1, Ordering::SeqCst);
 
+                // 短すぎるものは記録だけして応答しない。ここで seq や op を
+                // 読みに行くと添字で panic し、スレッドが死んでソケットが閉じる。
+                // すると CLI 側には数秒後の「タイムアウト」として現れ、本当の
+                // 原因 (エンコーダが短いパケットを作った) が見えなくなる。
+                // 記録は残るので、テストは requests() を見れば気づける
+                let is_too_short = request.len() < SD_HEADER;
+                if is_too_short {
+                    continue;
+                }
+
                 // script を使い切ったら以降は無応答
                 let Some(behavior) = script.get(step).cloned() else {
                     step += 1;
@@ -122,9 +132,17 @@ impl MockDevice {
         self.count.load(Ordering::SeqCst)
     }
 
-    /// 送られてきたリクエストの op 一覧
+    /// 送られてきたリクエストの op 一覧。
+    ///
+    /// 短すぎて op を持たないものは飛ばす (添字で panic すると、テストの
+    /// 失敗が「op が違う」ではなく panic として出て読みにくい)
     fn ops(&self) -> Vec<u8> {
-        self.requests.lock().unwrap().iter().map(|r| r[6]).collect()
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r.get(6).copied())
+            .collect()
     }
 }
 

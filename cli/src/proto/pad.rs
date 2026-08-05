@@ -36,7 +36,10 @@ pub fn release(seq: u16) -> Vec<u8> {
 
 /// ボタン名からビットを引く。`input send A B START` の解釈に使う。
 ///
-/// 大文字小文字は問わない。十字キーは矢印の名前でも受ける
+/// 大文字小文字は問わない。十字キーは `UP` / `DOWN` / `LEFT` / `RIGHT`。
+///
+/// 矢印記号 (`↑`) は受けない — 端末やシェルによって打ちづらく、スクリプトに
+/// 書くなら綴りのほうが確実。対話の `input keys` は物理的な矢印キーを使う
 pub fn button_from_name(name: &str) -> Option<u8> {
     let bit = match name.to_ascii_uppercase().as_str() {
         "A" => button::A,

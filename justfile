@@ -49,11 +49,19 @@ monitor port='':
     set -euo pipefail
     port='{{port}}'
     if [ -z "$port" ]; then
-        port=$(pio device list --json-output | python3 -c "import json,sys; print(next((d['port'] for d in json.load(sys.stdin) if '303A:1001' in d.get('hwid','')), ''))")
-    fi
-    if [ -z "$port" ]; then
-        echo "CoreS3 が見つかりません (USB 接続を確認するか、just monitor <port> で指定してください)" >&2
-        exit 1
+        # 候補を全部出す。1 台に絞れないときに黙って先頭を選ぶと、隣の
+        # ESP32 のログを CoreS3 のものとして読むことになる
+        mapfile -t found < <(pio device list --json-output | python3 -c "import json,sys; [print(d['port']) for d in json.load(sys.stdin) if '303A:1001' in d.get('hwid','')]")
+        if [ "${#found[@]}" -eq 0 ]; then
+            echo "CoreS3 が見つかりません (USB 接続を確認するか、just monitor <port> で指定してください)" >&2
+            exit 1
+        fi
+        if [ "${#found[@]}" -gt 1 ]; then
+            echo "ESP32 が複数見つかりました。just monitor <port> で選んでください:" >&2
+            printf '  %s\n' "${found[@]}" >&2
+            exit 1
+        fi
+        port="${found[0]}"
     fi
     cd m5stack && pio device monitor -b 115200 -p "$port"
 
