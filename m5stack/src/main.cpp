@@ -6,7 +6,9 @@
 
 #include <M5Unified.h>
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <lwip/sockets.h>
+#include <esp_mac.h>
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
 #include <esp_rom_crc.h>
@@ -119,8 +121,12 @@ static sockaddr_in g_sdReplyTo = {};
 
 // The UDP socket, shared so loop() can answer directly. lwIP's sendto is
 // thread-safe, and replying from the emulation core avoids handing the snapshot
-// buffer across tasks while it is being filled.
-static int g_udpSock = -1;
+// buffer across tasks while it is being filled. Atomic because udpTask publishes
+// it from core 0 while core 1 reads it: setup() gates the mDNS service
+// advertisement on this becoming valid, so the visibility of that one write
+// decides whether a service gets announced, and a plain int gives the compiler
+// no reason to reload it.
+static std::atomic<int> g_udpSock{-1};
 // Master volume the browser asked for, or -1 while it has never said anything —
 // in which case the compile-time SPEAKER_VOLUME stands and is left untouched.
 static std::atomic<int> g_volume{-1};
@@ -549,7 +555,7 @@ static void udpTask(void*) {
         return;
     }
 
-    g_udpSock = sock;
+    g_udpSock.store(sock);
 
     // Static, not on the stack: a ROM chunk needs 1412 bytes and this task only
     // gets 4096 in total.
@@ -623,11 +629,37 @@ static void showMessage(const char* text, int y, int size) {
     M5.Display.print(text);
 }
 
+// "stackchan-a1b2c3", built once and cached. Lives here rather than in config.h
+// because that header holds tuning constants, not code that runs.
+static const char* deviceHostname() {
+    static char hostname[MDNS_HOSTNAME_MAX] = {0};
+    if (hostname[0] != 0) return hostname;
+
+    uint8_t mac[6] = {0};
+    // Read the efuse directly rather than through WiFi.macAddress(): this runs
+    // before WiFi.mode(), and esp_wifi_get_mac() needs an initialised stack.
+    // ESP_MAC_WIFI_STA specifically, so the suffix matches the last three bytes
+    // of the MAC the router lists for this board and a human can cross-check it.
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    // Lowercase at the source because ESPmDNS lowercases internally
+    // (ESPmDNS.cpp:70); feeding it uppercase would leave MDNS.hostname() and
+    // WiFi.getHostname() disagreeing about the same board.
+    snprintf(hostname, sizeof(hostname), "%s-%02x%02x%02x", MDNS_HOST_PREFIX, mac[3], mac[4], mac[5]);
+    return hostname;
+}
+
 static bool connectWifi() {
     M5.Display.fillScreen(TFT_BLACK);
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
     showMessage("Connecting to " WIFI_SSID "...", 8, 2);
 
+    // Before mode(), not before begin(): setHostname() only writes a static
+    // buffer (WiFiGeneric.cpp:292), and mode() is what pushes it into the netif
+    // via set_esp_interface_hostname (WiFiGeneric.cpp:1265). Called afterwards
+    // it would sit unused until the next mode() change. This also names the
+    // board in the router's DHCP client list, which is the fallback when mDNS
+    // is unavailable.
+    WiFi.setHostname(deviceHostname());
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
 
@@ -722,12 +754,53 @@ void setup() {
 
     g_wifiConnected = connectWifi();
     if (g_wifiConnected) {
+        // Ahead of the mDNS advertisement below: udpTask is what creates and
+        // binds the socket, so announcing _nes._udp first would publish a
+        // service that cannot answer for as long as the info screen is up.
+        xTaskCreatePinnedToCore(udpTask, "udp", 4096, nullptr, 5, nullptr, 0);
+
+        // g_udpSock is set only after bind() succeeds, so it doubles as the
+        // task's ready signal. Waited on rather than assumed because a failed
+        // socket()/bind() ends the task silently, and advertising _nes._udp
+        // then would point discovery at a port nothing listens on. The wait is
+        // bounded so a broken socket costs a moment at boot, not the boot.
+        const uint32_t udpDeadline = millis() + UDP_READY_TIMEOUT_MS;
+        while (g_udpSock.load() < 0 && millis() < udpDeadline) delay(1);
+        const bool udpReady = g_udpSock.load() >= 0;
+
+        const bool mdnsUp = MDNS.begin(deviceHostname());
+        if (mdnsUp) {
+            // An A record alone is only reachable by someone who already knows
+            // the name. Advertising the service makes `dns-sd -B _nes._udp`
+            // enumerate every board on the LAN. Three outcomes rather than two,
+            // because skipped and attempted-but-failed are different states;
+            // in both, "<name>.local" still resolves and only browsing is lost.
+            if (!udpReady) {
+                Serial.printf("MDNS: %s.local (udp socket down, service not advertised)\n", deviceHostname());
+            } else if (MDNS.addService("_nes", "_udp", UDP_PORT)) {
+                Serial.printf("MDNS: %s.local udp=%u\n", deviceHostname(), (unsigned)UDP_PORT);
+            } else {
+                Serial.printf("MDNS: %s.local (service advertise failed)\n", deviceHostname());
+            }
+        } else {
+            // Not fatal, matching how a failed WiFi connect still boots the
+            // game: without mDNS the board is still reachable by IP.
+            Serial.printf("MDNS: begin failed host=%s\n", deviceHostname());
+        }
+
         M5.Display.fillScreen(TFT_BLACK);
         M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
-        showMessage(WiFi.localIP().toString().c_str(), 8, 3);
-        showMessage("UDP port 5555", 48, 2);
+        // Size 2 for the name: at size 3 (18px/char) 22 characters run to 396px
+        // and overflow the 320px panel.
+        char hostLine[MDNS_HOSTNAME_MAX + 8];
+        snprintf(hostLine, sizeof(hostLine), "%s.local", deviceHostname());
+        showMessage(hostLine, 8, 2);
+        // The IP stays, at the size it always was, because mDNS is the thing
+        // most likely to be blocked here — a VPN or a private WiFi address can
+        // stop .local resolving while the address itself still works.
+        showMessage(WiFi.localIP().toString().c_str(), 36, 3);
+        showMessage("UDP port 5555", 72, 2);
         delay(IP_DISPLAY_MS);
-        xTaskCreatePinnedToCore(udpTask, "udp", 4096, nullptr, 5, nullptr, 0);
     }
 
     const size_t romSize = (size_t)(rom_end - rom_start);
@@ -976,7 +1049,7 @@ static RomApplyResult applyRomRequest() {
         // A separate datagram, because the END ACK went out from the UDP task
         // the moment the CRC checked — holding that ACK until the card write
         // finished would stall the sender across a ~1-2s write.
-        const bool canReply = g_udpSock >= 0;
+        const bool canReply = g_udpSock.load() >= 0;
         if (canReply) {
             uint8_t event[UDP_ROM_SAVE_EVENT_SIZE] = {};
             event[0] = 'N';
@@ -986,7 +1059,8 @@ static RomApplyResult applyRomRequest() {
             event[4] = g_romSession & 0xFF;
             event[5] = g_romSession >> 8;
             event[6] = (uint8_t)saveStatus;
-            ::sendto(g_udpSock, event, sizeof(event), 0, (const sockaddr*)&g_romSaveReplyTo, sizeof(g_romSaveReplyTo));
+            ::sendto(g_udpSock.load(), event, sizeof(event), 0, (const sockaddr*)&g_romSaveReplyTo,
+                     sizeof(g_romSaveReplyTo));
         }
         Serial.printf("ROM: save '%s' -> %s\n", g_romSaveName, sdStatusText(saveStatus));
     }
@@ -1036,7 +1110,7 @@ static void updateWaveCapture() {
 static void applyDebugRequest() {
     const bool requested = g_debugRequested.exchange(false, std::memory_order_relaxed);
     if (!requested) return;
-    if (g_udpSock < 0) return;
+    if (g_udpSock.load() < 0) return;
 
     // Static, not stack: ~3.8KB would be a large chunk of the Arduino loop task's
     // stack, and it is only touched here.
@@ -1070,7 +1144,7 @@ static void applyDebugRequest() {
         datagram[5] = seq & 0xFF;
         datagram[6] = seq >> 8;
         memcpy(datagram + UDP_DEBUG_HEADER, snapshot + offset, len);
-        ::sendto(g_udpSock, datagram, UDP_DEBUG_HEADER + len, 0, (sockaddr*)&to, sizeof(to));
+        ::sendto(g_udpSock.load(), datagram, UDP_DEBUG_HEADER + len, 0, (sockaddr*)&to, sizeof(to));
     }
 
     // Once only: at 5Hz this would otherwise bury every other serial line.
@@ -1395,7 +1469,7 @@ static bool g_sdListingChanged = false;
 // card per datagram: a rescan between parts could see a different set of files
 // and produce a reply whose parts do not describe one moment in time.
 static void sendSdListing(const sockaddr_in& to, uint16_t seq) {
-    if (g_udpSock < 0) return;
+    if (g_udpSock.load() < 0) return;
 
     static SdRomEntry entries[SD_ROM_MAX_FILES];
     // Called unconditionally rather than behind sdRomMounted(): the scan now
@@ -1407,7 +1481,7 @@ static void sendSdListing(const sockaddr_in& to, uint16_t seq) {
     // creatable), so testing first would answer Ok with an empty listing for a
     // card that is no longer there.
     if (!sdRomMounted()) {
-        sendSdAck(g_udpSock, to, UDP_SD_OP_LIST, seq, SdStatus::NotMounted);
+        sendSdAck(g_udpSock.load(), to, UDP_SD_OP_LIST, seq, SdStatus::NotMounted);
         return;
     }
     uint64_t totalBytes = 0, freeBytes = 0;
@@ -1459,7 +1533,7 @@ static void sendSdListing(const sockaddr_in& to, uint16_t seq) {
             memcpy(datagram + offset, e.name, nameLen);
             offset += nameLen;
         }
-        ::sendto(g_udpSock, datagram, offset, 0, (const sockaddr*)&to, sizeof(to));
+        ::sendto(g_udpSock.load(), datagram, offset, 0, (const sockaddr*)&to, sizeof(to));
     }
     Serial.printf("SD: listed %d entries in %d part(s)\n", count, nparts);
 }
@@ -1501,7 +1575,7 @@ static void applySdRequest() {
     }
     if (listingChanged) g_sdListingChanged = true;
 
-    if (g_udpSock >= 0) sendSdAck(g_udpSock, g_sdReplyTo, op, seq, status);
+    if (g_udpSock.load() >= 0) sendSdAck(g_udpSock.load(), g_sdReplyTo, op, seq, status);
     // Cleared last, for the same reason the ROM latch is: until this store the
     // UDP task refuses further requests, which is what keeps g_sdArgA/B stable
     // for the duration of the work above.

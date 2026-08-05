@@ -231,7 +231,13 @@ DEBUG_FLAG_WAVES = 0x01
 DEBUG_TIMEOUT_S = 0.3
 
 # Keep the relay from being turned into a general-purpose packet cannon.
-HOST_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+# mDNS names are allowed alongside literal IPs, but only ones ending in .local,
+# so a plain public hostname cannot be handed to the relay. This narrows the
+# reachable set; it does not pin it to the LAN, since a literal IP was always
+# accepted and the name is re-resolved on each sendto.
+# Matched with fullmatch(): "$" also matches before a trailing newline, so
+# match() alone would accept "device.local\n".
+HOST_RE = re.compile(r"\d{1,3}(\.\d{1,3}){3}|[a-z0-9][a-z0-9-]{0,62}\.local")
 MASK_RE = re.compile(r"^[0-9a-fA-F]{1,16}$")
 MAX_BODY_BYTES = 4096
 
@@ -1003,7 +1009,7 @@ class Handler(SimpleHTTPRequestHandler):
         """
         query = parse_qs(urlparse(self.path).query)
         host = (query.get("host") or [""])[0]
-        if not HOST_RE.match(host):
+        if not HOST_RE.fullmatch(host):
             self._reply(400, {"error": "bad host"})
             return
         swap = (query.get("swap") or ["0"])[0] == "1"
@@ -1087,7 +1093,7 @@ class Handler(SimpleHTTPRequestHandler):
         """
         query = parse_qs(urlparse(self.path).query)
         host = (query.get("host") or [""])[0]
-        if not HOST_RE.match(host):
+        if not HOST_RE.fullmatch(host):
             self._reply(400, {"error": "bad host"})
             return
         swap = (query.get("swap") or ["0"])[0] == "1"
@@ -1286,7 +1292,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         host = str(payload.get("host", ""))
-        if not HOST_RE.match(host):
+        if not HOST_RE.fullmatch(host):
             self._reply(400, {"error": "bad host"})
             return
 
@@ -1304,7 +1310,15 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if route == "/api/debug":
-            snapshot = self.relay.fetch_debug(host, waves=bool(payload.get("waves")))
+            try:
+                waves = bool(payload.get("waves"))
+                snapshot = self.relay.fetch_debug(host, waves=waves)
+            except OSError as exc:
+                # The other routes already had this; debug did not, because with
+                # IP-only hosts sendto could not fail before the socket did.
+                # A .local name that does not resolve raises gaierror here.
+                self._reply(502, {"error": f"send failed: {exc}"})
+                return
             if snapshot is None:
                 # 504, not 502: the request was sent fine, the device just did
                 # not answer in time — which the page retries rather than treats

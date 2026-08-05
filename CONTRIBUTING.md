@@ -2,7 +2,7 @@
 
 🌐 [日本語](CONTRIBUTING.ja.md) · [中文](CONTRIBUTING.zh.md)
 
-The development toolchain is pinned by a nix flake (clang / Emscripten / PlatformIO / uv / just / lefthook / gitleaks).
+The development toolchain is pinned by a nix flake (clang / Emscripten / PlatformIO / cargo / uv / just / lefthook / gitleaks).
 Python scripts (`tools/*.py`) are run by uv, which resolves the interpreter and dependencies at run time from PEP 723 metadata (uv itself is pinned by the flake).
 There is no need to install tools individually; there are two ways to enter the environment.
 
@@ -60,7 +60,8 @@ The shellHook in `flake.nix` takes care of the following — no manual preparati
 
 - **Installs the pre-commit hook** — `lefthook install` runs automatically, and on each
   commit [gitleaks](https://github.com/gitleaks/gitleaks) scans the staged diff for
-  secrets (see `lefthook.yml`). If anything is detected, the commit is aborted
+  secrets (see `lefthook.yml`). If anything is detected, the commit is aborted.
+  Commits that touch Rust sources under `cli/` are also checked with `cargo fmt --check`
 - Adds PlatformIO's esptool dependencies to `PYTHONPATH`
 - Copies the Emscripten cache to a writable location (`~/.cache/emscripten-*`)
 

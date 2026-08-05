@@ -2,7 +2,7 @@
 
 🌐 [English](CONTRIBUTING.md) · [中文](CONTRIBUTING.zh.md)
 
-開発ツールは nix flake で固定しています(clang / Emscripten / PlatformIO / uv / just / lefthook / gitleaks)。
+開発ツールは nix flake で固定しています(clang / Emscripten / PlatformIO / cargo / uv / just / lefthook / gitleaks)。
 Python スクリプト (`tools/*.py`) は uv が PEP 723 メタデータに従って実行時にインタプリタと依存を解決します(uv 自体は flake で固定)。
 ツールを個別にインストールする必要はなく、環境の入り方は以下の2通りです。
 
@@ -60,7 +60,8 @@ nix develop --command just build   # 単発実行
 
 - **pre-commit hook の設置** — `lefthook install` が自動実行され、コミット時に
   [gitleaks](https://github.com/gitleaks/gitleaks) がステージ済み差分の秘密情報を
-  スキャンします(`lefthook.yml` 参照)。検出されるとコミットは中断されます
+  スキャンします(`lefthook.yml` 参照)。検出されるとコミットは中断されます。
+  `cli/` 配下の Rust を含むコミットでは `cargo fmt --check` も走ります
 - PlatformIO 用の esptool 依存を `PYTHONPATH` に追加
 - Emscripten のキャッシュを書き込み可能な場所 (`~/.cache/emscripten-*`) に複製
 

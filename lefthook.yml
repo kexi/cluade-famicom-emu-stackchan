@@ -6,3 +6,13 @@ pre-commit:
       # ステージ済みの差分だけを見る: 作業ツリーの secrets.h (gitignore 済み)
       # など、コミットされないファイルで止めないため
       run: gitleaks git --pre-commit --staged --redact --verbose
+    rustfmt:
+      # cli/ の Rust を触ったコミットだけ整形漏れを見る。CI の format-check と
+      # 同じ検査を手元で先に落とすためのもので、整形はしない (勝手に書き換えると
+      # ステージした内容とコミットされる内容がずれる)
+      # cli/ 直下と入れ子の両方を拾う。lefthook の ** は 1 階層以上にマッチする
+      # ため、片方だけでは取りこぼす
+      glob:
+        - "cli/*.rs"
+        - "cli/**/*.rs"
+      run: cd cli && cargo fmt --check

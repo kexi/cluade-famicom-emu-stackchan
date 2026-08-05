@@ -1,0 +1,52 @@
+[package]
+name = "stackchan"
+version = "0.1.0"
+edition = "2024"
+# nixpkgs 25.05 が供給する rustc に合わせる (flake.nix 参照)。これより新しい
+# MSRV を要求するクレートは入れられない
+rust-version = "1.86"
+license = "MIT"
+description = "Command-line control for the M5Stack CoreS3 Famicom emulator over UDP"
+repository = "https://github.com/kexi/cluade-famicom-emu-stackchan"
+
+[lib]
+name = "stackchan"
+path = "src/lib.rs"
+
+[[bin]]
+name = "stackchan"
+path = "src/main.rs"
+
+[features]
+default = ["procon"]
+# Pro コントローラの HID 直読み。Linux の hidapi は libudev を要求し、これは
+# 静的リンクできないため、Linux 向けリリースはこの feature を落として配る
+procon = ["dep:hidapi"]
+
+[dependencies]
+# ROM 転送の CRC-32 (zlib/IEEE)。firmware が同じ多項式で検証する
+crc32fast = "1.4"
+# 引数パース。env feature は STACKCHAN_HOST を受けるため、
+# wrap_help は --help を端末幅に合わせるため
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+# mDNS 探索 (_nes._udp)。純 Rust なのでクロスビルドを壊さない。
+# default-features を切るのは async ランタイムを引き込まないため
+mdns-sd = { version = "0.20.3", default-features = false }
+# mdns-sd の受信チャネルのエラー型。「期限が来た」と「デーモンが消えた」を
+# 型で見分けるために要る (mdns-sd は再エクスポートしていない)
+flume = { version = "0.12", default-features = false }
+# 端末の raw mode (input keys)。tcsetattr のためだけなので crossterm は入れない
+libc = "0.2"
+# Pro コントローラの HID 直読み。feature "procon" のときだけ入る
+hidapi = { version = "2.6", optional = true }
+
+# cli/ の静的解析設定。C++ 側の .clang-tidy / Python 側の ruff.toml [lint] /
+# JS 側の .oxlintrc.json と同じ立ち位置で、just cli-clippy と CI から参照される
+#
+# 軸は他の 3 つと揃えて「実際のバグを拾う」系のみ。clippy の既定は
+# correctness + suspicious + style + complexity + perf だが、style と complexity
+# は書き味を変えるだけの指摘が大半なので落とす (ruff で select を E/W/F/I に
+# 絞り、oxlint を correctness だけにしたのと同じ判断)
+[lints.clippy]
+style = "allow"
+complexity = "allow"

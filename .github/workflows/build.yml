@@ -23,8 +23,8 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - run: nix develop --command just check
 
-  # 整形漏れ (clang-format / ruff format / oxfmt) と
-  # 静的解析 (clang-tidy / ruff check / oxlint)
+  # 整形漏れ (clang-format / ruff format / oxfmt / rustfmt) と
+  # 静的解析 (clang-tidy / ruff check / oxlint / clippy)
   lint:
     runs-on: ubuntu-latest
     permissions:
@@ -38,6 +38,31 @@ jobs:
       - run: nix develop --command just tidy
       - run: nix develop --command just lint-py
       - run: nix develop --command just lint-js
+      - run: nix develop --command just cli-clippy
+
+  # 実機操作 CLI (cli/) のテスト
+  cli-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      # crates.io からの依存取得とビルド成果物をキャッシュ (platformio と同じ方針で、
+      # nix store 自体はキャッシュしない)
+      #
+      # key に flake.lock も混ぜるのは、cli/target が rustc の版に紐づくため。
+      # ツールチェーンだけ上がったときに古い成果物を再利用すると噛み合わない
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cli/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('cli/Cargo.lock', 'flake.lock') }}
+      - run: nix develop --command just cli-test
 
   # Web (WASM) ビルド
   build-web:

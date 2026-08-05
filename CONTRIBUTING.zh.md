@@ -2,7 +2,7 @@
 
 🌐 [English](CONTRIBUTING.md) · [日本語](CONTRIBUTING.ja.md)
 
-开发工具链由 nix flake 固定(clang / Emscripten / PlatformIO / uv / just / lefthook / gitleaks)。
+开发工具链由 nix flake 固定(clang / Emscripten / PlatformIO / cargo / uv / just / lefthook / gitleaks)。
 Python 脚本(`tools/*.py`)由 uv 在运行时根据 PEP 723 元数据解析解释器与依赖(uv 本身由 flake 固定)。
 无需单独安装各个工具,进入环境有以下两种方式。
 
@@ -60,7 +60,8 @@ nix develop --command just build   # 单次执行
 
 - **安装 pre-commit hook** — 自动执行 `lefthook install`,提交时
   [gitleaks](https://github.com/gitleaks/gitleaks) 会扫描已暂存差异中的敏感信息
-  (参见 `lefthook.yml`)。一旦检测到,提交将被中断
+  (参见 `lefthook.yml`)。一旦检测到,提交将被中断。
+  涉及 `cli/` 下 Rust 源文件的提交还会运行 `cargo fmt --check`
 - 将 PlatformIO 的 esptool 依赖加入 `PYTHONPATH`
 - 将 Emscripten 缓存复制到可写位置(`~/.cache/emscripten-*`)
 

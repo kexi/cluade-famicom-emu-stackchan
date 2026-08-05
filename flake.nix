@@ -2,7 +2,12 @@
   description = "Famicom emulator dev environment (web + M5Stack CoreS3)";
 
   inputs = {
-    # unstable は darwin で pygame-ce のビルドが壊れているため 25.05 に固定
+    # 25.05 に固定。元の理由は「unstable は darwin で pygame-ce のビルドが
+    # 壊れている」で、pygame は tools/procon_udp.py の SDL バックエンドが
+    # 使っていた。そのスクリプトを CLI へ移して削除したので pygame 依存は
+    # 消えており、この固定を外せる見込みがある — ただし unstable へ上げると
+    # emscripten や platformio まで一斉に動くので、影響範囲を測れる別の変更
+    # として扱う (このリポジトリの他のツールは全部この pkgs から来ている)
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
     # oxlint / oxfmt 専用の第 2 入力。25.05 には oxfmt が無く oxlint も 0.16.7 と
     # 古いため (設定形式が現行と別物)、この 2 つだけ unstable から取る。
@@ -38,11 +43,20 @@
             pkgs.ruff            # just format / lint-py (tools/*.py の PEP 8 準拠を検査。ruff.toml 参照)
             pkgsUnstable.oxfmt   # just format / format-check (web/*.js の整形。.oxfmtrc.json 参照)
             pkgsUnstable.oxlint  # just lint-js (web/*.js の静的解析。.oxlintrc.json 参照)
+            pkgs.pkg-config      # hidapi (cli/ の procon feature) が Linux で libudev を探すのに使う
+            pkgs.cargo           # just cli-build / cli-test (cli/ の Rust CLI。cli/Cargo.toml 参照)
+            pkgs.rustc           # 同上。pkgs.cargo は cargo 単体しか入れないため別途必要
+            pkgs.clippy          # just cli-clippy (cli/ の静的解析。Cargo.toml の [lints.clippy] 参照)
+            pkgs.rustfmt         # just format / format-check (cli/ の整形。rustfmt の既定に従うため設定ファイルは無し)
             pkgs.just            # タスクランナー (justfile 参照)
             pkgs.lefthook        # git hook 管理 (lefthook.yml 参照)
             pkgs.gitleaks        # pre-commit での秘密情報スキャン
             pkgs.pinact          # GitHub Actions の SHA ピン留め (CI と同じ版を flake で固定)
-          ];
+          ]
+          # hidapi は Linux で libudev (hidraw backend) を要る。darwin は
+          # IOKit なので不要。静的リンクできないので、Linux 向けの配布バイナリは
+          # procon feature を落として配る (cli/Cargo.toml 参照)
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.udev ];
           # nix store 内の emscripten キャッシュは読み取り専用のため、
           # 書き込み可能な場所に複製して EM_CACHE を向ける
           shellHook = ''

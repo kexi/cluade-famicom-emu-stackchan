@@ -10,7 +10,9 @@ dev frames='120':
     @just tidy
     @just lint-py
     @just lint-js
+    @just cli-clippy
     @just check
+    @just cli-test
     @just test-ppu-flag
     @just verify {{frames}}
     @just build-web
@@ -33,9 +35,35 @@ build-profile:
 flash-profile port='':
     cd m5stack && pio run -e m5stack-cores3-profile -t upload {{ if port == '' { '' } else { '--upload-port ' + port } }}
 
-# シリアルモニタ (Ctrl+C で終了)
-monitor port='/dev/cu.usbmodem1101':
-    cd m5stack && pio device monitor -b 115200 -p {{port}}
+# シリアルモニタ (ポートは自動検出、指定も可: just monitor /dev/cu.usbmodem2101)
+#
+# ポート名は機体と USB の挿し口で変わるので (実機で 1101 と 2101 の両方を見た)、
+# 固定値を既定に置くと大半の環境で「そんなポートは無い」と言われる。
+#
+# pio の自動検出には任せられない。`pio run -t upload` は hwid を見て ESP32 を
+# 選ぶが、`pio device monitor` にその絞り込みが無く、列挙順の先頭 —
+# macOS では /dev/cu.debug-console — を掴んで termios エラーで落ちる。
+# 303A:1001 は Espressif の USB JTAG/serial で、CoreS3 はこれを名乗る
+monitor port='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    port='{{port}}'
+    if [ -z "$port" ]; then
+        # 候補を全部出す。1 台に絞れないときに黙って先頭を選ぶと、隣の
+        # ESP32 のログを CoreS3 のものとして読むことになる
+        mapfile -t found < <(pio device list --json-output | python3 -c "import json,sys; [print(d['port']) for d in json.load(sys.stdin) if '303A:1001' in d.get('hwid','')]")
+        if [ "${#found[@]}" -eq 0 ]; then
+            echo "CoreS3 が見つかりません (USB 接続を確認するか、just monitor <port> で指定してください)" >&2
+            exit 1
+        fi
+        if [ "${#found[@]}" -gt 1 ]; then
+            echo "ESP32 が複数見つかりました。just monitor <port> で選んでください:" >&2
+            printf '  %s\n' "${found[@]}" >&2
+            exit 1
+        fi
+        port="${found[0]}"
+    fi
+    cd m5stack && pio device monitor -b 115200 -p "$port"
 
 # デフォルトROM (game.nes) を取得
 fetch-rom:
@@ -47,9 +75,35 @@ secrets:
 
 # ------------------------------------------------------------------- 入力
 
-# プロコン→UDP 送信 (hidapi 直読み)。host は CoreS3 起動時に画面表示される IP
+# プロコン→UDP 送信 (hidapi 直読み)。host は CoreS3 起動時に画面表示される
+# IP または mDNS 名 (stackchan-xxxxxx.local)
+#
+# 先に just cli-build が要る。CLI を使うのは、実機と話す口を 1 つにするため
+# (旧 tools/procon_udp.py はこれに置き換えて削除した)
 procon host:
-    uv run tools/procon_udp.py --backend hid --host {{host}}
+    cli/target/release/stackchan --host {{host}} input procon
+
+# --------------------------------------------------------------------- CLI
+
+# 各レシピの --locked は、Cargo.lock と食い違う依存で暗黙に動かないため。
+# 無いと CI が lockfile を勝手に作り直し、手元と別のバージョンで通ってしまう
+
+# 実機操作 CLI をビルド (cli/target/release/stackchan)
+cli-build:
+    cd cli && cargo build --release --locked
+
+# CLI の単体テスト (src/) + バイナリを起動する結合テスト (tests/cli.rs)
+#
+# HID 無しの構成も見る。Linux 向けの配布バイナリは procon feature を落とすので
+# (libudev が静的リンクできない)、そちらが壊れていないことを確かめる
+cli-test:
+    cd cli && cargo test --locked
+    cd cli && cargo test --locked --no-default-features
+
+# CLI の静的解析 (Cargo.toml の [lints.clippy] 準拠。lint-js と同じく warning も落とす)
+cli-clippy:
+    cd cli && cargo clippy --all-targets --locked -- -D warnings
+    cd cli && cargo clippy --all-targets --locked --no-default-features -- -D warnings
 
 # --------------------------------------------------------------------- Web
 
@@ -58,20 +112,17 @@ build-web:
     ./build.sh
 
 # Web 版をローカル配信 + 端子状態を実機へ UDP 中継 (http://localhost:8000)
-# 実機に反映するには http://localhost:8000/?device=<CoreS3 の IP> を開く
+# 実機に反映するには http://localhost:8000/?device=stackchan-xxxxxx.local を開く
+# (起動画面に出る IP を直接指定してもよい)
 serve port='8000':
     uv run tools/serve_web.py --port {{port}}
 
-# 実機の SD カード内の ROM 一覧を表示 (host は CoreS3 の IP)
+# 実機の SD カード内の ROM 一覧を表示 (host は CoreS3 の IP または mDNS 名)
 #
-# 中継サーバー (just serve) が別途動いている前提。ブラウザを開かずに
-# 「カードに何が入っているか」だけ見たいとき用で、UI から辿るより速い。
-# 実機と直接 UDP で話さず /api/sd/list を叩くのは、type 5 の分割応答の
-# 組み立てを serve_web.py が既に持っているため
-sd-list host port='8000':
-    curl -sS -X POST http://localhost:{{port}}/api/sd/list \
-        -H 'Content-Type: application/json' \
-        -d '{"host":"{{host}}"}'
+# 先に just cli-build が要る。CLI が type 5 の分割応答を自前で組み立てるので、
+# 中継サーバー (just serve) もブラウザも要らず実機と直接話す
+sd-list host:
+    cli/target/release/stackchan --host {{host}} sd ls
 
 # -------------------------------------------------------------------- 検証
 
@@ -376,7 +427,8 @@ test-ppu-flag:
     "$work/ref" m5stack/data/game.nes
     "$work/emb" m5stack/data/game.nes
 
-# コードを整形 (C++ は .clang-format、Python は ruff.toml、JS は .oxfmtrc.json 準拠)
+# コードを整形 (C++ は .clang-format、Python は ruff.toml、JS は .oxfmtrc.json、
+# Rust は rustfmt の既定 — 倒す設定が無いので設定ファイルは置いていない)
 #
 # oxfmt に web/*.js を明示するのは、ディレクトリを渡すと index.html まで
 # 整形対象に入るため (HTML の整形は今回の範囲外)
@@ -384,12 +436,14 @@ format:
     clang-format -i core/*.cpp core/*.h m5stack/src/*.cpp m5stack/src/*.h tools/*.cpp
     ruff format tools/
     oxfmt 'web/*.js'
+    cd cli && cargo fmt
 
 # 整形漏れがないか検査 (差分があれば失敗)
 format-check:
     clang-format --dry-run --Werror core/*.cpp core/*.h m5stack/src/*.cpp m5stack/src/*.h tools/*.cpp
     ruff format --check tools/
     oxfmt --check 'web/*.js'
+    cd cli && cargo fmt --check
 
 # Python の静的解析 (ruff.toml 準拠。PEP 8 + pyflakes + import 整列)
 lint-py:

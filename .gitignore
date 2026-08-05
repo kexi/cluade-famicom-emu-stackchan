@@ -3,6 +3,8 @@ node_modules/
 dist/
 m5stack/.pio/
 m5stack/compile_commands.json
+# cargo は成果物を作業ツリーに置くしかない (verify のように mktemp へ逃がせない)
+cli/target/
 
 # nix / direnv
 .direnv/
