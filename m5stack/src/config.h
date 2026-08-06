@@ -123,10 +123,25 @@ constexpr float DISPLAY_EMU_EWMA_ALPHA = 0.05f;
 
 // ------------------------------------------------------------------- audio
 constexpr uint32_t AUDIO_SAMPLE_RATE = 44100;
-constexpr uint8_t SPEAKER_VOLUME = 128;   // 0-255, M5.Speaker master volume
+constexpr uint8_t SPEAKER_VOLUME = 32;   // 0-255, M5.Speaker master volume
 // The device level the browser's 1.0 master volume maps to, so the two agree on
 // what "normal" sounds like. The web slider spans 0..1.5, i.e. up to 192 here.
 constexpr uint8_t SPEAKER_VOLUME_BASE = SPEAKER_VOLUME;
+// Standalone volume control: a short tap on the right touch zone steps to the
+// next preset above the current level, wrapping to mute (a long press there is
+// still the ROM picker). The chosen level persists in NVS across power cycles;
+// until the user first taps, SPEAKER_VOLUME stands.
+constexpr uint8_t VOLUME_PRESETS[] = {0, 16, 32, 64};
+constexpr int VOLUME_PRESET_COUNT = 4;
+// How far up from the bottom of the panel the three virtual buttons reach.
+//
+// M5Unified defaults this to 0, which on the CoreS3 puts the whole strip below
+// the 240px display — and the CoreS3 digitiser does not report anything down
+// there (measured: taps come back at y=117..152, never >= 240), so BtnA/B/C
+// never fired at all. Claiming the bottom band of the panel itself is what
+// makes them reachable. Nothing is drawn over the game; only the touch
+// hit-test moves, so the picture is unchanged.
+constexpr uint16_t TOUCH_BUTTON_HEIGHT = 48;
 constexpr uint8_t SPEAKER_CHANNEL = 1;   // virtual channel used for playRaw
 constexpr int AUDIO_BUF_SAMPLES = 2048;   // matches APU::sampleBuf capacity
 
