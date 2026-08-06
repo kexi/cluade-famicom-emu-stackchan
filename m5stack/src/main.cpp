@@ -5,6 +5,7 @@
 // this way keeps the network stack's latency out of the frame loop.
 
 #include <M5Unified.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <lwip/sockets.h>
@@ -30,6 +31,9 @@
 // idle. stopVideoAudio() / startGame() are the handover in each direction.
 enum class AppMode : uint8_t { Menu, Game };
 static AppMode g_mode = AppMode::Game;
+
+// NVS-backed settings; holds the user's last tap-selected volume.
+static Preferences g_prefs;
 
 // Statically allocated in internal SRAM (not PSRAM): ppu.framebuffer is handed
 // to pushImageDMA, and the LCD DMA engine cannot read from PSRAM reliably.
@@ -726,7 +730,14 @@ void setup() {
     speakerCfg.task_priority = 4;
     M5.Speaker.config(speakerCfg);
     M5.Speaker.begin();
-    M5.Speaker.setVolume(SPEAKER_VOLUME);
+    // Without this the three virtual buttons sit below the panel, where the
+    // CoreS3 digitiser reports nothing — see TOUCH_BUTTON_HEIGHT.
+    M5.setTouchButtonHeight(TOUCH_BUTTON_HEIGHT);
+
+    // The last tap-selected volume wins over the compile-time default once the
+    // user has ever chosen one (see cycleVolumePreset).
+    g_prefs.begin("nes", false);
+    M5.Speaker.setVolume(g_prefs.getUChar("vol", SPEAKER_VOLUME));
 
     // Before WiFi: the Grove controllers work regardless of network state.
     groveInputInit();
@@ -848,11 +859,32 @@ void setup() {
 // running ROM again, which is a power-on rather than a reset but gets the user
 // to the same place. A device with no other button to spare has to spend the
 // one it has on the thing that cannot be done another way.
+//
+// The same zone's short tap is the standalone volume control: the picker owns
+// the hold, and a tap is the only gesture left on a device whose other two
+// zones are already Select and Start.
+static void cycleVolumePreset() {
+    const uint8_t current = M5.Speaker.getVolume();
+    uint8_t next = VOLUME_PRESETS[0];
+    for (int i = 0; i < VOLUME_PRESET_COUNT; i++) {
+        if (VOLUME_PRESETS[i] > current) {
+            next = VOLUME_PRESETS[i];
+            break;
+        }
+    }
+    M5.Speaker.setVolume(next);
+    // Only tap-selected levels are persisted: the browser mirror streams while
+    // its slider drags, and NVS is not the place for that write rate.
+    g_prefs.putUChar("vol", next);
+    Serial.printf("VOL: %d (tap)\n", next);
+}
+
 static uint8_t touchButtonBits() {
     uint8_t bits = 0;
     if (M5.BtnA.isPressed()) bits |= NES_BTN_SELECT;
     if (M5.BtnB.isPressed()) bits |= NES_BTN_START;
     if (M5.BtnC.wasHold()) g_menuRequested.store(true, std::memory_order_relaxed);
+    if (M5.BtnC.wasClicked()) cycleVolumePreset();
     return bits;
 }
 
