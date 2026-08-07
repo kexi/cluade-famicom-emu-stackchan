@@ -13,6 +13,9 @@ result
 # ROM・TASムービー (ローカル取得物。再配布しない)
 *.nes
 *.fm2
+# 自作テストROMは例外 (tools/make_*_rom.py から生成、再配布可)
+!web/exptest.nes
+!web/exppitch.nes
 
 # 秘密情報 (雛形は secrets.h.example)
 m5stack/src/secrets.h

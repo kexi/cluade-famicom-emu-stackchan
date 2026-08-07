@@ -394,6 +394,716 @@
     50% { transform: translate(2px, 1px) rotate(1deg); }
     75% { transform: translate(-1px, 2px); }
   }
+  /* front expansion port (DA-15) key rattle panel */
+  /* NES palette entries, taken from core/ppu.cpp's NES_PALETTE and byte-swapped
+     into CSS order. The table there stores ABGR words (0xFF2031B5 is R=B5
+     G=31 B=20), so quoting the literal into CSS as #2031B5 yields the mirror
+     colour — a blue where the hardware has red. Every colour this panel paints
+     comes from here, so "NES palette only" is checkable rather than a claim. */
+  :root {
+    --nes-0f: #000000;  /* black */
+    --nes-16: #B53120;  /* red        — short circuit */
+    --nes-17: #994E00;  /* dark brown — key body shadow */
+    --nes-27: #EA9E22;  /* amber      — key metal, warning */
+    --nes-2a: #5CE430;  /* green      — earthed shell */
+    --nes-30: #FFFEFF;  /* white */
+    --nes-37: #F7D8A5;  /* pale gold  — key highlight */
+    --nes-00: #666666;  /* dark grey */
+    --nes-10: #ADADAD;  /* light grey */
+    --nes-2d: #4F4F4F;  /* mid grey */
+    --nes-3d: #B8B8B8;  /* pale grey */
+  }
+  #expport {
+    display: none;
+    background: #211d18;
+    border-bottom: 4px solid var(--fc-red);
+    padding: 4px 8px 6px;
+    overflow-x: auto;
+    flex-shrink: 0;
+    gap: 14px;
+    align-items: flex-start;
+  }
+  body.exp-on #expport { display: flex; }
+  #exp-left { flex-shrink: 0; padding-left: 14px; }
+  #exp-left h3, #exp-right h3 {
+    color: #ddd;
+    font-size: 12px;
+    margin: 0 0 6px;
+    text-align: left;
+  }
+  #exp-viewlabel, .exp-viewlabel {
+    color: #85755a;
+    font-size: 9px;
+    font-family: ui-monospace, Menlo, monospace;
+    margin: 0 0 3px;
+  }
+  /* The port artwork is 120x44; everything in this panel — the port view, the
+     control row — is sized off that one number so they share an edge. */
+  #exp-left { --exp-w: 512px; }  /* 128 * 4, must match EXP_ART_SCALE */
+  /* The shake, as an actual rotation of the blade cross-section. It rides on
+     --blade-tf so the shake is relative to whatever angle is currently set. */
+  #exp-blade-mark.rattling { animation: bladerattle 0.16s ease-in-out infinite; }
+  @keyframes bladerattle {
+    0%, 100% { transform: var(--blade-tf) rotate(-22deg); }
+    50% { transform: var(--blade-tf) rotate(22deg); }
+  }
+  /* ---- front view: the port face, where the contact state is shown ---- */
+  #exp-front {
+    position: relative;
+    width: var(--exp-w);
+    height: 192px;  /* 48 * 4 */
+    flex-shrink: 0;
+    cursor: grab;        /* drag in both axes = where the key goes in */
+    touch-action: none;
+    /* The artwork is transparent outside the console face; this stands in for
+       the rest of the machine so the port does not float on the panel. */
+    background: linear-gradient(#E9E1D0 0 50%, #8F2323 50% 100%);
+  }
+  #exp-front.dragging { cursor: grabbing; }
+  /* The shell lights up while the key is leaning on it, because that contact is
+     what grounds the key and makes a single-pin touch a real short.
+     Why not a soft glow: a blurred halo is a colour the NES cannot produce, and
+     next to pixel-art it reads as a different rendering era. A hard two-colour
+     frame flipping on a 2-step timer is how the hardware would have said this. */
+  #exp-shell-glow {
+    position: absolute;
+    left: 60px; top: 36px;      /* cavity x 15..113, y 9..38 at 4x */
+    width: 392px;
+    height: 120px;
+    /* one thin hard ring, no blur radius: pure palette, pure edges */
+    box-shadow: inset 0 0 0 2px var(--nes-2a);
+    opacity: 0;
+    pointer-events: none;
+    z-index: 3;
+  }
+  /* steps(2) so it snaps between the two states instead of fading through
+     intermediate alphas the palette has no entry for.
+     Deliberately understated: this frame is context, not the subject. The key
+     and the pins are what the eye should land on, so the ring is 2px rather
+     than 4+4, drops the outer halo entirely, and alternates between two dim
+     greens instead of flashing to white — a slow, quiet pulse that still reads
+     as "live" in peripheral vision without pulling focus off the contacts. */
+  body.exp-grounded #exp-shell-glow {
+    opacity: 1;
+    animation: shellblink 0.9s steps(2, jump-none) infinite;
+  }
+  @keyframes shellblink {
+    /* $1A, the dark green — the same hue as $2A, two rows down in brightness */
+    0%   { box-shadow: inset 0 0 0 2px #0C9300; }
+    100% { box-shadow: inset 0 0 0 2px var(--nes-2a); }
+  }
+  #exp-front-img {
+    position: absolute;
+    left: 0; top: 0;
+    width: var(--exp-w);
+    height: 192px;
+    image-rendering: pixelated;
+    pointer-events: none;
+    z-index: 1;
+  }
+  /* The key, lying beside the port while it is pulled out. At true scale (bow
+     25mm against the 2.77mm pin pitch) it would be 433px across and taller than
+     the whole panel, so it is shown at a third of that — the proportions are
+     the asset's, only the overall size is reduced to fit. Laid on its side
+     because a key resting next to the console lies flat. */
+  #exp-key {
+    display: none;
+    width: 144px;   /* 32 * 4.5 */
+    height: 396px;  /* 88 * 4.5, before rotation */
+    image-rendering: pixelated;
+    transform: rotate(-90deg);
+    transform-origin: 72px 72px;
+    margin: 0 0 -252px 0;   /* reclaim the height the rotation frees up */
+  }
+  body.exp-pulled #exp-key { display: block; }
+  /* Contact pins. These sit over the artwork's pin dots and light up; the
+     artwork itself only draws the dull metal state. */
+  /* Sized to the artwork's contact ring (outer radius 4 source px) at 4x, so a
+     lit pin covers the metal the blade actually has to touch. */
+  .dpin {
+    position: absolute;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    margin: -16px 0 0 -16px;   /* placed by centre coordinate */
+    color: transparent;      /* the number is a tooltip, not a caption */
+    font-size: 7px;
+    font-family: ui-monospace, Menlo, monospace;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* The pins still carry a title tooltip, but the cursor stays default: a "?"
+       reads as "this does something" on a face where the key really is
+       draggable, and the two must not be confused. */
+    cursor: default;
+    /* above the blade bar: a lit pin under the blade still has to be visible */
+    z-index: 4;
+  }
+  /* The three pin states are a deliberate ladder — hollow, solid green, solid
+     red — so the difference reads by FILL and HUE before you look at anything
+     else. Legend below the port names each one. */
+  /* Covered by the blade with a path to ground, but this line is not one the
+     core reports on (supply, strobe, unmodelled): contact is real, nothing is
+     being shorted that shows up. Solid green $2A = touching and safe. */
+  .dpin.covered { background: var(--nes-2a); box-shadow: inset 0 0 0 4px var(--nes-0f); }
+  /* Touched by the key, but the key has no path to ground, so nothing is
+     actually shorted. Hollow rather than filled: the metal is on the pin but no
+     current flows, and that has to look different from a real short. */
+  .dpin.floating {
+    background: transparent;
+    box-shadow: inset 0 0 0 4px var(--nes-3d);
+  }
+  /* Pin actually shorted right now (read back from the core). NES red $16:
+     short = fault = red, which needs no legend to read as "this one is doing
+     something". Why not the pale gold used before: it was quoted out of the
+     ABGR table without swapping, so it rendered as a pale BLUE — a colour the
+     palette has at $3C, and one that says "inert" next to a red short. */
+  .dpin.shorted {
+    background: var(--nes-16);
+    box-shadow: inset 0 0 0 4px var(--nes-30);
+    /* Name is panel-local on purpose: the cartridge bus panel already owns a
+       `pinblink`, and reusing it here would silently redefine that one too. */
+    animation: dpinshort 0.4s steps(2, jump-none) infinite;
+  }
+  /* Blink by swapping two palette entries rather than fading opacity: the
+     in-between alphas of a fade are colours the NES has no entry for. */
+  @keyframes dpinshort {
+    0%   { background: var(--nes-16); box-shadow: inset 0 0 0 4px var(--nes-30); }
+    100% { background: var(--nes-30); box-shadow: inset 0 0 0 4px var(--nes-16); }
+  }
+  /* The blade seen end-on, turning about the insertion point like a clock hand.
+     Why not pivot at one end: the axis is the blade's centre, so the bar is
+     symmetric about the insertion point and reads as a bar pinned in the middle
+     rather than a hand swinging off a corner. This axis is fixed by design. */
+  #exp-blade-mark {
+    position: absolute;
+    width: 0;
+    height: 0;
+    pointer-events: none;
+    z-index: 3;
+    transition: transform 0.25s ease-out, opacity 0.12s linear;
+    /* Ungrounded is the default: a key merely resting in the opening is a
+       floating piece of metal, and it is drawn fainter to say so before you
+       read a single label. Applied to the whole group — tip, grooves, bow,
+       crosshair — rather than to the tip alone, so the key dims as one object
+       instead of coming apart into layers. Earthing it restores full strength
+       below. Why opacity and not a colour swap: the tip is already translucent
+       so the pins under it stay visible, and a second colour scale on top of
+       that translucency was impossible to keep on-palette. */
+    opacity: var(--blade-op, 0.5);
+  }
+  /* Earthed: full strength, because now the key is part of a circuit. */
+  body.exp-grounded #exp-blade-mark { --blade-op: 1; }
+  /* Rattling is grounded by definition, but it is also the loudest state in the
+     panel, so it gets full strength regardless of the frame's exact geometry. */
+  #exp-blade-mark.rattling { --blade-op: 1; }
+  /* The blade, symmetric about the insertion point (= the rotation axis).
+     Both the box and the silhouette come from main.js: --blade-poly is
+     generated from EXP_BLADE_FEATURES, so the teeth drawn here are exactly the
+     points the hit test uses. A peak that looks like it has dropped into a hole
+     is a peak the model agrees has dropped in. */
+  #exp-blade-mark::before {
+    content: '';
+    position: absolute;
+    left: var(--blade-draw-x);
+    top: var(--blade-draw-y);
+    width: var(--blade-draw-w);
+    height: var(--blade-draw-h);
+    /* Translucent because at true scale the tip is nearly as deep as the gap
+       between the rows: opaque, it hid the very pins it was bridging, which is
+       the one thing this view has to show.
+       Hard 50% stops, not a gradient ramp: two flat bands read as the lit and
+       shadowed faces of a milled edge the way sprite art draws metal, whereas a
+       smooth ramp is the one thing pixel art never does. */
+    background: linear-gradient(
+      rgba(255, 254, 255, 0.55) 0 50%,
+      rgba(184, 184, 184, 0.55) 50% 100%
+    );
+    clip-path: var(--blade-poly);
+    /* outlined with a shadow rather than a border so the edge follows the
+       toothed silhouette instead of the untrimmed box */
+    filter: drop-shadow(0 0 1px #000) drop-shadow(0 0 1px #000);
+  }
+  /* Rattling flashes the blade between two palette entries rather than blooming
+     a halo — the tip has to stay the size the hit test uses, and a blurred glow
+     is off-palette. Applied as a filter because clip-path would cut a
+     box-shadow off at the chamfer. */
+  #exp-blade-mark.rattling::before {
+    filter: drop-shadow(0 0 1px #000) drop-shadow(0 0 0 var(--nes-27));
+    animation: bladeflash 0.16s steps(2, jump-none) infinite;
+  }
+  @keyframes bladeflash {
+    0%   { filter: drop-shadow(0 0 1px #000) drop-shadow(2px 0 0 var(--nes-27)) drop-shadow(-2px 0 0 var(--nes-27)); }
+    100% { filter: drop-shadow(0 0 1px #000) drop-shadow(2px 0 0 var(--nes-30)) drop-shadow(-2px 0 0 var(--nes-30)); }
+  }
+  /* The pivot, so the centre axis is visible at a glance. Reads as the thick
+     end of the key; only the blade itself has to be thin. */
+  #exp-blade-mark::after {
+    content: '';
+    position: absolute;
+    left: -7px;
+    top: -7px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--nes-10);
+    box-shadow: 0 0 0 2px var(--nes-0f);
+  }
+  /* ---- key-ness: the parts of the key that are NOT the contacting tip ----
+     The hit test is the tip rectangle alone. Everything below is decoration
+     sized off --blade-w/--blade-h, drawn with pointer-events: none, and states
+     nothing about contact — so it can suggest "a key is sticking out of this
+     hole towards you" without the drawing ever claiming a touch the geometry
+     does not have. */
+  /* The bow (the handle), seen end-on down the barrel of the key. It is behind
+     the blade and much fainter: the handle is a foot of plastic-and-brass
+     nearer the viewer, out of focus and out of the way. Why a ring and not a
+     filled shape: filled, it read as a washer lying ON the port face; hollow,
+     it reads as the far rim of something pointing at you. */
+  #exp-blade-bow {
+    position: absolute;
+    left: calc(var(--blade-x) - 18px);
+    top: calc(var(--blade-y) - 18px);
+    width: calc(var(--blade-w) + 36px);
+    height: calc(var(--blade-h) + 36px);
+    border-radius: 24px / 20px;
+    /* Stepped alpha rings, not a blur: still hard edges, just faint ones.
+       Kept very low: this is a hint that the key continues towards the viewer,
+       and at any higher alpha it stopped reading as "behind" and became a
+       bright loop competing with the contact rings, which are the one thing on
+       this face that carries meaning. */
+    box-shadow:
+      inset 0 0 0 2px rgba(247, 216, 165, 0.13),
+      inset 0 0 0 5px rgba(153, 78, 0, 0.09);
+    pointer-events: none;
+    z-index: -1;
+  }
+  /* Milled grooves across the tip's face — the warding cuts, which are what
+     makes a key silhouette a KEY rather than a bar. Drawn as a hard-stop
+     repeating gradient so every edge lands on a pixel boundary; clipped to the
+     tip box so they never extend past the blade. */
+  #exp-blade-grooves {
+    position: absolute;
+    left: var(--blade-draw-x);
+    top: var(--blade-draw-y);
+    width: var(--blade-draw-w);
+    height: var(--blade-draw-h);
+    background: repeating-linear-gradient(
+      90deg,
+      rgba(0, 0, 0, 0.55) 0 2px,
+      rgba(0, 0, 0, 0) 2px 8px
+    );
+    /* same generated silhouette as the blade, so the shading stops at the teeth */
+    clip-path: var(--blade-poly);
+    pointer-events: none;
+    z-index: 1;
+  }
+  /* Drag affordance: a small crosshair on the insertion point, so the blade
+     reads as the thing you grab. Four hard ticks, no ring — a ring here would
+     be confused with the contact-pin rings, which mean something specific. */
+  #exp-blade-cross {
+    position: absolute;
+    left: -9px;
+    top: -9px;
+    width: 18px;
+    height: 18px;
+    pointer-events: none;
+    z-index: 2;
+    background:
+      /* vertical tick */
+      linear-gradient(var(--nes-0f) 0 0) 8px 0 / 2px 18px no-repeat,
+      /* horizontal tick */
+      linear-gradient(var(--nes-0f) 0 0) 0 8px / 18px 2px no-repeat;
+    opacity: 0.85;
+  }
+
+  #exp-blade-mark.rattling { transition: none; }
+  #exp-controls {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: 6px;
+    width: var(--exp-w);
+  }
+  #exp-controls button {
+    background: var(--fc-red);
+    color: var(--fc-cream);
+    border: none;
+    border-radius: 5px;
+    padding: 4px 8px;
+    font-size: 11px;
+    font-weight: bold;
+    cursor: pointer;
+    box-shadow: 0 2px 0 var(--fc-red-dark);
+  }
+  #exp-controls button:active { transform: translateY(2px); box-shadow: none; }
+  #exp-controls button:disabled { opacity: 0.5; cursor: default; transform: none; }
+  #exp-angle {
+    color: #ddd;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 12px;
+    min-width: 44px;
+  }
+  /* ---- rotation gauge: a machine control, not a form widget ----
+     The native range renders as a rounded OS widget — the only smooth-cornered,
+     platform-styled thing in a panel that is otherwise all hard pixels. It is
+     stripped back to nothing and rebuilt as a piece of instrument panel: a
+     printed 5-degree scale, a chiselled groove, and a lever with a milled grip.
+     One number drives the whole thing: the thumb is 14px wide, so the travel of
+     its CENTRE is inset 7px at each end, and the scale has to be inset by the
+     same 7px or the ticks and the lever would disagree at the extremes. */
+  #exp-rot-gauge {
+    --thumb-w: 14px;
+    --half-thumb: 7px;   /* half of --thumb-w; both ends of the travel */
+    position: relative;
+    display: block;
+    flex: 1 1 120px;
+    min-width: 110px;
+    height: 26px;
+  }
+  /* The printed scale: a tick every 5 degrees across a 60-degree span, i.e. 13
+     ticks, with a taller one at each end and at centre. Drawn as two hard-stop
+     repeating gradients on the wrapper, inset to match the thumb's travel, so
+     every tick lands on the lever position it names. */
+  #exp-rot-gauge::after {
+    content: '';
+    position: absolute;
+    left: var(--half-thumb);
+    right: var(--half-thumb);
+    bottom: 0;
+    height: 5px;
+    /* minor ticks: 1px wide, one per 5deg = one per (100%/12) of the travel */
+    background-image: repeating-linear-gradient(
+      90deg,
+      var(--nes-2d) 0 1px,
+      transparent 1px calc(100% / 12)
+    );
+    /* the last tick of a repeating gradient falls outside the box, so the
+       right-hand end is drawn explicitly rather than left missing */
+    box-shadow: inset -1px 0 0 0 var(--nes-2d);
+    pointer-events: none;
+  }
+  /* Centre detent: the 0-degree mark, taller and brighter, because "straight"
+     is the position you actually aim for. */
+  #exp-rot-gauge::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    bottom: 0;
+    width: 2px;
+    height: 9px;
+    margin-left: -1px;
+    background: var(--nes-10);
+    pointer-events: none;
+  }
+  #exp-rot {
+    -webkit-appearance: none;
+    appearance: none;
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 18px;
+    margin: 0;
+    cursor: pointer;
+    background: transparent;
+  }
+  /* Track: a sunken groove, drawn as flat bands (top shadow, floor, bottom
+     highlight) so it reads chiselled rather than shaded. */
+  #exp-rot::-webkit-slider-runnable-track {
+    height: 10px;
+    background: linear-gradient(
+      var(--nes-0f) 0 2px,
+      #2a2620 2px 8px,
+      var(--nes-2d) 8px 10px
+    );
+    border: 2px solid var(--nes-0f);
+  }
+  #exp-rot::-moz-range-track {
+    height: 10px;
+    background: linear-gradient(
+      var(--nes-0f) 0 2px,
+      #2a2620 2px 8px,
+      var(--nes-2d) 8px 10px
+    );
+    border: 2px solid var(--nes-0f);
+  }
+  /* Lever: a blocky cap with a hard lit face, a hard shadow face, and three
+     milled grip lines across the middle — the same two-band metal treatment as
+     the key blade, so the control and the thing it controls read as one kit.
+     The grip lines are a second hard-stop gradient layered over the first. */
+  #exp-rot::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: var(--thumb-w, 14px);
+    height: 22px;
+    margin-top: -8px;   /* centre the 22px lever on the 10px track (+2px border) */
+    background:
+      repeating-linear-gradient(
+        90deg,
+        transparent 0 3px,
+        rgba(0, 0, 0, 0.45) 3px 5px
+      ),
+      linear-gradient(
+        var(--nes-37) 0 7px,
+        var(--nes-27) 7px 15px,
+        var(--nes-17) 15px 22px
+      );
+    border: 2px solid var(--nes-0f);
+    border-radius: 0;
+  }
+  #exp-rot::-moz-range-thumb {
+    width: var(--thumb-w, 14px);
+    height: 22px;
+    background:
+      repeating-linear-gradient(
+        90deg,
+        transparent 0 3px,
+        rgba(0, 0, 0, 0.45) 3px 5px
+      ),
+      linear-gradient(
+        var(--nes-37) 0 7px,
+        var(--nes-27) 7px 15px,
+        var(--nes-17) 15px 22px
+      );
+    border: 2px solid var(--nes-0f);
+    border-radius: 0;
+    box-sizing: border-box;
+  }
+  /* Depth gauge: the same machined treatment as the rotation gauge, but this
+     axis points away from the viewer, so it gets its own marks — a coarser
+     scale (one tick per 2mm) and a detent at the depth where the contacts
+     start. Kept short so it reads as a secondary control. */
+  #exp-depth-gauge {
+    --thumb-w: 12px;
+    --half-thumb: 6px;
+    position: relative;
+    display: block;
+    flex: 0 0 96px;
+    height: 26px;
+  }
+  #exp-depth-gauge::after {
+    content: '';
+    position: absolute;
+    left: var(--half-thumb);
+    right: var(--half-thumb);
+    bottom: 0;
+    height: 5px;
+    /* 13 ticks over the 26mm travel = one every 2mm */
+    background-image: repeating-linear-gradient(
+      90deg,
+      var(--nes-2d) 0 1px,
+      transparent 1px calc(100% / 13)
+    );
+    box-shadow: inset -1px 0 0 0 var(--nes-2d);
+    pointer-events: none;
+  }
+  /* The contact threshold: everything left of this mark cannot touch metal.
+     4.5mm of a 26mm travel = 17.3%. Amber, because it is a warning line rather
+     than a target — the 0-degree detent on the other gauge is a place you aim
+     for, this is a place things start working. */
+  #exp-depth-gauge::before {
+    content: '';
+    position: absolute;
+    left: calc(var(--half-thumb) + (100% - var(--thumb-w)) * 0.173);
+    bottom: 0;
+    width: 2px;
+    height: 9px;
+    margin-left: -1px;
+    background: var(--nes-27);
+    pointer-events: none;
+  }
+  #exp-depth {
+    -webkit-appearance: none;
+    appearance: none;
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 18px;
+    margin: 0;
+    cursor: pointer;
+    background: transparent;
+  }
+  #exp-depth::-webkit-slider-runnable-track {
+    height: 10px;
+    background: linear-gradient(var(--nes-0f) 0 2px, #2a2620 2px 8px, var(--nes-2d) 8px 10px);
+    border: 2px solid var(--nes-0f);
+  }
+  #exp-depth::-moz-range-track {
+    height: 10px;
+    background: linear-gradient(var(--nes-0f) 0 2px, #2a2620 2px 8px, var(--nes-2d) 8px 10px);
+    border: 2px solid var(--nes-0f);
+  }
+  #exp-depth::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: var(--thumb-w, 12px);
+    height: 22px;
+    margin-top: -8px;
+    background:
+      repeating-linear-gradient(90deg, transparent 0 3px, rgba(0, 0, 0, 0.45) 3px 5px),
+      linear-gradient(var(--nes-3d) 0 7px, var(--nes-10) 7px 15px, var(--nes-2d) 15px 22px);
+    border: 2px solid var(--nes-0f);
+    border-radius: 0;
+  }
+  #exp-depth::-moz-range-thumb {
+    width: var(--thumb-w, 12px);
+    height: 22px;
+    background:
+      repeating-linear-gradient(90deg, transparent 0 3px, rgba(0, 0, 0, 0.45) 3px 5px),
+      linear-gradient(var(--nes-3d) 0 7px, var(--nes-10) 7px 15px, var(--nes-2d) 15px 22px);
+    border: 2px solid var(--nes-0f);
+    border-radius: 0;
+    box-sizing: border-box;
+  }
+  #exp-depth-val {
+    color: #ddd;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 11px;
+    min-width: 48px;
+  }
+  /* Short of the contacts: the slice is drawn as an outline only, so the key is
+     visibly present but visibly not touching. Amber because this is the same
+     "not yet working" state the depth gauge's threshold mark warns about. */
+  body.exp-out-of-reach #exp-depth-val { color: var(--nes-27); }
+  /* Why not an inset ring: clip-path trims the pseudo-element to the slice
+     polygon, and an inset box-shadow is clipped away with it. A translucent
+     amber wash plus the existing drop-shadow outline survives the clip and
+     still reads as "drawn, but not solid". */
+  #exp-blade-mark.out-of-reach::before {
+    background: repeating-linear-gradient(
+      45deg,
+      rgba(234, 158, 34, 0.55) 0 3px,
+      rgba(234, 158, 34, 0.12) 3px 6px
+    );
+    filter: drop-shadow(0 0 1px var(--nes-27)) drop-shadow(0 0 1px #000);
+  }
+  /* the milled shading means nothing on a shape that is only an outline */
+  #exp-blade-mark.out-of-reach #exp-blade-grooves { display: none; }
+  /* ---- state legend: what each pin marker means ---- */
+  #exp-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    width: var(--exp-w);
+    margin-top: 5px;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 9px;
+    color: #b3a68a;
+  }
+  .exp-leg {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  /* The swatches are the real classes wherever possible, at a size that still
+     shows the 4px ring. Scaled down from the 32px pin so the legend does not
+     dominate the port it explains. */
+  .exp-leg i {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .exp-leg i.lg-float { box-shadow: inset 0 0 0 2px var(--nes-3d); }
+  .exp-leg i.lg-cover { background: var(--nes-2a); box-shadow: inset 0 0 0 2px var(--nes-0f); }
+  .exp-leg i.lg-short { background: var(--nes-16); box-shadow: inset 0 0 0 2px var(--nes-30); }
+  /* the shell swatch is a frame, not a disc: it stands for the bezel */
+  .exp-leg i.lg-shell {
+    border-radius: 2px;
+    box-shadow: inset 0 0 0 2px var(--nes-2a), inset 0 0 0 4px var(--nes-0f);
+  }
+  /* the hatched amber wash used for a slice that has not reached the contacts */
+  .exp-leg i.lg-reach {
+    border-radius: 2px;
+    background: repeating-linear-gradient(
+      45deg,
+      rgba(234, 158, 34, 0.55) 0 3px,
+      rgba(234, 158, 34, 0.12) 3px 6px
+    );
+    box-shadow: inset 0 0 0 1px var(--nes-27);
+  }
+  /* only meaningful while the key really is short of the contacts */
+  #exp-leg-reach-wrap { opacity: 0.35; }
+  body.exp-out-of-reach #exp-leg-reach-wrap { opacity: 1; }
+  .exp-leg i.lg-out {
+    border-radius: 2px;
+    box-shadow: inset 0 0 0 2px var(--nes-2d);
+    background: repeating-linear-gradient(45deg, var(--nes-2d) 0 2px, transparent 2px 4px);
+  }
+  #exp-right { flex: 0 1 300px; min-width: 190px; }
+  #exp-hint, #exp-note { font-size: 9px; color: #85755a; margin-top: 3px; text-align: left; }
+  #exp-hint { width: var(--exp-w); line-height: 1.5; }
+  #exp-state {
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 10px;
+    color: #9fdf9f;
+    margin-top: 4px;
+    min-height: 13px;
+  }
+  /* ---- instrument panel: what the core is reporting, every frame ----
+     The right column was mostly empty below the note. This fills it with the
+     readback the panel is otherwise only hinting at: which pins the tip is on,
+     whether there is a path to ground, and the raw $4016/$4017 bits. */
+  #exp-meter {
+    margin-top: 8px;
+    border: 2px solid #3a352c;
+    background: #191612;
+    padding: 5px 6px;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 9px;
+    color: #b3a68a;
+  }
+  #exp-meter h4 {
+    margin: 0 0 4px;
+    font-size: 9px;
+    font-weight: normal;
+    letter-spacing: 0.08em;
+    color: #6f6552;
+    text-transform: uppercase;
+  }
+  .exp-meter-row {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+    line-height: 1.6;
+  }
+  .exp-meter-row > .k { color: #6f6552; flex: 0 0 68px; }
+  .exp-meter-row > .v { color: #ddd2b8; word-break: break-all; }
+  .exp-meter-row > .v.on { color: var(--nes-2a); }
+  .exp-meter-row > .v.off { color: #5a5346; }
+  .exp-meter-row > .v.alarm { color: var(--nes-16); }
+  /* Bit readouts: a fixed-width row of cells so the pattern is readable as a
+     shape, not just as text. A set bit is the same red as a shorted pin. */
+  .exp-bits { display: flex; gap: 2px; }
+  .exp-bits b {
+    display: inline-block;
+    width: 11px;
+    text-align: center;
+    font-weight: normal;
+    border: 1px solid #3a352c;
+    background: #221e18;
+    color: #5a5346;
+  }
+  .exp-bits b.set {
+    background: var(--nes-16);
+    border-color: var(--nes-30);
+    color: var(--nes-30);
+  }
+  /* "no key in the port" banner. Shown in the legend row so the pin states and
+     the reason they are all blank sit in the same place. */
+  #exp-unplugged {
+    display: none;
+    align-items: center;
+    gap: 5px;
+    color: var(--nes-27);
+  }
+  body.exp-pulled #exp-unplugged { display: flex; }
+  /* while the key is out, the contact legend describes nothing on screen */
+  body.exp-pulled #exp-legend .exp-leg { opacity: 0.35; }
   /* oscilloscope probe popup (hover a pin) */
   #probe-scope {
     display: none;
@@ -940,6 +1650,7 @@
     <button id="btn-mute">🔊</button>
     <button id="btn-debug">DEBUG</button>
     <button id="btn-bus">端子</button>
+    <button id="btn-exp">拡張端子</button>
     <button id="btn-xev" hidden>XEVIOUS判定</button>
     <button id="btn-tas" hidden>TAS</button>
     <button id="btn-settings">⚙</button>
@@ -1024,6 +1735,76 @@
         <button id="cart-blow">息(フーフー)💨</button>
       </div>
       <div id="cart-note">傾けると端子の接触が浮いた側から不安定になります(点滅=接触不良気味、黒=断線)。「挿し直す」で全ピン復旧。</div>
+    </div>
+  </div>
+  <div id="expport">
+    <div id="exp-left">
+      <h3 id="exp-title-h3">前面拡張端子(DA-15)</h3>
+      <!-- One view: the port face. The blade's cross-section turns about the
+           insertion point like a clock hand, and the pins it bridges light up.
+           Dragging sideways moves the insertion point along the row. -->
+      <div id="exp-viewlabel" class="exp-viewlabel" data-i18n="expViewFront">前から見た図 — 時計と同じ回し方</div>
+      <div id="exp-front">
+        <img id="exp-front-img" alt="" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAAAwCAYAAADZ9HK+AAACqklEQVR4nO2aO04DMRCGHZQCahBUSKkibpEKkgKxmyZCpIiERJETcAZOkAIpEg1CNCSIYkPHNajSgqBPB1qQ0cbY3tfY3sT/V/Fw4tmZ3+PxeGtRFH0x4C0brg0AboEAPAcC8Jy66h/to7ZdS4BRZs+zfAJYvN6atAdYZzufAEyz2TxzNXVlWThYdMYF8DKXK6/FkGEy+6rxyVZGAOJDmDR+3WgpfGXSp2QC4EZy45Di6Wg3l7cI0ddOBaAyBkWkObivKYRQSgCxAUVXfNgN2XQ6LTP9WhEEAZs8THJ9htdRyTg42wJ0K/708v4n2PFDJhF/952wG/79zP11d9UzOmdNdRmUpiid6lQBB8VJE0RaFlCdMMgFIE40Go203zMcDjE+p39kIigqALItIF71orEc1V4fRRHGs/z+2Trok20PZBmAK6zT6SyN49uA+JD84TA+KOSfmKQAimYA3AZ6DgTgORCA55DVAHERqEJV5KiOiRif7h+xCKxEDSALnK7bh/GM1D+VuA3MayDG6zHdLkcN4Dn18cXyOZMzTvng+bW8SQHcMTjs020Bg51GWXuAZXQxu/mYS/9e6+0z6Slg9y19wuPH6N9JIGtbU+xwYXyU2T+yE8DTid6f73sWaoDYKNnRRdbT1t0UYjxT+of6irhUBsiSBdDzp70TKbL6rWUAXRYA5THxgkhpAcTqU3WZgFmyrn4dJBlAFAGyAD1FU7/xGkBVC2R5NQw9/1/S/CNL/XkFYLwG0G0F6Pkz0p4/1eonzQBFegPAXupXZQByAXAghGrt+dYFkBSB7E1hZAV50MUXa7n/yqZ8JwLQiQCkQxV8pwLgQAhuAl8ZAYhAEGYDXnkB+CyIloWAr5wAgFmsXQaB1aKeVzFgvUAG8BwIwHMgAM+BAJjffAN1Qn8rZiT5YQAAAABJRU5ErkJggg==">
+        <!-- lights while the key is earthed against the shell -->
+        <div id="exp-shell-glow"></div>
+        <!-- .dpin markers are created and positioned by main.js.
+             The blade mark's children (bow silhouette, warding grooves, drag
+             crosshair) are decoration only and are created by main.js too, so
+             they ride the same rotation transform as the tip. -->
+        <div id="exp-blade-mark"></div>
+      </div>
+      <!-- The key itself, shown lying beside the port while it is pulled out.
+           Inserted, the blade is inside the port and only the cross-section
+           marker is visible, so this is hidden. -->
+      <img id="exp-key" alt="" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAABYCAYAAACUC/VYAAACgElEQVR4nO1aXW6DMAx2Lb/1Xus7vUO6Iw0OwTu7V587GRGNsUBsY5JO6ydVtNDEX/wTO25PYEQI4bG813XdSTsPWYU3TZN69NCSQHAEk0ppxpVAWF+9iQSCAX3fgxdO1oG8ysvlAufzefx8v9/H90xO4wdoJcBChmH4cU8rfBcBL5BlUHQyNsEck3OOz6SaIIvw9qOF4XMY7b7EzC9EewJCZZB2wLSqpAkszkhaAjMSjF+bEkdGkTBMoWgYhmkj2guyCOYrq34ZBTEMDzdB+9GuPmOtaJIRWaMglxGlmiAtgTmJKj6Q00RMUIfuA55hSOCYjCxAi3COgpQTWmpCAgNu77ckgZlWxCmZ9uSBNRMwOWndiFoCWyWZxRnROxcUyYZh5WxQJBuGKQq8QG4zlSpKu0xJpi1KSUtgRmIUsuYLVUxQtCYMiTAskozCRklmAVoGrYVhkWTUZUqymIxKHEweW8no8LNhVzsZeYUhgWNJVjQZNU4lGWoJ8Aq5JMuRLNIlaxZaqNqk6g3CzQRSq7fY30Rgq1VbxAm9gZ6N6kOb1UEg3EKCNMIvb987Hzcql5jXB9KEhFAZ6LV6RmzdR21ITIFQGei1eqsWECoDn5ZAMKjfYgaEysB/T4AkGsiVYFvI9RJJOpGlKyIhTt4RkEKMhFRyQukksemQuy7fu0ZBL5iYv3NYo7IRFiSHaUAqUEqUQZpwYmdKXSOW99dOzyYCg2AyC0jypfhjtRaSHhJCZeCLAPw1E/R9PzpX6mX5ew9pB3B8X6/X5GmnyPHcGwiVQVsP99QAy+r4aTWAe/oAWqTOB6SdhJOSxdvXQNoB3tpB19leBAxI+oDnXzZz+AK9VsbxUQ77LgAAAABJRU5ErkJggg==">
+      <div id="exp-controls">
+        <button id="exp-rattle">ガチャガチャ</button>
+        <button id="exp-pull">抜く</button>
+        <span id="exp-angle">0.0°</span>
+        <!-- The range input carries the value and all the keyboard/pointer
+             behaviour; the wrapper exists only to draw the printed scale
+             underneath it, which an <input> cannot host pseudo-elements for
+             reliably across engines. -->
+        <span id="exp-rot-gauge">
+          <input type="range" id="exp-rot" min="-30" max="30" step="0.5" value="0">
+        </span>
+        <!-- Insertion depth. Same mechanical treatment as the rotation gauge,
+             turned on its side: this is the axis pointing away from the viewer,
+             so a vertical throw reads as "push it in". The wheel over the port
+             face drives the same value. -->
+        <span id="exp-depth-gauge" title="">
+          <input type="range" id="exp-depth" min="0" max="26" step="0.1" value="5.7">
+        </span>
+        <span id="exp-depth-val">5.7mm</span>
+      </div>
+      <!-- What each marker on the port face means. Kept directly under the port
+           so the swatch and the thing it explains are in one glance. -->
+      <div id="exp-legend">
+        <span class="exp-leg"><i class="lg-float"></i><span id="exp-leg-float">浮き接触(短絡なし)</span></span>
+        <span class="exp-leg"><i class="lg-cover"></i><span id="exp-leg-cover">接触(接地あり)</span></span>
+        <span class="exp-leg"><i class="lg-short"></i><span id="exp-leg-short">短絡中</span></span>
+        <span class="exp-leg"><i class="lg-shell"></i><span id="exp-leg-shell">シェル接地</span></span>
+        <span class="exp-leg" id="exp-leg-reach-wrap"><i class="lg-reach"></i><span id="exp-leg-reach">奥まで届いていない(接触不可)</span></span>
+        <span id="exp-unplugged"><i class="lg-out"></i><span id="exp-leg-out">鍵は抜けています</span></span>
+      </div>
+      <div id="exp-hint">鍵を左右にドラッグして挿入位置、スライダーで捻り角(±30°)。右に捻れば下段、左に捻れば上段のピンに当たります。「ガチャガチャ」で約1秒ノイズを注入します</div>
+    </div>
+    <div id="exp-right">
+      <h3 id="exp-note-h3">家の鍵でガチャガチャ</h3>
+      <div id="exp-note">団地の鍵(MIWA製)を前面拡張端子に挿してガチャガチャすると『ベースボール』で変化球が投げられた、という有名な小ネタの再現です。拡張端子のデータ線は負論理なので、鍵の金属がGND(ピン1)と短絡させた線は$4016/$4017の読み出しで「押されている」ことになります。</div>
+      <div id="exp-state"></div>
+      <!-- Live readback from the core, refreshed by updateExpUI() every frame. -->
+      <div id="exp-meter">
+        <h4 id="exp-meter-h4">計器</h4>
+        <div class="exp-meter-row"><span class="k" id="exp-m-k-key">鍵</span><span class="v" id="exp-m-key">-</span></div>
+        <div class="exp-meter-row"><span class="k" id="exp-m-k-gnd">接地</span><span class="v" id="exp-m-gnd">-</span></div>
+        <div class="exp-meter-row"><span class="k" id="exp-m-k-pins">接触ピン</span><span class="v" id="exp-m-pins">-</span></div>
+        <div class="exp-meter-row"><span class="k" id="exp-m-k-depth">挿入深さ</span><span class="v" id="exp-m-depth">-</span></div>
+        <div class="exp-meter-row"><span class="k">$4017</span><span class="v exp-bits" id="exp-m-p1"></span></div>
+        <div class="exp-meter-row"><span class="k">$4016 D1</span><span class="v" id="exp-m-p0">-</span></div>
+        <div class="exp-meter-row"><span class="k">/IRQ</span><span class="v" id="exp-m-irq">-</span></div>
+      </div>
     </div>
   </div>
   <div id="screen-wrap">
@@ -1136,10 +1917,10 @@ PRGとCHRを別のカセットから組み合わせた「ニコイチカセッ�
   </div>
   <button id="check-close">閉じる</button>
 </div>
-<script>window.NES_VER='1785324359';</script>
-<script src="i18n.js?v=1785324359"></script>
-<script src="smb-ram.js?v=1785324359"></script>
-<script src="nes.js?v=1785324359"></script>
-<script src="main.js?v=1785324359"></script>
+<script>window.NES_VER='1785673275';</script>
+<script src="i18n.js?v=1785673275"></script>
+<script src="smb-ram.js?v=1785673275"></script>
+<script src="nes.js?v=1785673275"></script>
+<script src="main.js?v=1785673275"></script>
 </body>
 </html>

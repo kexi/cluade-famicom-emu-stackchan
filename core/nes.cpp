@@ -121,6 +121,15 @@ bool NES::loadRom(const uint8_t* data, size_t size) {
 }
 
 void NES::reset() {
+#ifndef NES_EMBEDDED
+    // Drop the key rattle: a burst that shorted /IRQ can leave the machine
+    // wedged, and RESET is the way out of that on hardware too. The rng seed is
+    // deliberately left alone — each rattle should sound different, just
+    // deterministically so.
+    keyNoise_.active = false;
+    keyNoise_.chatterP0 = keyNoise_.chatterP1 = 0;
+    keyNoise_.irqLow = false;
+#endif
     // like the real RESET button: work RAM survives
     ppu.reset();
     apu.reset();
@@ -135,7 +144,11 @@ void NES::powerOn() {
 void NES::runCycles(int n) {
     while (n > 0) {
 #ifndef NES_EMBEDDED
-        cpu.irq(apu.irqPending() || (mapper && irqOk && mapper->irqPending()));
+        // A key bridging pin 3 pulls /IRQ low at random, which is what makes the
+        // trick able to hang the machine as well as bend a pitch. Recoverable by
+        // RESET, same as on hardware.
+        if (keyNoise_.active) keyNoiseTick();
+        cpu.irq(apu.irqPending() || (mapper && irqOk && mapper->irqPending()) || keyNoise_.irqLow);
 #else
         cpu.irq(irqLineLevel());
 #endif
@@ -191,8 +204,24 @@ uint8_t NES_HOT NES::cpuReadBus(uint16_t addr) {
     if (addr < 0x4000) return ppu.readReg(addr);
     if (addr == 0x4015) return apu.readStatus();
 #endif
+#ifndef NES_EMBEDDED
+    // Key rattle ORs in whatever the shorted expansion lines pull to GND. OR and
+    // not assignment: the pad and the key share the line, and the standard read
+    // routine sees D0|D1, which is exactly how the trick reaches the game.
+    if (addr == 0x4016) {
+        uint8_t v = pad[0].read();
+        if (keyNoise_.active) v |= keyNoiseRead(0);
+        return v;
+    }
+    if (addr == 0x4017) {
+        uint8_t v = pad[1].read();
+        if (keyNoise_.active) v |= keyNoiseRead(1);
+        return v;
+    }
+#else
     if (addr == 0x4016) return pad[0].read();
     if (addr == 0x4017) return pad[1].read();
+#endif
     if (addr < 0x4020) return 0;
     if (!mapper) return 0;
     // Clean connector: straight to the mapper, exactly as before pin emulation
@@ -317,9 +346,10 @@ void NES_HOT NES::runCyclesBatched(int cycles) {
 void NES_HOT NES::runFrame() {
     ppu.frameReady = false;
     while (!ppu.frameReady) {
-        // IRQ line: APU frame/DMC + mapper (MMC3)
+        // IRQ line: APU frame/DMC + mapper (MMC3) + a key shorting pin 3
 #ifndef NES_EMBEDDED
-        cpu.irq(apu.irqPending() || (mapper && irqOk && mapper->irqPending()));
+        if (keyNoise_.active) keyNoiseTick();
+        cpu.irq(apu.irqPending() || (mapper && irqOk && mapper->irqPending()) || keyNoise_.irqLow);
 #else
         // The IRQ line reflects APU frame/DMC and mapper counters. Settling on
         // every instruction would defeat the batching, so the debt cap in
@@ -475,6 +505,76 @@ void nes::NES::probeSample() {
     probeBuf[probePos] = probeLevelFor(probePin);
     probePos = (probePos + 1) & 2047;
     ppuRdPulse = ppuWrPulse = false;
+}
+
+// ---- front expansion port (DA-15) key rattle ----
+
+uint32_t nes::NES::keyRand() {
+    uint32_t x = keyNoise_.rng;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    keyNoise_.rng = x;
+    return x;
+}
+
+// Redraw which of the covered lines are shorted for the next bounce interval.
+// Two layers make the noise: this ms-scale redraw plus the per-read jitter in
+// keyNoiseRead(). A single layer is not enough — redrawing alone leaves the
+// eight reads of one pad poll identical, and per-read jitter alone never holds
+// a direction long enough for the game to act on it.
+void nes::NES::keyNoiseFlip() {
+    const bool burstOver = cycleCount >= keyNoise_.endCycle;
+    if (burstOver) {
+        keyNoise_.active = false;
+        keyNoise_.chatterP0 = keyNoise_.chatterP1 = 0;
+        keyNoise_.irqLow = false;
+        return;
+    }
+
+    // Each covered line makes or breaks contact independently at 50%: the key's
+    // teeth touch some pins and not others as it moves, they do not switch as a
+    // block.
+    uint8_t p0 = 0, p1 = 0;
+    for (int bit = 0; bit < 8; bit++) {
+        const uint8_t m = (uint8_t)(1u << bit);
+        const bool p0Shorted = (keyNoise_.coverP0 & m) && (keyRand() & 1);
+        if (p0Shorted) p0 |= m;
+        const bool p1Shorted = (keyNoise_.coverP1 & m) && (keyRand() & 1);
+        if (p1Shorted) p1 |= m;
+    }
+    keyNoise_.chatterP0 = p0;
+    keyNoise_.chatterP1 = p1;
+    keyNoise_.irqLow = keyNoise_.coverIrq && (keyRand() & 1);
+
+    // 1024 + [0,2047] CPU cycles ~= 0.57-1.7ms, the order of a real contact
+    // bounce and slow enough that a frame sees only a handful of changes.
+    keyNoise_.nextFlip = cycleCount + 1024 + (keyRand() & 2047);
+}
+
+// The OR mask for one controller port. Per-read jitter on top of the interval's
+// shorted set: a bouncing contact is not solidly closed for the whole interval,
+// so the eight reads of a pad poll come back uneven.
+uint8_t nes::NES::keyNoiseRead(int port) {
+    const uint8_t shorted = port ? keyNoise_.chatterP1 : keyNoise_.chatterP0;
+    if (!shorted) return 0;
+    uint8_t v = 0;
+    for (int bit = 0; bit < 8; bit++) {
+        const uint8_t m = (uint8_t)(1u << bit);
+        // 75% contact per read: high enough that a covered line reads mostly
+        // pressed, low enough to break up runs of identical polls.
+        const bool contact = (shorted & m) && (keyRand() & 3);
+        if (contact) v |= m;
+    }
+    return v;
+}
+
+void nes::NES::keyNoiseStart(uint64_t cycles) {
+    keyNoise_.endCycle = cycleCount + cycles;
+    // Draw the first interval on the next tick rather than here, so start and
+    // continuation go through the same code path.
+    keyNoise_.nextFlip = cycleCount;
+    keyNoise_.active = true;
 }
 
 // ================================================================ WASM C API
@@ -647,6 +747,40 @@ API uint8_t* nes_cpu_regs() {
 API void nes_set_probe(int pin) {
     if (g_nes && pin >= 0 && pin <= 63) g_nes->probePin = pin;
 }
+// ---- front expansion port (DA-15) key rattle ----
+//
+// The browser owns the geometry: it turns the key's position and angle into the
+// set of bridged pins and passes the masks down. Doing the trig here would put a
+// UI model in the emulator and force a core rebuild every time the drawing changes.
+API void nes_key_cover(int p0mask, int p1mask, int irq) {
+    if (!g_nes) return;
+    // $4016 only carries the expansion port on D1 (pin 13); $4017 carries D0-D4
+    // (pins 8,7,6,5,4). Masking here rather than trusting the caller keeps a UI
+    // bug from injecting bits no real key could reach.
+    g_nes->keyNoise_.coverP0 = (uint8_t)(p0mask & 0x02);
+    g_nes->keyNoise_.coverP1 = (uint8_t)(p1mask & 0x1F);
+    g_nes->keyNoise_.coverIrq = irq != 0;
+}
+
+// Burst length in CPU cycles (1789773 ~= one second at rated clock). Cycle-based
+// so a slowed-down clock stretches the rattle in real time instead of cutting it
+// short, and so the whole thing stays deterministic.
+API void nes_key_rattle(int cycles) {
+    if (!g_nes || cycles <= 0) return;
+    g_nes->keyNoiseStart((uint64_t)cycles);
+}
+
+// bit0-4: $4017 chatter / bit8: $4016 D1 chatter / bit9: /IRQ low / bit15: active
+API int nes_key_state() {
+    if (!g_nes) return 0;
+    const auto& k = g_nes->keyNoise_;
+    int v = k.chatterP1 & 0x1F;
+    if (k.chatterP0 & 0x02) v |= 1 << 8;
+    if (k.irqLow) v |= 1 << 9;
+    if (k.active) v |= 1 << 15;
+    return v;
+}
+
 API uint8_t* nes_probe_buffer() { return g_nes ? g_nes->probeBuf : nullptr; }
 API int nes_probe_level() { return g_nes ? g_nes->probeLevelFor(g_nes->probePin) : 0; }
 API int nes_probe_pos() { return g_nes ? g_nes->probePos : 0; }

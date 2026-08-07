@@ -854,6 +854,44 @@ public:
     bool ppuRdPulse = false, ppuWrPulse = false, lastCiramA10 = false;
     void probeSample();
     uint8_t probeLevelFor(int pin);
+
+    // ---- front expansion port (DA-15) key rattle ----
+    //
+    // The famous Famicom trick: jam a house key into the front expansion port,
+    // rattle it, and Baseball starts throwing curveballs. The port's data lines
+    // are open-collector active-low, so metal shorting them to GND (pin 1) reads
+    // back as 1 = button pressed at $4016/$4017 — which is why the injection is
+    // an OR and never a mask.
+    //
+    // The geometry (key position/angle -> which pins are covered) lives in the
+    // browser, not here: the core only ever sees the resulting line masks. That
+    // keeps a UI concern out of the hot path and lets the angle model change
+    // without touching the emulator.
+    struct KeyNoise {
+        bool active = false;   // the only thing the hot paths test
+        uint8_t coverP0 = 0;   // $4016 lines the key bridges (bit1 = pin 13)
+        uint8_t coverP1 = 0;   // $4017 lines (bit0-4 = pins 8,7,6,5,4)
+        bool coverIrq = false;   // pin 3 (/IRQ)
+        // Lines actually shorted during the current bounce interval. A subset of
+        // the cover masks, redrawn at every flip.
+        uint8_t chatterP0 = 0, chatterP1 = 0;
+        bool irqLow = false;
+        uint64_t endCycle = 0, nextFlip = 0;
+        // Deterministic xorshift32 rather than rand()/std::random: verify compares
+        // builds bit-for-bit and TAS playback has to replay identically, both of
+        // which a host RNG would break.
+        uint32_t rng = 0x2A5D1E9F;
+    } keyNoise_;
+    uint32_t keyRand();
+    void keyNoiseFlip();
+    uint8_t keyNoiseRead(int port);
+    void keyNoiseStart(uint64_t cycles);
+    // Advance the bounce interval. Inline and guarded by active at every call
+    // site, so an unused expansion port costs one predictable branch.
+    NES_INLINE void keyNoiseTick() {
+        const bool intervalOver = cycleCount >= keyNoise_.nextFlip;
+        if (intervalOver) keyNoiseFlip();
+    }
 #endif   // !NES_EMBEDDED
 
     uint64_t cycleCount = 0;
