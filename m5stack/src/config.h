@@ -499,18 +499,25 @@ constexpr uint64_t PIN_MASK_ALL_OK = PIN_MASK_VALID;
 // Local controllers on the Grove ports, merged (OR) with the UDP pads so either
 // input source can drive the game.
 //
-// PORT.B (black — K151 base: pin1=G9 / pin2=G8): Joystick Unit. The port is
-// nominally GPIO, but the ESP32 routes its I2C peripheral to any pin, so the
-// external bus is simply bound to these pins instead of PORT.A's. Grove cables
-// are straight-through, so SDA/SCL land on the same positions as on PORT.A
-// (pin1=SDA, pin2=SCL). Both joystick generations are probed at boot; whichever
-// answers is used.
-constexpr int JOY_I2C_SDA = 9;   // PORT.B pin 1 (PORT.A equivalent: G2)
-constexpr int JOY_I2C_SCL = 8;   // PORT.B pin 2 (PORT.A equivalent: G1)
+// The K151 base exposes three Grove ports, each wired straight to two CoreS3
+// GPIOs. The port colours (I2C/GPIO/UART) are only a convention: the ESP32
+// routes its I2C peripheral to any pin, and any pin reads as GPIO. So instead
+// of fixing "joystick goes here, buttons go there", the joystick is hunted
+// across every port (the external I2C bus is re-bound port by port until an
+// answer comes back), and each port NOT holding the joystick is read as a Dual
+// Button port. Both units therefore work plugged into any connector.
+//
+// pin1/pin2 are the Grove connector's two signal positions; cables are
+// straight-through, so pin1 is where PORT.A puts SDA (the unit's white wire)
+// and pin2 is SCL (yellow).
+constexpr int GROVE_PORT_COUNT = 3;
+constexpr int GROVE_PORT_PIN1[GROVE_PORT_COUNT] = {2, 9, 17};   // PORT.A, PORT.B, PORT.C
+constexpr int GROVE_PORT_PIN2[GROVE_PORT_COUNT] = {1, 8, 18};
+constexpr char GROVE_PORT_NAME[GROVE_PORT_COUNT] = {'A', 'B', 'C'};
 constexpr uint8_t JOY2_I2C_ADDR = 0x63;   // Joystick2 (U024-C, STM32G030)
 constexpr uint8_t JOY1_I2C_ADDR = 0x52;   // Joystick (U024, MEGA328P)
-// 100kHz, not 400: PORT.B has no I2C pull-ups of its own (it is a GPIO port),
-// so the bus leans on the ESP32's weak internal pulls and the unit's own
+// 100kHz, not 400: only PORT.A has I2C pull-ups of its own, so on the other
+// ports the bus leans on the ESP32's weak internal pulls and the unit's own
 // resistors. At 400kHz the rise times are marginal and reads fail every second
 // or two (observed on hardware as detect/lost flapping).
 constexpr uint32_t GROVE_I2C_FREQ = 100000;
@@ -535,13 +542,10 @@ constexpr bool JOY1_BTN_ACTIVE_HIGH = true;
 // second so plugging it in later just works.
 constexpr uint32_t JOY_REPROBE_MS = 1000;
 
-// PORT.C (blue — K151 base: pin1=G17 / pin2=G18): Dual Button Unit. Nominally
-// the UART port, but the pins are read as plain GPIO. Buttons short the signal
-// line to GND when pressed. Grove wiring on the unit: white wire (pin2) = blue
-// button, yellow wire (pin1) = red button — same positions that put blue on G8
-// and red on G9 back when the unit lived on PORT.B.
-constexpr int DUAL_BTN_PIN_BLUE = 18;   // blue button  -> NES B
-constexpr int DUAL_BTN_PIN_RED = 17;   // red button   -> NES A
+// Dual Button Unit: buttons short their signal line to GND when pressed. On
+// the unit, pin2 (white wire) carries the blue button and pin1 (yellow) the
+// red one — verified on hardware with the unit on PORT.C.
+// pin1 = red -> NES A, pin2 = blue -> NES B (see grove_input.cpp).
 
 // -------------------------------------------------------------- head touch
 // M5Stack 公式 StackChan の頭頂部タッチセンサー (Si12T)。3 ゾーンを前後に
