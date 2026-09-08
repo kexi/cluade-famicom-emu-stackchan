@@ -1088,28 +1088,14 @@
   //
   // The whole page talks through this object, so the two differ in one place
   // rather than at each of the call sites that used to hold a fetch().
-  let serialLink = null;
+  // Held by NesSerial rather than here: the flasher panel opens the same port,
+  // and a SerialPort cannot be opened twice.
+  const serialLink = () => window.NesSerial?.link() ?? null;
 
-  const usingSerial = () => serialLink !== null;
+  const usingSerial = () => serialLink() !== null;
   // Either transport counts as "there is a device": the UI rows keyed off this
   // used to test for a hostname, which USB does not have.
   const deviceReady = () => usingSerial() || deviceIp !== '';
-
-  async function connectSerial() {
-    const S = window.NesSerial;
-    const unavailable = !S || !S.supported();
-    if (unavailable) throw new Error('Web Serial not supported in this browser');
-    const port = await navigator.serial.requestPort();
-    const link = new S.SerialLink(port);
-    await link.open();
-    serialLink = link;
-    return link;
-  }
-
-  async function disconnectSerial() {
-    await serialLink?.close();
-    serialLink = null;
-  }
 
   let mirrorLastSent = 0;
   let mirrorPending = null; // newest mask held back by the throttle
@@ -1127,7 +1113,7 @@
   function mirrorPost(mask) {
     mirrorLastSent = performance.now();
     if (usingSerial()) {
-      serialLink
+      serialLink()
         .send(window.NesProto.buildPins(mask))
         .catch(() => warnOnce('pin mirror: the USB link stopped answering'));
       return;
@@ -1178,7 +1164,7 @@
   function volPost(level) {
     volLastSent = performance.now();
     if (usingSerial()) {
-      serialLink
+      serialLink()
         .send(window.NesProto.buildCtrl(window.NesProto.CTRL_VOLUME, level))
         .catch(() => warnOnce('volume mirror: the USB link stopped answering'));
       return;
@@ -1227,7 +1213,7 @@
   function mirrorResetNow() {
     if (!deviceReady()) return;
     if (usingSerial()) {
-      serialLink
+      serialLink()
         .send(window.NesProto.buildCtrl(window.NesProto.CTRL_RESET, 0))
         .catch(() => warnOnce('reset: the USB link stopped answering'));
       return;
@@ -1284,44 +1270,14 @@
   }
   revealDeviceRows();
 
-  // USB is offered only when the browser has Web Serial and no relay target was
-  // given. With ?device= set the network path already works and is the only one
-  // that reaches a board on another machine, so showing both would ask the user
-  // to choose without telling them how.
-  const usbRow = document.getElementById('usb-row');
-  const usbConnectBtn = document.getElementById('usb-connect-btn');
-  const usbStatus = document.getElementById('usb-status');
-  const canOfferUsb = !deviceIp && window.NesSerial?.supported();
-  if (canOfferUsb) {
-    usbRow.hidden = false;
-    usbConnectBtn.textContent = t('usbConnect');
-  }
-
-  usbConnectBtn?.addEventListener('click', async () => {
-    if (usingSerial()) {
-      await disconnectSerial();
-      usbConnectBtn.textContent = t('usbConnect');
-      usbStatus.textContent = '';
-      return;
-    }
-    usbConnectBtn.disabled = true;
-    usbStatus.textContent = t('usbConnecting');
-    try {
-      await connectSerial();
-      usbConnectBtn.textContent = t('usbDisconnect');
-      usbStatus.textContent = t('usbConnected');
-      revealDeviceRows();
-      refreshSdList();
-      mirrorVolume(muted ? 0 : masterVolume);
-    } catch (err) {
-      // A user who dismisses the port chooser is not an error worth shouting
-      // about; anything else is.
-      const dismissed = err && err.name === 'NotFoundError';
-      usbStatus.textContent = dismissed ? '' : t('usbFailed');
-      if (!dismissed) console.warn('[nes] USB connect failed:', err);
-    } finally {
-      usbConnectBtn.disabled = false;
-    }
+  // The flasher panel owns connecting (see flash.js); this only has to notice
+  // when a link appears, so the device rows and the SD listing catch up.
+  window.NesSerial?.onChange((link) => {
+    revealDeviceRows();
+    const opened = link !== null;
+    if (!opened) return;
+    refreshSdList();
+    mirrorVolume(muted ? 0 : masterVolume);
   });
 
   // The name and "save only" options mean nothing without a save target, so
@@ -1438,7 +1394,7 @@
     if (usingSerial()) {
       try {
         const verdict = await window.NesSerial.sendRom(
-          serialLink,
+          serialLink(),
           img,
           { swap: noReset, save: wantsSave ? saveName : null, noLoad: wantsSave && sdNoLoadCheck.checked },
           (sent, total) => {
@@ -1660,7 +1616,7 @@
   // never "failed" — is a property of the protocol and not of the transport.
   async function sdCommandSerial(path, body) {
     const op = SD_OPS[path];
-    const result = await window.NesSerial.sdCommand(serialLink, op, body ?? {});
+    const result = await window.NesSerial.sdCommand(serialLink(), op, body ?? {});
     if (result.ok) {
       const listing = op === SD_OPS['/api/sd/list'];
       if (!listing) return result;

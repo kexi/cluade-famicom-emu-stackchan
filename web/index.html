@@ -532,11 +532,91 @@
   /* only shown when a device is configured (?device=<ip>) */
   #swap-device-row { display: flex; gap: 6px; align-items: center; margin-bottom: 12px; }
   #swap-device-row[hidden] { display: none; }
-  /* Same display:flex / [hidden] pairing as the rows above — the attribute alone
-     loses to the flex rule. */
-  #usb-row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
-  #usb-row[hidden] { display: none; }
-  #usb-status { color: #8a93a0; font-size: 12px; }
+  /* Same shell as #swap-panel: a modal over the emulator, in the console's
+     colours. The flasher used to be its own page, which meant a second design
+     to keep in step with this one for no benefit to the reader. */
+  #flash-panel {
+    display: none;
+    position: fixed;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: min(480px, 92vw);
+    max-height: 88vh;
+    overflow-y: auto;
+    background: #1b1b1b;
+    border: 3px solid var(--fc-red);
+    border-radius: 8px;
+    padding: 16px;
+    z-index: 10;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.7);
+  }
+  #flash-panel.show { display: block; }
+  #flash-panel h3 { color: #ddd; font-size: 14px; margin-bottom: 8px; }
+  .flash-step {
+    border-top: 1px solid #3a3a3a;
+    padding-top: 10px;
+    margin-top: 12px;
+  }
+  .flash-step:first-of-type { border-top: none; padding-top: 0; margin-top: 0; }
+  .flash-step h4 {
+    color: var(--fc-cream);
+    font-size: 12px;
+    margin-bottom: 6px;
+    font-weight: bold;
+  }
+  .flash-note { color: #8a8a8a; font-size: 11px; line-height: 1.6; margin-bottom: 8px; }
+  .flash-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  .flash-row label { color: #bbb; font-size: 11px; }
+  .flash-field {
+    flex: 1 1 0;
+    min-width: 0;
+    background: #0d0d0d;
+    color: #9fdf9f;
+    border: 1px solid #444;
+    border-radius: 4px;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 12px;
+    padding: 6px 8px;
+  }
+  #flash-panel button {
+    background: var(--fc-red);
+    color: var(--fc-cream);
+    border: none;
+    border-radius: 5px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: bold;
+    cursor: pointer;
+    box-shadow: 0 2px 0 var(--fc-red-dark);
+    white-space: nowrap;
+  }
+  #flash-panel button:active { transform: translateY(2px); box-shadow: none; }
+  #flash-panel button:disabled { opacity: .45; cursor: default; box-shadow: 0 2px 0 var(--fc-red-dark); }
+  #flash-panel button.secondary { background: #444; box-shadow: 0 2px 0 #222; }
+  #flash-panel progress { width: 100%; height: 6px; margin: 4px 0 8px; }
+  .flash-status { font-size: 11px; min-height: 1.5em; color: #bbb; }
+  .flash-status.ok { color: #9fdf9f; }
+  .flash-status.warn { color: #e6c15a; }
+  .flash-status.err { color: #ff8a8a; }
+  #flash-log {
+    background: #0d0d0d;
+    border: 1px solid #333;
+    border-radius: 4px;
+    padding: 6px 8px;
+    max-height: 120px;
+    overflow: auto;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 10px;
+    line-height: 1.5;
+    color: #7a7a7a;
+    white-space: pre-wrap;
+    margin-bottom: 8px;
+  }
+  #flash-close {
+    background: #444 !important;
+    box-shadow: 0 2px 0 #222 !important;
+    margin-top: 4px;
+  }
   #swap-device-label {
     flex: 1 1 0;
     display: flex;
@@ -950,6 +1030,7 @@
     <button id="btn-bus">端子</button>
     <button id="btn-xev" hidden>XEVIOUS判定</button>
     <button id="btn-tas" hidden>TAS</button>
+    <button id="btn-flash" hidden>実機</button>
     <button id="btn-settings">⚙</button>
     <input type="file" id="tas-input" accept=".fm2" style="display:none">
     <span id="status">.NESファイルを選択してください</span>
@@ -1094,6 +1175,60 @@
   <div id="settings-note">スライダーはダブルクリックで既定値に戻ります。チャンネル個別の音量/定位は DEBUG パネルのミキサーで調整できます。</div>
   <button id="settings-close">閉じる</button>
 </div>
+<!-- 実機のセットアップ。Web Serial があるときだけ #btn-flash が現れる。
+     ページを分けていたものをここに畳んだ — 焼くのも遊ぶのも同じ実機なので、
+     デザインを二重に持つ理由が無い -->
+<div id="flash-panel">
+  <h3 id="flash-title">実機のセットアップ</h3>
+
+  <div class="flash-step">
+    <h4 id="flash-h-write">1. ファームウェアを書き込む</h4>
+    <div class="flash-note" id="flash-note-write">CoreS3 を USB で繋いで押し、ポートを選んでください。</div>
+    <div class="flash-row">
+      <label><input type="checkbox" id="flash-erase"> <span id="lbl-flash-erase">全消去 (WiFi 設定も消えます)</span></label>
+    </div>
+    <div class="flash-row">
+      <button id="flash-btn">書き込む</button>
+      <span class="flash-note" id="flash-fw-info" style="margin:0"></span>
+    </div>
+    <progress id="flash-progress" value="0" max="1" hidden></progress>
+    <div class="flash-status" id="flash-status"></div>
+  </div>
+
+  <div class="flash-step">
+    <h4 id="flash-h-conn">2. 接続する</h4>
+    <div class="flash-note" id="flash-note-conn">書き込みの後、実機は USB を繋ぎ直します。もう一度ポートを選んでください。</div>
+    <div class="flash-row">
+      <button id="flash-conn-btn">接続</button>
+      <button id="flash-disconn-btn" class="secondary" disabled>切断</button>
+    </div>
+    <div class="flash-status" id="flash-conn-status"></div>
+  </div>
+
+  <div class="flash-step">
+    <h4 id="flash-h-wifi">3. WiFi を設定する</h4>
+    <div class="flash-note" id="flash-note-wifi">公開ファームウェアに WiFi 設定は入っていません。ここで送ると本体に保存され、再起動しても残ります。</div>
+    <div class="flash-row">
+      <input type="text" id="flash-ssid" class="flash-field" placeholder="SSID" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="flash-row">
+      <input type="password" id="flash-pass" class="flash-field" placeholder="password" autocomplete="off">
+    </div>
+    <div class="flash-row">
+      <button id="flash-wifi-btn" disabled>保存して接続</button>
+      <button id="flash-status-btn" class="secondary" disabled>状態を見る</button>
+    </div>
+    <div class="flash-status" id="flash-wifi-status"></div>
+  </div>
+
+  <div class="flash-step">
+    <h4 id="flash-h-log">ログ</h4>
+    <div id="flash-log"></div>
+  </div>
+
+  <button id="flash-close">閉じる</button>
+</div>
+
 <div id="swap-panel">
   <h3 id="swap-title">カセット入替</h3>
   <div id="swap-current">PRG: - / CHR: -</div>
@@ -1105,13 +1240,6 @@
   <div id="swap-url-row">
     <input type="text" id="swap-url" placeholder="https://.../game.nes" spellcheck="false">
     <button id="swap-url-btn">URLから読込</button>
-  </div>
-  <!-- USB. Shown only when Web Serial exists and no ?device= was given: with a
-       relay configured the network path is already the answer, and offering both
-       would beg a question the user has no reason to care about. -->
-  <div id="usb-row" hidden>
-    <button id="usb-connect-btn">実機をUSBで繋ぐ</button>
-    <span id="usb-status"></span>
   </div>
   <div id="swap-device-row" hidden>
     <label id="swap-device-label"><input type="checkbox" id="swap-device-noreset"><span id="lbl-swap-noreset">リセットせず差し替え</span></label>
@@ -1157,6 +1285,7 @@ PRGとCHRを別のカセットから組み合わせた「ニコイチカセッ�
 <script src="protocol.js?v=1785324359"></script>
 <script src="serial.js?v=1785324359"></script>
 <script src="nes.js?v=1785324359"></script>
+<script src="flash.js?v=1785324359"></script>
 <script src="main.js?v=1785324359"></script>
 </body>
 </html>

@@ -400,11 +400,46 @@
     }
   }
 
+  // The page's one link to the device.
+  //
+  // Deliberately shared: a SerialPort can only be open once, so main.js (pins,
+  // volume, ROM, SD) and flash.js (flashing, WiFi) must not each hold their own
+  // — opening the second fails with "The port is already open", which is
+  // exactly the trap this API exists to close. Whoever connects first publishes
+  // it here and both read it from the same place.
+  let current = null;
+  const listeners = new Set();
+
+  function setLink(link) {
+    current = link;
+    for (const listener of listeners) listener(link);
+  }
+
   window.NesSerial = {
     supported: () => typeof navigator !== 'undefined' && 'serial' in navigator,
     SerialLink,
     sendRom,
     sdCommand,
     provision,
+
+    // Open the shared link, or hand back the one already open.
+    async connect() {
+      if (current && !current.closed) return current;
+      const port = await navigator.serial.requestPort();
+      const link = new SerialLink(port);
+      await link.open();
+      setLink(link);
+      return link;
+    },
+    async disconnect() {
+      await current?.close();
+      setLink(null);
+    },
+    link: () => (current && !current.closed ? current : null),
+    // Called whenever the link appears or goes away, so each panel can show the
+    // rows it gates on connection without polling for it.
+    onChange(listener) {
+      listeners.add(listener);
+    },
   };
 })();

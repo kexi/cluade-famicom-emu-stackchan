@@ -153,10 +153,11 @@ just serve       # http://localhost:8000/ — also relays /api/* to the device
 ## Flashing and driving the device from a browser
 
 The published page can talk to a CoreS3 over USB with no relay process, using
-Web Serial. `flash.html` writes the firmware, sets WiFi credentials and copies
-`.nes` files onto the SD card; the emulator page itself grows a **実機をUSBで繋ぐ**
-button in the cartridge-swap panel, after which the connector pins, master
-volume, RESET, ROM transfer and SD management all drive the real device.
+Web Serial. A **実機** button appears in the toolbar when the browser supports it,
+opening a panel that flashes the firmware and stores WiFi credentials. Once
+connected, the connector pins, master volume, RESET, ROM transfer and SD
+management all drive the real device — the same page, the same panels, with USB
+standing in for the relay.
 
 - **Chrome / Edge on the desktop only.** Safari, iOS and Android have no Web
   Serial; the flasher says so rather than failing silently.
