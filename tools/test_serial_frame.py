@@ -208,6 +208,8 @@ SIMPLE_VECTORS = [
     ("pins-all-ok", "buildPins((1n << 60n) - 1n)", "4e5001010000ffffffffffffff0f"),
     ("ctrl-reset", "buildCtrl(P.CTRL_RESET, 0)", "4e50010200000100"),
     ("ctrl-volume", "buildCtrl(P.CTRL_VOLUME, 192)", "4e500102000002c0"),
+    ("debug-plain", "buildDebug(0x1234, false)", "4e50010334120000"),
+    ("debug-waves", "buildDebug(1, true)", "4e50010301000100"),
 ]
 
 

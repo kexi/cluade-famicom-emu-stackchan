@@ -1212,6 +1212,10 @@
     swapDeviceRow.hidden = !ready;
     sdSaveRow.hidden = !ready;
     sdPanel.hidden = !ready;
+    // Looked up here rather than through the const declared further down: this
+    // function runs once at load, while that const is still in its temporal
+    // dead zone. The element itself is in the document the whole time.
+    document.getElementById('dbg-source').hidden = !ready;
   }
   revealDeviceRows();
 
@@ -2294,12 +2298,9 @@
   // there is nothing to switch to.
   const dbgSourceBox = document.getElementById('dbg-source');
   const dbgSrcNote = document.getElementById('dbg-src-note');
-  // Stays hidden. Reading the device's internal state needs the debug snapshot
-  // (type 3), which the firmware answers only over UDP — the reply is assembled
-  // on the emulation core and addressed with a stored socket, and there is no
-  // relay any more to carry it. The DEBUG panel therefore always shows the
-  // browser's own core; see dispatchPacket() in m5stack/src/main.cpp.
-  dbgSourceBox.hidden = true;
+  // Visibility belongs to revealDeviceRows(), which flips it as the link comes
+  // and goes: with nothing on the other end the remote option is a control that
+  // cannot work.
 
   function setDbgSource(which) {
     const remote = which === 'remote';
@@ -2321,11 +2322,33 @@
   // Poll the device while the remote source is showing. 200ms matches the panel's
   // own refresh; a request in flight is never doubled up, because the device
   // answers on a frame boundary and a backlog would only add latency.
-  // Nothing to poll: the remote debug source is unavailable without the relay
-  // (see the note on dbgSourceBox). Kept as a no-op because the frame loop calls
-  // it unconditionally, and a name that says why reads better at the call site
-  // than a deleted line.
-  function pollRemoteDebug() {}
+  let dbgFetchInFlight = false;
+  let dbgLastFetch = 0;
+  let dbgRemoteWarned = false;
+
+  function pollRemoteDebug(now) {
+    if (dbgSource !== remoteSource || !debugOn) return;
+    if (dbgFetchInFlight || now - dbgLastFetch < 200) return;
+    const link = serialLink();
+    if (!link) return;
+    dbgFetchInFlight = true;
+    dbgLastFetch = now;
+    // Waves only while the scope is on screen: the flag is what arms the
+    // device's per-sample capture, and it disarms itself once requests stop.
+    window.NesSerial.fetchDebug(link, debugOn)
+      .then((buf) => {
+        const snap = buf && parseSnapshot(buf);
+        if (snap) remoteSnap = snap;
+      })
+      .catch((err) => {
+        if (dbgRemoteWarned) return;
+        dbgRemoteWarned = true;
+        console.warn('[nes] remote debug poll failed:', err);
+      })
+      .finally(() => {
+        dbgFetchInFlight = false;
+      });
+  }
 
   const localSource = {
     cpuRegs: () => Module.HEAPU8.subarray(api.cpuRegs(), api.cpuRegs() + 12),
@@ -2333,6 +2356,40 @@
     ram: () => Module.HEAPU8.subarray(api.ram(), api.ram() + 0x800),
     peek: (addr) => api.peek(addr & 0xffff),
   };
+
+  function parseSnapshot(buf) {
+    if (!buf || buf.byteLength < SNAP_SIZE) return null;
+    const b = new Uint8Array(buf);
+    const s = {
+      cpu: b.subarray(0, 12),
+      apu: b.subarray(SNAP_APU, SNAP_APU + 0x18),
+      pc: b[SNAP_PC] | (b[SNAP_PC + 1] << 8),
+      code: b.subarray(SNAP_CODE, SNAP_CODE + 48),
+      ram: b.subarray(SNAP_RAM, SNAP_RAM + 0x800),
+      waves: null,
+    };
+    if (buf.byteLength >= SNAP_WAVE + WAVE_W * WAVE_ROWS) {
+      // Repack into what drawWaves already consumes, so the scope needs no
+      // separate remote rendering path. The device pre-decimated to the canvas
+      // width using the same nearest-sample pick, so count === WAVE_W here and
+      // drawWaves' own x->i mapping becomes the identity.
+      const chans = [];
+      for (let r = 0; r < 5; r++) {
+        chans.push(b.subarray(SNAP_WAVE + r * WAVE_W, SNAP_WAVE + (r + 1) * WAVE_W));
+      }
+      // Expansion rows 5-7 have no device-side source; zero keeps them flat.
+      for (let r = 5; r < 8; r++) chans.push(new Uint8Array(WAVE_W));
+      // MIX arrived quantised through drawWaves' own min(1, mix*2) scaling, so
+      // undo exactly that to hand back a float the same code can rescale.
+      const mixRow = b.subarray(SNAP_WAVE + 5 * WAVE_W, SNAP_WAVE + 6 * WAVE_W);
+      const mix = new Float32Array(WAVE_W);
+      for (let i = 0; i < WAVE_W; i++) mix[i] = mixRow[i] / 255 / 2;
+      s.waves = { count: WAVE_W, chans, mix };
+    }
+    return s;
+  }
+  window.__nes = window.__nes || {};
+  window.__nes.parseSnapshot = parseSnapshot;
 
   let remoteSnap = null;
   const remoteSource = {

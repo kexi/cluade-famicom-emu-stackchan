@@ -25,6 +25,7 @@
   const TYPE_CTRL = 2;
   const TYPE_ROM = 4;
   const TYPE_SD = 5;
+  const TYPE_DEBUG = 3;
   const TYPE_PROV = 6;
 
   const CTRL_RESET = 0x01;
@@ -53,6 +54,11 @@
   const PROV_OP_STATUS = 1;
   const PROV_OP_APPLY = 2;
   const PROV_STATUS_SIZE = 13;
+
+  const DEBUG_FLAG_WAVES = 0x01;
+  const DEBUG_HEADER = 7;
+  const DEBUG_CHUNK = 1400;
+  const DEBUG_TIMEOUT_MS = 300;
 
   const SERIAL_CRC_SIZE = 2;
 
@@ -265,6 +271,28 @@
     return concat(parts);
   }
 
+  function buildDebug(seq, wantWaves) {
+    const buf = header(TYPE_DEBUG, seq);
+    buf[6] = wantWaves ? DEBUG_FLAG_WAVES : 0;
+    return buf;
+  }
+
+  // One part of a split debug reply. Its own magic ('N','D') and its own header
+  // shape, because the snapshot is far past any single frame.
+  function parseDebugPart(bytes) {
+    const tooShort = bytes.length < DEBUG_HEADER;
+    if (tooShort) return null;
+    const isDebug = bytes[0] === 0x4e && bytes[1] === 0x44;
+    if (!isDebug) return null;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return {
+      part: bytes[3],
+      nparts: bytes[4],
+      seq: view.getUint16(5, true),
+      payload: bytes.subarray(DEBUG_HEADER),
+    };
+  }
+
   function buildProv(seq, op, args) {
     const parts = [header(TYPE_PROV, seq)];
     parts[0][6] = op;
@@ -427,6 +455,9 @@
     SD_BUSY_DEADLINE_MS,
     SD_BUSY_RETRY_MS,
     SD_IDEMPOTENT_ATTEMPTS,
+    DEBUG_FLAG_WAVES,
+    DEBUG_CHUNK,
+    DEBUG_TIMEOUT_MS,
     PROV_OP_SET,
     PROV_OP_STATUS,
     PROV_OP_APPLY,
@@ -444,11 +475,13 @@
     buildRomMark,
     buildSd,
     buildProv,
+    buildDebug,
     parseRomAck,
     parseRomSaveEvent,
     parseSdAck,
     parseSdListPart,
     parseProvReply,
+    parseDebugPart,
     newSession,
     looksLikeInes,
     concat,

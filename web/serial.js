@@ -379,6 +379,52 @@
     return { ok: false, unknown: undetermined, status: null };
   }
 
+  // ------------------------------------------------------------------ debug
+
+  let debugSeq = 0;
+
+  // Ask for a snapshot and reassemble it.
+  //
+  // The reply is split because it runs to ~3.8KB with the scope rows, and the
+  // parts are only useful together — a snapshot missing its middle would be
+  // rendered as if it were whole. A dropped part therefore discards the attempt
+  // rather than returning something partly stale, the same rule the SD listing
+  // follows.
+  async function fetchDebug(link, wantWaves) {
+    debugSeq = (debugSeq + 1) & 0xffff;
+    const seq = debugSeq;
+    await link.send(P.buildDebug(seq, wantWaves));
+
+    const parts = new Map();
+    const deadline = Date.now() + P.DEBUG_TIMEOUT_MS;
+    for (;;) {
+      const left = deadline - Date.now();
+      const expired = left <= 0;
+      if (expired) return null;
+      const frame = await link.receive(left);
+      if (!frame) return null;
+      const part = P.parseDebugPart(frame);
+      // A late answer to an abandoned poll carries an older seq; ignoring it
+      // keeps this reply from being assembled out of two different snapshots.
+      const mine = part && part.seq === seq;
+      if (!mine) continue;
+      parts.set(part.part, part.payload);
+      const complete = parts.size === part.nparts;
+      if (!complete) continue;
+
+      let total = 0;
+      for (const payload of parts.values()) total += payload.length;
+      const out = new Uint8Array(total);
+      let offset = 0;
+      for (let i = 0; i < part.nparts; i++) {
+        const chunk = parts.get(i);
+        out.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return out.buffer;
+    }
+  }
+
   // ------------------------------------------------------------ provisioning
 
   let provSeq = 0;
@@ -421,6 +467,7 @@
     sendRom,
     sdCommand,
     provision,
+    fetchDebug,
 
     // Open the shared link, or hand back the one already open.
     async connect() {
