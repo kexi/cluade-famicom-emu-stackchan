@@ -72,6 +72,7 @@
     set('btn-power', 'power');
     set('btn-reset', 'reset');
     set('btn-swap', 'swap');
+    set('btn-flash', 'stackchan');
     set('btn-bus', 'bus');
     set('btn-debug', 'debug');
     set('btn-xev', 'xevCheck');
