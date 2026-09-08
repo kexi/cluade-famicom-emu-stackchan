@@ -1388,14 +1388,25 @@ static void applyDebugRequest() {
     // Acquire, pairing with the release store in dispatchPacket: g_debugReplyTo
     // and g_debugSeq are plain fields published by that store, so a relaxed load
     // here would not guarantee this core sees them.
-    const bool requested = g_debugRequested.exchange(false, std::memory_order_acquire);
+    const bool requested = g_debugRequested.load(std::memory_order_acquire);
     if (!requested) return;
-    // Copied, not read through: the exchange above reopens the door for the next
-    // request, and the send loop below runs for several datagrams. Reading the
-    // global per part would let a request that lands mid-send retarget the
-    // remaining parts, splitting one snapshot across two peers — and the seq is
-    // already latched, so neither peer could assemble what it received.
+
+    // Every field of the request is taken before the slot is reopened, and none
+    // is read from the global again.
+    //
+    // The flag is what gates dispatchPacket from writing these, so clearing it
+    // first would let the next request overwrite them while this one is still
+    // being assembled. That is not hypothetical: buildDebugSnapshot() below
+    // copies kilobytes of emulator state, which is ample time for a 5Hz poller
+    // to land. The failure is quiet — the reply would carry one peer's sink and
+    // another's seq, so the peer that received it discards it as not its own
+    // and waits out its timeout.
     const ReplySink replyTo = g_debugReplyTo;
+    const uint16_t seq = g_debugSeq;
+    const bool wantWaves = g_debugWantWaves.load(std::memory_order_relaxed);
+    // Release, so core 0 sees the reads above as complete before it may write.
+    g_debugRequested.store(false, std::memory_order_release);
+
     // A request with nowhere to answer is dropped rather than sent to a stale peer.
     if (replyTo.via == ReplyVia::None) return;
 
@@ -1404,12 +1415,8 @@ static void applyDebugRequest() {
     static uint8_t snapshot[nes::NES::DEBUG_SNAPSHOT_MAX];
     // Only include waves once capture has actually been running: the first reply
     // after arming would otherwise carry a stale or empty buffer.
-    const bool withWaves = g_debugWantWaves.load(std::memory_order_relaxed) && g_nes.apu.waveCapture;
+    const bool withWaves = wantWaves && g_nes.apu.waveCapture;
     const size_t total = g_nes.buildDebugSnapshot(snapshot, withWaves);
-
-    // Latched with the sink above, for the same reason: the parts of one reply
-    // must all carry the seq the asker sent.
-    const uint16_t seq = g_debugSeq;
 
     // Derived from the payload actually built, so a wave-bearing reply simply
     // uses more parts; the receiver reads the count out of the header.
