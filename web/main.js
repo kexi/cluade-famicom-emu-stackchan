@@ -72,7 +72,10 @@
     set('btn-power', 'power');
     set('btn-reset', 'reset');
     set('btn-swap', 'swap');
-    set('btn-flash', 'stackchan');
+    set('btn-stackchan', 'stackchan');
+    set('btn-flash', 'stackchanSettings');
+    set('lbl-swap-no-device', 'swapNoDevice');
+    set('flash-setup-summary', 'flashSetup');
     set('btn-bus', 'bus');
     set('btn-debug', 'debug');
     set('btn-xev', 'xevCheck');
@@ -1262,12 +1265,16 @@
   const sdPanel = document.getElementById('sd-panel');
   // Called at load for the `?device=` path, and again when a USB link opens —
   // the rows have to appear at whichever point a device first exists.
+  const swapNoDevice = document.getElementById('swap-no-device');
+
   function revealDeviceRows() {
-    const nothingToShow = !deviceReady();
-    if (nothingToShow) return;
-    swapDeviceRow.hidden = false;
-    sdSaveRow.hidden = false;
-    sdPanel.hidden = false;
+    const ready = deviceReady();
+    // The hint and the rows are mutually exclusive: one of the two always
+    // explains what the panel can do with a device.
+    swapNoDevice.hidden = ready;
+    swapDeviceRow.hidden = !ready;
+    sdSaveRow.hidden = !ready;
+    sdPanel.hidden = !ready;
   }
   revealDeviceRows();
 

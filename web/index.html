@@ -87,6 +87,23 @@
     background: #ff4b3e;
     box-shadow: 0 0 6px #ff4b3e;
   }
+  /* Connection lamp, the same idiom as the power switch above: dark when there
+     is no device, lit when one is on the other end of the cable. Reusing the
+     shape means the toolbar has one language for "is this thing on". */
+  #btn-stackchan::before {
+    content: '';
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    background: #114411;
+    box-shadow: inset 0 1px 1px rgba(0,0,0,0.6);
+  }
+  #btn-stackchan.sc-on::before {
+    background: #4bff6e;
+    box-shadow: 0 0 6px #4bff6e;
+  }
   .ext-link {
     display: inline-flex;
     align-items: center;
@@ -502,6 +519,15 @@
   .swap-btn:active { transform: translateY(2px); box-shadow: none; }
   .swap-btn input[type=file] { display: none; }
   #swap-url-row { display: flex; gap: 6px; margin-bottom: 12px; }
+  .swap-hint {
+    color: #8a8a8a;
+    font-size: 11px;
+    line-height: 1.6;
+    border-top: 1px solid #3a3a3a;
+    padding-top: 10px;
+    margin-bottom: 12px;
+  }
+  .swap-hint[hidden] { display: none; }
   #swap-url {
     flex: 1 1 0;
     min-width: 0;
@@ -1021,7 +1047,8 @@
 <body class="bus-on">
 <div id="app">
   <div id="toolbar">
-    <button id="btn-flash" hidden>ｽﾀｯｸﾁｬﾝ</button>
+    <button id="btn-stackchan" class="sc-off" hidden>ｽﾀｯｸﾁｬﾝ</button>
+    <button id="btn-flash" hidden>⚙ｽﾀｯｸﾁｬﾝ設定</button>
     <label><span id="lbl-open">ROMを開く</span><input type="file" id="rom-input" accept=".nes,application/octet-stream"></label>
     <button id="btn-power" class="power-off">電源</button>
     <button id="btn-reset">リセット</button>
@@ -1178,12 +1205,15 @@
 <!-- ｽﾀｯｸﾁｬﾝのセットアップ。Web Serial があるときだけ #btn-flash が現れる。
      ページを分けていたものをここに畳んだ — 焼くのも遊ぶのも同じ実機なので、
      デザインを二重に持つ理由が無い -->
+<!-- 初回だけの作業をまとめた場所。接続はツールバーの #btn-stackchan が持つ
+     ので、ここには無い — 毎回やることと一度きりのことを同じ画面に並べると、
+     毎回 1 から辿るものに見えてしまう -->
 <div id="flash-panel">
-  <h3 id="flash-title">ｽﾀｯｸﾁｬﾝのセットアップ</h3>
+  <h3 id="flash-title">ｽﾀｯｸﾁｬﾝ設定</h3>
 
   <div class="flash-step">
-    <h4 id="flash-h-write">1. ファームウェアを書き込む</h4>
-    <div class="flash-note" id="flash-note-write">CoreS3 を USB で繋いで押し、ポートを選んでください。</div>
+    <h4 id="flash-h-write">ファームウェアを書き込む</h4>
+    <div class="flash-note" id="flash-note-write">初めての実機、または更新するときだけ。書き込んだ後は USB が繋ぎ直されるので、ツールバーから接続し直してください。</div>
     <div class="flash-row">
       <label><input type="checkbox" id="flash-erase"> <span id="lbl-flash-erase">全消去 (WiFi 設定も消えます)</span></label>
     </div>
@@ -1196,18 +1226,8 @@
   </div>
 
   <div class="flash-step">
-    <h4 id="flash-h-conn">2. 接続する</h4>
-    <div class="flash-note" id="flash-note-conn">書き込みの後、実機は USB を繋ぎ直します。もう一度ポートを選んでください。</div>
-    <div class="flash-row">
-      <button id="flash-conn-btn">接続</button>
-      <button id="flash-disconn-btn" class="secondary" disabled>切断</button>
-    </div>
-    <div class="flash-status" id="flash-conn-status"></div>
-  </div>
-
-  <div class="flash-step">
-    <h4 id="flash-h-wifi">3. WiFi を設定する</h4>
-    <div class="flash-note" id="flash-note-wifi">公開ファームウェアに WiFi 設定は入っていません。ここで送ると本体に保存され、再起動しても残ります。</div>
+    <h4 id="flash-h-wifi">WiFi を設定する</h4>
+    <div class="flash-note" id="flash-note-wifi">公開ファームウェアに WiFi 設定は入っていません。ここで送ると本体に保存され、再起動しても残ります。先にツールバーから接続してください。</div>
     <div class="flash-row">
       <input type="text" id="flash-ssid" class="flash-field" placeholder="SSID" autocomplete="off" spellcheck="false">
     </div>
@@ -1226,6 +1246,9 @@
     <div id="flash-log"></div>
   </div>
 
+  <!-- 接続の結果はツールバーのボタンに出るが、失敗の理由はここに出す -->
+  <div class="flash-status" id="flash-conn-status"></div>
+
   <button id="flash-close">閉じる</button>
 </div>
 
@@ -1240,6 +1263,12 @@
   <div id="swap-url-row">
     <input type="text" id="swap-url" placeholder="https://.../game.nes" spellcheck="false">
     <button id="swap-url-btn">URLから読込</button>
+  </div>
+  <!-- 実機が繋がっていないときに出す案内。これが無いと、実機向けの行が
+       まるごと消えるだけなので「機能が無い」のか「繋がっていないだけ」なのか
+       区別がつかない (実際に分からないと言われた) -->
+  <div id="swap-no-device" class="swap-hint">
+    <span id="lbl-swap-no-device">ｽﾀｯｸﾁｬﾝに送るには、ツールバーの「ｽﾀｯｸﾁｬﾝ」から接続してください。</span>
   </div>
   <div id="swap-device-row" hidden>
     <label id="swap-device-label"><input type="checkbox" id="swap-device-noreset"><span id="lbl-swap-noreset">リセットせず差し替え</span></label>

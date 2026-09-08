@@ -192,7 +192,9 @@
   // ------------------------------------------------------------ connecting
 
   function setConnected(connected) {
-    $('flash-disconn-btn').disabled = !connected;
+    const btn = $('btn-stackchan');
+    btn.classList.toggle('sc-on', connected);
+    btn.classList.toggle('sc-off', !connected);
     $('flash-wifi-btn').disabled = !connected;
     $('flash-status-btn').disabled = !connected;
   }
@@ -295,13 +297,17 @@
 
   const openBtn = $('btn-flash');
   const panel = $('flash-panel');
+  const connBtn = $('btn-stackchan');
   openBtn.hidden = false;
+  connBtn.hidden = false;
   openBtn.addEventListener('click', () => panel.classList.toggle('show'));
   $('flash-close').addEventListener('click', () => panel.classList.remove('show'));
 
+  // One button for both directions: with the lamp showing which state it is in,
+  // a separate "disconnect" would be a second control for the same fact.
+  connBtn.addEventListener('click', () => (S.link() ? disconnect() : connect()));
+
   $('flash-btn').addEventListener('click', flash);
-  $('flash-conn-btn').addEventListener('click', connect);
-  $('flash-disconn-btn').addEventListener('click', disconnect);
   $('flash-wifi-btn').addEventListener('click', saveWifi);
   $('flash-status-btn').addEventListener('click', readStatus);
 })();
