@@ -1085,11 +1085,21 @@
     console.warn(message);
   }
 
+  // Send one packet, or do nothing if the link has gone.
+  //
+  // The null check has to happen before the call: two of these run from a
+  // setTimeout after a throttle, so a disconnect between scheduling and firing
+  // would otherwise raise a synchronous TypeError that the .catch() below never
+  // sees — an uncaught error every time the cart is tilted after unplugging.
+  function sendToDevice(packet, warning) {
+    const link = serialLink();
+    if (!link) return;
+    link.send(packet).catch(() => warnOnce(warning));
+  }
+
   function mirrorPost(mask) {
     mirrorLastSent = performance.now();
-    serialLink()
-      .send(window.NesProto.buildPins(mask))
-      .catch(() => warnOnce('pin mirror: the USB link stopped answering'));
+    sendToDevice(window.NesProto.buildPins(mask), 'pin mirror: the USB link stopped answering');
   }
 
   // Throttled so a tilted cart re-rolling every frame cannot swamp the link,
@@ -1128,9 +1138,10 @@
 
   function volPost(level) {
     volLastSent = performance.now();
-    serialLink()
-      .send(window.NesProto.buildCtrl(window.NesProto.CTRL_VOLUME, level))
-      .catch(() => warnOnce('volume mirror: the USB link stopped answering'));
+    sendToDevice(
+      window.NesProto.buildCtrl(window.NesProto.CTRL_VOLUME, level),
+      'volume mirror: the USB link stopped answering',
+    );
   }
 
   function mirrorVolume(gain) {
@@ -1165,9 +1176,7 @@
   // re-fetch the reset vector, same as pressing RESET on real hardware.
   function mirrorResetNow() {
     if (!deviceReady()) return;
-    serialLink()
-      .send(window.NesProto.buildCtrl(window.NesProto.CTRL_RESET, 0))
-      .catch(() => warnOnce('reset: the USB link stopped answering'));
+    sendToDevice(window.NesProto.buildCtrl(window.NesProto.CTRL_RESET, 0), 'reset: the USB link stopped answering');
   }
 
   // Bypasses the throttle. For user actions that must land immediately.
@@ -1447,10 +1456,14 @@
     if (result.ok) {
       const listing = op === SD_OP.list;
       if (!listing) return result;
+      // Named for what refreshSdList() reads. The capacities arrive as BigInt
+      // from the 64-bit fields and are narrowed here: they are byte counts of a
+      // memory card, far inside what a double holds exactly, and formatBytes()
+      // divides.
       return {
-        entries: result.entries,
-        total: Number(result.totalBytes),
-        free: Number(result.freeBytes),
+        files: result.entries,
+        totalBytes: Number(result.totalBytes),
+        freeBytes: Number(result.freeBytes),
       };
     }
     if (result.unknown) {
@@ -1616,17 +1629,28 @@
     setSdBusy(true);
     sdStatusEl.textContent = t('sdUrlFetching');
     romTransferBusy = true;
+    // The browser does the download. With the relay gone there is nothing else
+    // to do it, and the device has no TLS stack of its own — so this works only
+    // where the host allows cross-origin reads.
+    //
+    // Fetched in its own try, so that only fetch and CORS failures are reported
+    // as a download problem. Sharing one catch with the transfer below would
+    // tell the user their URL was unreachable when in fact the device refused
+    // the image they successfully downloaded.
+    let bytes;
     try {
-      // The browser does the download. With the relay gone there is nothing else
-      // to do it, and the device has no TLS stack of its own — so this works
-      // only where the host allows cross-origin reads. A blocked host is
-      // reported as a download failure rather than a device failure.
       const res = await fetch(url);
-      if (!res.ok) {
-        sdStatusEl.textContent = t('sdUrlDownloadFail');
-        return;
-      }
-      const bytes = new Uint8Array(await res.arrayBuffer());
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      bytes = new Uint8Array(await res.arrayBuffer());
+    } catch (err) {
+      console.warn('[nes] url fetch failed:', err);
+      sdStatusEl.textContent = t('sdUrlDownloadFail');
+      romTransferBusy = false;
+      setSdBusy(false);
+      return;
+    }
+
+    try {
       const verdict = await window.NesSerial.sendRom(
         serialLink(),
         bytes,
@@ -1649,10 +1673,9 @@
         ? sdStatusMessage(verdict.save.status)
         : t('sdSaved', { name: saveName || '' });
     } catch (err) {
-      // A CORS rejection lands here, and for an arbitrary host that is the
-      // likely case.
-      console.warn('[nes] url fetch failed:', err);
-      sdStatusEl.textContent = t('sdUrlDownloadFail');
+      // The download already succeeded, so anything here is the transfer.
+      console.warn('[nes] url rom send failed:', err);
+      sdStatusEl.textContent = t('deviceFail');
     } finally {
       romTransferBusy = false;
       setSdBusy(false);
