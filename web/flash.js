@@ -56,10 +56,50 @@
     return loaded;
   }
 
+  // Hand the port back to the browser so the next step can open it.
+  //
+  // Each teardown is attempted independently: a reader that was already
+  // released must not stop the writer from being, and neither must stop the
+  // close. Everything here is best-effort — the port may simply be gone,
+  // which is also a fine outcome for a function whose job is "leave it closed".
+  async function releasePort(transport) {
+    const nothingToDo = !transport;
+    if (nothingToDo) return;
+    try {
+      await transport.disconnect();
+    } catch (_) {
+      /* esptool may already have torn it down */
+    }
+    const port = transport.device;
+    if (!port) return;
+    // esptool's own helper waits for the reader and writer locks to be given up
+    // rather than tearing the streams down underneath whoever holds them. Its
+    // argument is a poll interval, NOT a deadline: a lock that is never released
+    // makes it wait forever, which freezes the page rather than the port. Raced
+    // against a real timeout so the cleanup always finishes.
+    const unlocked = transport.waitForUnlock?.(100) ?? Promise.resolve();
+    const timeout = new Promise((resolve) => setTimeout(resolve, 1500));
+    try {
+      await Promise.race([unlocked, timeout]);
+    } catch (_) {
+      /* not present in this build, or already unlocked */
+    }
+    try {
+      await port.close();
+    } catch (_) {
+      /* already closed, or still locked — the unplug hint covers this */
+    }
+  }
+
   async function flash() {
     const status = $('flash-status');
     const progress = $('flash-progress');
     $('flash-btn').disabled = true;
+    // Declared out here so the cleanup below can reach it. Without that, a
+    // failure anywhere after the port is opened leaves it open, and every later
+    // attempt dies with "The port is already open" — a state the user can only
+    // clear by unplugging the board, with nothing on screen to say so.
+    let transport = null;
     try {
       say(status, 'esptool を読み込んでいます...');
       const esptool = await import(/* @vite-ignore */ ESPTOOL_URL).catch(() => null);
@@ -73,11 +113,10 @@
 
       say(status, 'ポートを選んでください...');
       const port = await navigator.serial.requestPort();
-      // The bootloader ROM speaks at a fixed rate; the transfer rate is
-      // negotiated separately by esptool once it is talking.
-      await port.open({ baudRate: 115200 });
-
-      const transport = new esptool.Transport(port, true);
+      // The port is handed over unopened: ESPLoader.main() opens it itself, at
+      // romBaudrate first and then again at the negotiated rate. Opening it here
+      // as well fails the second one with "The port is already open".
+      transport = new esptool.Transport(port, true);
       const loader = new esptool.ESPLoader({
         transport,
         baudrate: 921600,
@@ -112,12 +151,35 @@
       progress.value = 1;
 
       await loader.after();
-      await transport.disconnect();
 
       say(status, '書き込み完了。Step 2 で接続し直してください。', 'ok');
     } catch (err) {
-      say(status, `失敗: ${err.message}`, 'err');
+      // A dismissed port chooser is a decision, not a fault.
+      const dismissed = err && err.name === 'NotFoundError';
+      if (dismissed) {
+        say(status, '');
+      } else {
+        // A port left open by an earlier attempt cannot be reclaimed from here
+        // (the lock belongs to a stream this page no longer holds), so the
+        // message has to name the one thing that does clear it.
+        const stuck = /already open|locked stream/i.test(err.message);
+        say(
+          status,
+          stuck ? `失敗: ${err.message} — USB を抜き差ししてからやり直してください。` : `失敗: ${err.message}`,
+          'err',
+        );
+        console.warn('[flash]', err);
+      }
     } finally {
+      // Always, on both paths: the success path has to release the port too, or
+      // Step 2 cannot open the very port it just flashed.
+      //
+      // disconnect() alone is not enough. It stops esptool using the port but
+      // leaves the reader and writer locks held, so the subsequent close()
+      // fails with "Cannot cancel a locked stream" and the port stays open —
+      // which then fails Step 2, and every later attempt, until the board is
+      // physically unplugged. Release the locks first, then close.
+      await releasePort(transport);
       $('flash-btn').disabled = false;
     }
   }
@@ -152,7 +214,12 @@
       }
       showStatus(reply);
     } catch (err) {
-      say(status, `失敗: ${err.message}`, 'err');
+      const stuck = /already open|locked stream/i.test(err.message);
+      say(
+        status,
+        stuck ? `失敗: ${err.message} — USB を抜き差ししてからやり直してください。` : `失敗: ${err.message}`,
+        'err',
+      );
       setConnected(false);
     }
   }
