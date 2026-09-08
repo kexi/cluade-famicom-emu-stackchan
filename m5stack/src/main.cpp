@@ -118,6 +118,9 @@ static char g_romSaveName[SD_ROM_NAME_MAX] = {};
 // Where to report the save's outcome, since the END ACK has already gone out by
 // the time core 1 writes the card.
 static ReplySink g_romSaveReplyTo;
+// The session the save event must echo. Published by the release store on
+// g_romApplyRequested, like the fields above it.
+static uint16_t g_romSaveSession = 0;
 
 // What one applyRomRequest() call did, for a caller that has to react to it.
 //
@@ -480,6 +483,13 @@ static void handleRomPacket(const ReplySink& from, const uint8_t* packet, int re
         g_romSaveToSd = (g_romPendingFlags & ROM_FLAG_SAVE_SD) != 0 && nameGiven;
         memcpy(g_romSaveName, g_romPendingName, sizeof(g_romSaveName));
         g_romSaveReplyTo = g_romPendingFrom;
+        // Latched beside the reply target, and for the same reason. The save
+        // event is emitted from core 1 after a card write that takes a second or
+        // two, and g_romSession belongs to core 0's transfer state — reading it
+        // live there would stamp the event with whatever session had started in
+        // the meantime, and the sender would discard its own answer as
+        // belonging to someone else.
+        g_romSaveSession = session;
         g_romActive = false;
         // Recorded before the ACK goes out, so even a retry that races the reply
         // finds the transfer already marked complete.
@@ -1324,8 +1334,8 @@ static RomApplyResult applyRomRequest() {
             event[1] = 'S';
             event[2] = UDP_PROTOCOL_VERSION;
             event[3] = UDP_TYPE_ROM;
-            event[4] = g_romSession & 0xFF;
-            event[5] = g_romSession >> 8;
+            event[4] = g_romSaveSession & 0xFF;
+            event[5] = g_romSaveSession >> 8;
             event[6] = (uint8_t)saveStatus;
             replySend(g_romSaveReplyTo, event, sizeof(event));
         }

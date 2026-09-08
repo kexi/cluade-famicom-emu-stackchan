@@ -112,6 +112,10 @@
         for (const waiter of queue) waiter.reject(new Error('serial closed'));
       }
       this.waiters.clear();
+      // Buffered frames go too. receive() reads them before it checks `closed`,
+      // so leaving them would let a closed link hand back replies from the
+      // session that just ended.
+      this.pending.clear();
     }
 
     noteLog(line) {
