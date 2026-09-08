@@ -58,6 +58,10 @@
   const DEBUG_FLAG_WAVES = 0x01;
   const DEBUG_HEADER = 7;
   const DEBUG_CHUNK = 1400;
+  // UDP_DEBUG_PARTS in m5stack/src/config.h: the ceiling on how many datagrams
+  // one reply is split into. Used to bound what the reassembler will accept —
+  // part and nparts arrive as raw bytes and are not otherwise constrained.
+  const DEBUG_MAX_PARTS = 4;
   const DEBUG_TIMEOUT_MS = 300;
 
   const SERIAL_CRC_SIZE = 2;
@@ -457,6 +461,7 @@
     SD_IDEMPOTENT_ATTEMPTS,
     DEBUG_FLAG_WAVES,
     DEBUG_CHUNK,
+    DEBUG_MAX_PARTS,
     DEBUG_TIMEOUT_MS,
     PROV_OP_SET,
     PROV_OP_STATUS,

@@ -1219,6 +1219,10 @@
   }
   revealDeviceRows();
 
+  // Set while a ROM is going to the device, so the debug poll can stay out of
+  // the way; see pollRemoteDebug.
+  let romTransferBusy = false;
+
   // The flasher panel owns connecting (see flash.js); this only has to notice
   // when a link appears, so the device rows and the SD listing catch up.
   window.NesSerial?.onChange((link) => {
@@ -1284,6 +1288,7 @@
     }
     swapDeviceBtn.disabled = true;
     statusEl.textContent = t('deviceSending');
+    romTransferBusy = true;
     try {
       const verdict = await window.NesSerial.sendRom(
         serialLink(),
@@ -1321,6 +1326,7 @@
       console.warn('[nes] rom send over USB failed:', err);
       statusEl.textContent = t('deviceFail');
     } finally {
+      romTransferBusy = false;
       swapDeviceBtn.disabled = false;
     }
   }
@@ -1609,6 +1615,7 @@
     }
     setSdBusy(true);
     sdStatusEl.textContent = t('sdUrlFetching');
+    romTransferBusy = true;
     try {
       // The browser does the download. With the relay gone there is nothing else
       // to do it, and the device has no TLS stack of its own — so this works
@@ -1647,6 +1654,7 @@
       console.warn('[nes] url fetch failed:', err);
       sdStatusEl.textContent = t('sdUrlDownloadFail');
     } finally {
+      romTransferBusy = false;
       setSdBusy(false);
     }
     await refreshSdList();
@@ -2329,6 +2337,11 @@
   function pollRemoteDebug(now) {
     if (dbgSource !== remoteSource || !debugOn) return;
     if (dbgFetchInFlight || now - dbgLastFetch < 200) return;
+    // Not while a cart is going across. Replies are routed by kind so the two
+    // would not be confused for each other, but a ROM transfer is stop-and-wait
+    // over one link: a ~3.8KB snapshot injected between chunks delays every ACK
+    // behind it, and the transfer's own deadline is what pays for it.
+    if (romTransferBusy) return;
     const link = serialLink();
     if (!link) return;
     dbgFetchInFlight = true;

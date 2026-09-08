@@ -15,17 +15,29 @@
 (() => {
   const P = window.NesProto;
 
-  // Replies are small and infrequent except during a ROM transfer, where the
-  // sender is stop-and-wait: one outstanding request, so a single queue with
-  // waiters is enough and no correlation table is needed beyond the checks each
-  // caller already makes on session/seq.
+  // Replies are matched to callers by reply magic.
+  //
+  // A single FIFO of waiters is not enough, even though each individual caller
+  // is stop-and-wait: the debug poll runs on its own 5Hz timer and overlaps
+  // whatever else is in flight. With one queue the frames are handed out in
+  // arrival order rather than by what each caller asked for, so a debug
+  // snapshot lands in the ROM transfer's ACK check and the transfer stalls
+  // until it times out — while the poll gets an ACK it cannot parse.
+  //
+  // Keyed on the first two bytes because that is what distinguishes the reply
+  // families the device sends: 'NR' ROM ack, 'NS' SD ack and ROM save event,
+  // 'ND' debug snapshot part, 'NW' provisioning. Within a family the callers'
+  // own session/seq checks still apply.
+  const REPLY_KEY = (frame) => String.fromCharCode(frame[0], frame[1]);
+
   class SerialLink {
     constructor(port) {
       this.port = port;
       this.reader = null;
       this.writer = null;
-      this.pending = [];
-      this.waiters = [];
+      // Both keyed by reply magic; see REPLY_KEY.
+      this.pending = new Map();
+      this.waiters = new Map();
       this.closed = false;
       this.logLines = [];
     }
@@ -81,8 +93,14 @@
         // A disconnect surfaces here; close() is what the UI reacts to.
       }
       this.closed = true;
-      for (const waiter of this.waiters) waiter.reject(new Error('serial closed'));
-      this.waiters = [];
+      this.failWaiters();
+    }
+
+    failWaiters() {
+      for (const queue of this.waiters.values()) {
+        for (const waiter of queue) waiter.reject(new Error('serial closed'));
+      }
+      this.waiters.clear();
     }
 
     noteLog(line) {
@@ -96,16 +114,20 @@
 
     deliver(frame) {
       const copy = frame.slice();
-      const waiter = this.waiters.shift();
-      if (waiter) {
-        waiter.resolve(copy);
+      const key = REPLY_KEY(copy);
+      const queue = this.waiters.get(key);
+      const waiting = queue && queue.length > 0;
+      if (waiting) {
+        queue.shift().resolve(copy);
         return;
       }
-      this.pending.push(copy);
       // An unclaimed reply is almost always a late answer to a request that has
       // already timed out. Keeping a few lets a caller that arrives immediately
       // after still find it; keeping all of them would leak.
-      if (this.pending.length > 8) this.pending.shift();
+      const buffered = this.pending.get(key) ?? [];
+      buffered.push(copy);
+      if (buffered.length > 8) buffered.shift();
+      this.pending.set(key, buffered);
     }
 
     async send(bytes) {
@@ -123,21 +145,25 @@
       await this.writer.write(out);
     }
 
-    // Wait for one frame, or null on timeout. Callers filter by session/seq
-    // themselves, because "is this mine" differs per message type.
-    receive(timeoutMs) {
-      const buffered = this.pending.shift();
-      if (buffered) return Promise.resolve(buffered);
+    // Wait for one reply of the given kind, or null on timeout. `kind` is the
+    // two-character reply magic. Callers still filter by session/seq themselves,
+    // because "is this mine" within a family differs per message type.
+    receive(timeoutMs, kind) {
+      const buffered = this.pending.get(kind);
+      const haveOne = buffered && buffered.length > 0;
+      if (haveOne) return Promise.resolve(buffered.shift());
       const gone = this.closed;
       if (gone) return Promise.reject(new Error('serial closed'));
       return new Promise((resolve, reject) => {
         const waiter = { resolve, reject };
-        this.waiters.push(waiter);
+        const queue = this.waiters.get(kind) ?? [];
+        queue.push(waiter);
+        this.waiters.set(kind, queue);
         setTimeout(() => {
-          const index = this.waiters.indexOf(waiter);
+          const index = queue.indexOf(waiter);
           const stillWaiting = index >= 0;
           if (stillWaiting) {
-            this.waiters.splice(index, 1);
+            queue.splice(index, 1);
             resolve(null);
           }
         }, timeoutMs);
@@ -146,6 +172,13 @@
 
     async close() {
       this.closed = true;
+      // Wake anyone waiting, rather than leaving them to their own timeouts:
+      // an explicit close does not necessarily run readLoop's exit path, and a
+      // caller that has just been disconnected should learn it now instead of
+      // in three seconds. Rejecting rather than resolving null keeps "the link
+      // went away" distinct from "the device did not answer" — the retry rules
+      // treat those differently.
+      this.failWaiters();
       try {
         await this.reader?.cancel();
       } catch (_) {}
@@ -183,7 +216,7 @@
         const left = deadline - Date.now();
         const expired = left <= 0;
         if (expired) break;
-        const frame = await link.receive(left);
+        const frame = await link.receive(left, 'NR');
         if (!frame) break;
         const ack = P.parseRomAck(frame);
         // An unrelated frame must not consume the deadline's remainder, so the
@@ -278,7 +311,9 @@
       // Silence here is "undetermined", not "failed": the image may well be on
       // the card. Saying it failed would be a claim we cannot support.
       if (expired) return { ok: true, status: P.ROM_STATUS_OK, save: { unknown: true } };
-      const frame = await link.receive(left);
+      // 'NS' also carries SD acks; parseRomSaveEvent checks byte 3 for the ROM
+      // type, and the session check below rejects anything else.
+      const frame = await link.receive(left, 'NS');
       if (!frame) continue;
       const event = P.parseRomSaveEvent(frame);
       const mine = event && event.session === session;
@@ -322,7 +357,7 @@
         const left = deadline - Date.now();
         const expired = left <= 0;
         if (expired) break;
-        const frame = await link.receive(left);
+        const frame = await link.receive(left, 'NS');
         if (!frame) break;
 
         const listing = op === P.SD_OP_LIST;
@@ -396,18 +431,32 @@
     await link.send(P.buildDebug(seq, wantWaves));
 
     const parts = new Map();
+    let expected = null;
     const deadline = Date.now() + P.DEBUG_TIMEOUT_MS;
     for (;;) {
       const left = deadline - Date.now();
       const expired = left <= 0;
       if (expired) return null;
-      const frame = await link.receive(left);
+      const frame = await link.receive(left, 'ND');
       if (!frame) return null;
       const part = P.parseDebugPart(frame);
       // A late answer to an abandoned poll carries an older seq; ignoring it
       // keeps this reply from being assembled out of two different snapshots.
       const mine = part && part.seq === seq;
       if (!mine) continue;
+      // part and nparts are raw bytes off the wire, so nothing but this bounds
+      // them. Counting a part >= nparts toward the completion check would call
+      // the reply finished with a hole still in it, and the assembly below
+      // would then read an absent index.
+      const sane = part.nparts > 0 && part.nparts <= P.DEBUG_MAX_PARTS && part.part < part.nparts;
+      if (!sane) continue;
+      // Two replies disagreeing about the count means frames from different
+      // snapshots reached here; assembling across them would splice one picture
+      // out of two moments.
+      const disagrees = expected !== null && expected !== part.nparts;
+      if (disagrees) return null;
+      expected = part.nparts;
+
       parts.set(part.part, part.payload);
       const complete = parts.size === part.nparts;
       if (!complete) continue;
@@ -438,7 +487,7 @@
       const left = deadline - Date.now();
       const expired = left <= 0;
       if (expired) return null;
-      const frame = await link.receive(left);
+      const frame = await link.receive(left, 'NW');
       if (!frame) return null;
       const reply = P.parseProvReply(frame);
       const mine = reply && reply.seq === seq;

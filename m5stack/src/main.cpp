@@ -77,10 +77,16 @@ static std::atomic<bool> g_debugRequested{false};
 //
 // Plain, not atomic, unlike the two fields it replaces: it is published by the
 // release store on g_debugRequested and read after core 1's acquire load of the
-// same flag, which is the pairing every other latched request here uses. The
-// atomics were only ever standing in for that ordering.
+// same flag, which is the pairing every other latched request here uses (see
+// the ROM staging buffer). The atomics were only ever standing in for that
+// ordering, one field at a time, which is precisely what a sockaddr split
+// across two of them could not give.
 static ReplySink g_debugReplyTo;
-static std::atomic<uint16_t> g_debugSeq{0};
+// Echoed in every part of the reply. Plain, like g_debugReplyTo beside it and
+// for the same reason: both are published by the release store on
+// g_debugRequested and read after core 1's matching acquire. Leaving this one
+// atomic would suggest it needed ordering of its own, which it does not.
+static uint16_t g_debugSeq = 0;
 static std::atomic<bool> g_debugWantWaves{false};
 // millis() of the last wave request; the frame loop disarms capture once this
 // goes stale. 0 = never asked.
@@ -722,7 +728,7 @@ void dispatchPacket(const ReplySink& from, const uint8_t* packet, int received) 
         const bool stillOwed = g_debugRequested.load(std::memory_order_acquire);
         if (stillOwed) return;
         g_debugReplyTo = from;
-        g_debugSeq.store((uint16_t)(packet[4] | (packet[5] << 8)), std::memory_order_relaxed);
+        g_debugSeq = (uint16_t)(packet[4] | (packet[5] << 8));
         const bool wantWaves = packet[6] & UDP_DEBUG_FLAG_WAVES;
         g_debugWantWaves.store(wantWaves, std::memory_order_relaxed);
         if (wantWaves) g_debugWaveAskedMs.store(millis(), std::memory_order_relaxed);
@@ -1374,9 +1380,14 @@ static void applyDebugRequest() {
     // here would not guarantee this core sees them.
     const bool requested = g_debugRequested.exchange(false, std::memory_order_acquire);
     if (!requested) return;
-    // The asker is whoever sent the request, over either transport; a request
-    // with nowhere to answer is dropped rather than sent to a stale peer.
-    if (g_debugReplyTo.via == ReplyVia::None) return;
+    // Copied, not read through: the exchange above reopens the door for the next
+    // request, and the send loop below runs for several datagrams. Reading the
+    // global per part would let a request that lands mid-send retarget the
+    // remaining parts, splitting one snapshot across two peers — and the seq is
+    // already latched, so neither peer could assemble what it received.
+    const ReplySink replyTo = g_debugReplyTo;
+    // A request with nowhere to answer is dropped rather than sent to a stale peer.
+    if (replyTo.via == ReplyVia::None) return;
 
     // Static, not stack: ~3.8KB would be a large chunk of the Arduino loop task's
     // stack, and it is only touched here.
@@ -1386,7 +1397,9 @@ static void applyDebugRequest() {
     const bool withWaves = g_debugWantWaves.load(std::memory_order_relaxed) && g_nes.apu.waveCapture;
     const size_t total = g_nes.buildDebugSnapshot(snapshot, withWaves);
 
-    const uint16_t seq = g_debugSeq.load(std::memory_order_relaxed);
+    // Latched with the sink above, for the same reason: the parts of one reply
+    // must all carry the seq the asker sent.
+    const uint16_t seq = g_debugSeq;
 
     // Derived from the payload actually built, so a wave-bearing reply simply
     // uses more parts; the receiver reads the count out of the header.
@@ -1406,17 +1419,17 @@ static void applyDebugRequest() {
         datagram[5] = seq & 0xFF;
         datagram[6] = seq >> 8;
         memcpy(datagram + UDP_DEBUG_HEADER, snapshot + offset, len);
-        replySend(g_debugReplyTo, datagram, UDP_DEBUG_HEADER + len);
+        replySend(replyTo, datagram, UDP_DEBUG_HEADER + len);
     }
 
     // Once only: at 5Hz this would otherwise bury every other serial line.
     static bool announced = false;
     if (!announced) {
         announced = true;
-        const bool overUdp = g_debugReplyTo.via == ReplyVia::Udp;
+        const bool overUdp = replyTo.via == ReplyVia::Udp;
         if (overUdp) {
             Serial.printf("DBG: snapshot to %s (%u bytes)\n",
-                          IPAddress(g_debugReplyTo.peer.sin_addr.s_addr).toString().c_str(), (unsigned)total);
+                          IPAddress(replyTo.peer.sin_addr.s_addr).toString().c_str(), (unsigned)total);
         } else {
             Serial.printf("DBG: snapshot over USB (%u bytes)\n", (unsigned)total);
         }
