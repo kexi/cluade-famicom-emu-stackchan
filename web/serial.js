@@ -24,11 +24,22 @@
   // snapshot lands in the ROM transfer's ACK check and the transfer stalls
   // until it times out — while the poll gets an ACK it cannot parse.
   //
-  // Keyed on the first two bytes because that is what distinguishes the reply
-  // families the device sends: 'NR' ROM ack, 'NS' SD ack and ROM save event,
-  // 'ND' debug snapshot part, 'NW' provisioning. Within a family the callers'
-  // own session/seq checks still apply.
-  const REPLY_KEY = (frame) => String.fromCharCode(frame[0], frame[1]);
+  // Keyed on the reply magic plus, for 'NS', the type byte that follows it.
+  //
+  // 'NS' carries two unrelated things — the SD ack and the ROM transfer's
+  // separate save event — and byte 3 is what the firmware puts there to tell
+  // them apart (config.h: the save event stamps UDP_TYPE_ROM). Keying on the
+  // magic alone would let an SD ack satisfy the waiter holding out for a save
+  // event, which then discards it as unparseable and waits out its timeout
+  // while the event it wanted goes to the other caller.
+  //
+  // The other families need no such split: 'NR' is only a ROM ack, 'ND' only a
+  // debug part, 'NW' only a provisioning reply.
+  const REPLY_KEY = (frame) => {
+    const magic = String.fromCharCode(frame[0], frame[1]);
+    const shared = magic === 'NS';
+    return shared ? magic + frame[3] : magic;
+  };
 
   class SerialLink {
     constructor(port) {
@@ -311,9 +322,9 @@
       // Silence here is "undetermined", not "failed": the image may well be on
       // the card. Saying it failed would be a claim we cannot support.
       if (expired) return { ok: true, status: P.ROM_STATUS_OK, save: { unknown: true } };
-      // 'NS' also carries SD acks; parseRomSaveEvent checks byte 3 for the ROM
-      // type, and the session check below rejects anything else.
-      const frame = await link.receive(left, 'NS');
+      // 'NS4' is the ROM save event specifically: byte 3 carries UDP_TYPE_ROM,
+      // which is what separates it from an SD ack on the same magic.
+      const frame = await link.receive(left, 'NS' + 4);
       if (!frame) continue;
       const event = P.parseRomSaveEvent(frame);
       const mine = event && event.session === session;
@@ -357,7 +368,8 @@
         const left = deadline - Date.now();
         const expired = left <= 0;
         if (expired) break;
-        const frame = await link.receive(left, 'NS');
+        // 'NS' + op: an SD reply echoes the op it answers in byte 3.
+        const frame = await link.receive(left, 'NS' + op);
         if (!frame) break;
 
         const listing = op === P.SD_OP_LIST;
