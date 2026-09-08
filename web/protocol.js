@@ -386,7 +386,22 @@
     return bytes[0] === 0x4e && bytes[1] === 0x45 && bytes[2] === 0x53 && bytes[3] === 0x1a;
   }
 
+  // Which ports to offer in the browser's chooser.
+  //
+  // Vendor only. 0x303a is Espressif, and that is the part worth filtering on:
+  // without it the chooser lists every serial device on the machine — Bluetooth
+  // headphones, speakers, macOS's own cu.debug-console — and the user has to
+  // know which one is the board.
+  //
+  // The product id is deliberately left out. A CoreS3 presents different ones
+  // depending on what it is running (0x1001 for the ROM bootloader's USB
+  // JTAG/serial, and whatever the app's CDC claims once the firmware is up),
+  // and pinning the pair turned the chooser into "対応デバイスが見つからない"
+  // for a board that was sitting right there.
+  const PORT_FILTERS = [{ usbVendorId: 0x303a }];
+
   window.NesProto = {
+    PORT_FILTERS,
     ROM_CHUNK,
     ROM_MAX_SIZE,
     ROM_FLAG_SWAP,

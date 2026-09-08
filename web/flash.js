@@ -117,7 +117,7 @@
       $('flash-fw-info').textContent = `${(bytes / 1024).toFixed(0)} KB`;
 
       say(status, 'ポートを選んでください...');
-      const port = await navigator.serial.requestPort();
+      const port = await navigator.serial.requestPort({ filters: P.PORT_FILTERS });
       // The port is handed over unopened: ESPLoader.main() opens it itself, at
       // romBaudrate first and then again at the negotiated rate. Opening it here
       // as well fails the second one with "The port is already open".

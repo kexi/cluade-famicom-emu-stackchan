@@ -425,7 +425,7 @@
     // Open the shared link, or hand back the one already open.
     async connect() {
       if (current && !current.closed) return current;
-      const port = await navigator.serial.requestPort();
+      const port = await navigator.serial.requestPort({ filters: P.PORT_FILTERS });
       const link = new SerialLink(port);
       await link.open();
       setLink(link);
