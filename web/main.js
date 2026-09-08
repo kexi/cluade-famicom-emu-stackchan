@@ -74,6 +74,7 @@
     set('btn-swap', 'swap');
     set('btn-stackchan', 'stackchan');
     set('btn-flash', 'stackchanSettings');
+    set('flash-note-board', 'flashBoardWarn');
     set('lbl-swap-no-device', 'swapNoDevice');
     set('flash-setup-summary', 'flashSetup');
     set('btn-bus', 'bus');

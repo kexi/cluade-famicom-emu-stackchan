@@ -133,6 +133,54 @@
       const chip = await loader.main();
       log(`chip: ${chip}`);
 
+      // Refuse anything that is not an ESP32-S3.
+      //
+      // The port chooser filters on Espressif's vendor id, which is as far as
+      // USB gets us: in download mode a CoreS3 presents 303A:1001, and so do
+      // the AtomS3 and StampS3 — the same id, a different board. esptool would
+      // reject a different chip family on its own (the bootloader image carries
+      // chip_id 9), but it would happily write this firmware to any S3, where it
+      // finds no CoreS3 display, touch or speaker and does nothing useful.
+      //
+      // The chip family is the only thing that can be checked from here. Within
+      // the S3 family the board is genuinely indistinguishable over USB, so the
+      // rest is left to the confirmation below rather than pretended away.
+      const isS3 = /ESP32-S3/i.test(String(chip));
+      if (!isS3) throw new Error(`${chip} は対象外です (ESP32-S3 専用)`);
+
+      // Flash size is the one thing that does separate a CoreS3 from the S3
+      // boards it shares a USB id with: CoreS3 carries 16MB, AtomS3 8MB,
+      // StampS3 8MB. The partition table written at 0x8000 lays out app slots up
+      // to 0xff0000, so a smaller part cannot hold it — the write would appear
+      // to succeed and the board would not boot.
+      let flashKb = null;
+      try {
+        flashKb = await loader.getFlashSize();
+        log(`flash: ${flashKb} KB`);
+      } catch (_) {
+        // Older esptool builds, or a chip that will not answer the SPI id.
+        // Not fatal: the confirmation below still asks.
+      }
+      const tooSmall = flashKb !== null && flashKb < 16 * 1024;
+      if (tooSmall) {
+        throw new Error(`フラッシュが ${flashKb / 1024}MB しかありません (CoreS3 は 16MB)。別の基板ではありませんか?`);
+      }
+
+      // Asked even after both checks pass, because neither identifies the board.
+      // A 16MB ESP32-S3 is as far as detection goes; the person holding the
+      // cable is the only one who knows what it is plugged into.
+      const size = flashKb === null ? '不明' : `${flashKb / 1024}MB`;
+      const goAhead = window.confirm(
+        `${chip} / フラッシュ ${size} に M5Stack CoreS3 用のファームウェアを書き込みます。\n\n` +
+          'この基板が CoreS3 であることを確認してください。USB からはチップの種類と ' +
+          'フラッシュ容量までしか分からず、同じ 16MB の ESP32-S3 基板とは区別できません。' +
+          '別の基板に書き込むと、そちらの元のファームウェアは失われます。',
+      );
+      if (!goAhead) {
+        say(status, '中止しました。');
+        return;
+      }
+
       const wipe = $('flash-erase').checked;
       if (wipe) {
         say(status, '全消去しています (時間がかかります)...', 'warn');

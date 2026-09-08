@@ -66,6 +66,8 @@ window.I18N = {
     deviceSending: '実機へ転送中…',
     stackchan: 'ｽﾀｯｸﾁｬﾝ',
     stackchanSettings: '⚙ｽﾀｯｸﾁｬﾝ設定',
+    flashBoardWarn:
+      '⚠ M5Stack CoreS3 専用です。USB からはチップ種別とフラッシュ容量までしか分からないため、他の ESP32-S3 基板を選ぶと、そちらのファームウェアを上書きします。',
     swapNoDevice: 'ｽﾀｯｸﾁｬﾝに送るには、ツールバーの「ｽﾀｯｸﾁｬﾝ」から接続してください。',
     flashSetup: '初回セットアップ',
     usbConnect: '接続',
@@ -221,6 +223,8 @@ window.I18N = {
     deviceSending: 'Sending to the device…',
     stackchan: 'Stack-chan',
     stackchanSettings: '⚙Stack-chan setup',
+    flashBoardWarn:
+      '⚠ For the M5Stack CoreS3 only. USB reveals the chip type and flash size and no more, so picking another ESP32-S3 board will overwrite its firmware.',
     swapNoDevice: 'To send to a Stack-chan, connect it from the toolbar button.',
     flashSetup: 'First-time setup',
     usbConnect: 'Connect',
@@ -375,6 +379,7 @@ window.I18N = {
     deviceSending: '正在传输到实机…',
     stackchan: 'Stack-chan',
     stackchanSettings: '⚙Stack-chan 设置',
+    flashBoardWarn: '⚠ 仅适用于 M5Stack CoreS3。USB 只能识别芯片型号和闪存容量，选择其他 ESP32-S3 板会覆盖其固件。',
     swapNoDevice: '要发送到 Stack-chan，请从工具栏按钮连接。',
     flashSetup: '首次设置',
     usbConnect: '连接',

@@ -591,6 +591,18 @@
     font-weight: bold;
   }
   .flash-note { color: #8a8a8a; font-size: 11px; line-height: 1.6; margin-bottom: 8px; }
+  /* 取り違えは元に戻せない (相手のファームは上書きされる) ので、押す前に読める
+     場所に置く。確認ダイアログは押した後にしか出ない */
+  .flash-warn {
+    color: #e6c15a;
+    font-size: 11px;
+    line-height: 1.6;
+    margin-bottom: 8px;
+    padding: 6px 8px;
+    border: 1px solid #5a4a1a;
+    border-radius: 4px;
+    background: #241f10;
+  }
   .flash-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
   .flash-row label { color: #bbb; font-size: 11px; }
   .flash-field {
@@ -1215,6 +1227,7 @@
   <div class="flash-step">
     <h4 id="flash-h-write">ファームウェアを書き込む</h4>
     <div class="flash-note" id="flash-note-write">初めての実機、または更新するときだけ。書き込んだ後は USB が繋ぎ直されるので、ツールバーから接続し直してください。</div>
+    <div class="flash-warn" id="flash-note-board">⚠ M5Stack CoreS3 専用です。USB からはチップ種別とフラッシュ容量までしか分からないため、他の ESP32-S3 基板を選ぶと、そちらのファームウェアを上書きします。</div>
     <div class="flash-row">
       <label><input type="checkbox" id="flash-erase"> <span id="lbl-flash-erase">全消去 (WiFi 設定も消えます)</span></label>
     </div>
