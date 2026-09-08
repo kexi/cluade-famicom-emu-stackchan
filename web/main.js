@@ -72,6 +72,10 @@
     set('btn-power', 'power');
     set('btn-reset', 'reset');
     set('btn-swap', 'swap');
+    set('btn-stackchan', 'stackchan');
+    set('btn-flash', 'stackchanSettings');
+    set('lbl-swap-no-device', 'swapNoDevice');
+    set('flash-setup-summary', 'flashSetup');
     set('btn-bus', 'bus');
     set('btn-debug', 'debug');
     set('btn-xev', 'xevCheck');
@@ -1077,23 +1081,53 @@
     }
   })();
 
+  // How this page reaches the device.
+  //
+  // Two transports, because neither covers every case. `just serve` relays over
+  // the network and is the only way to reach a board that is not plugged into
+  // this machine — but it needs a process running, which a page served from
+  // GitHub Pages cannot assume. USB needs no relay at all and works on a board
+  // with no WiFi configured, but only in Chrome/Edge on the desktop and only
+  // for the board on the end of the cable.
+  //
+  // The whole page talks through this object, so the two differ in one place
+  // rather than at each of the call sites that used to hold a fetch().
+  // Held by NesSerial rather than here: the flasher panel opens the same port,
+  // and a SerialPort cannot be opened twice.
+  const serialLink = () => window.NesSerial?.link() ?? null;
+
+  const usingSerial = () => serialLink() !== null;
+  // Either transport counts as "there is a device": the UI rows keyed off this
+  // used to test for a hostname, which USB does not have.
+  const deviceReady = () => usingSerial() || deviceIp !== '';
+
   let mirrorLastSent = 0;
   let mirrorPending = null; // newest mask held back by the throttle
   let mirrorTimer = 0;
   let mirrorWarned = false;
 
+  // One warning only: a disconnected device would otherwise flood the console
+  // at frame rate while the cart is tilted.
+  function warnOnce(message) {
+    if (mirrorWarned) return;
+    mirrorWarned = true;
+    console.warn(message);
+  }
+
   function mirrorPost(mask) {
     mirrorLastSent = performance.now();
+    if (usingSerial()) {
+      serialLink()
+        .send(window.NesProto.buildPins(mask))
+        .catch(() => warnOnce('pin mirror: the USB link stopped answering'));
+      return;
+    }
     fetch('/api/pins', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ host: deviceIp, mask: mask.toString(16).padStart(16, '0') }),
     }).catch(() => {
-      // One warning only: a disconnected device would otherwise flood the
-      // console at frame rate while the cart is tilted.
-      if (mirrorWarned) return;
-      mirrorWarned = true;
-      console.warn('pin mirror: cannot reach the relay at /api/pins — is `just serve` running?');
+      warnOnce('pin mirror: cannot reach the relay at /api/pins — is `just serve` running?');
     });
   }
 
@@ -1101,7 +1135,7 @@
   // but the *last* state always goes out — otherwise the device could be left
   // showing a stale mask after the user stops moving the slider.
   function mirrorPins(mask) {
-    if (!deviceIp) return;
+    if (!deviceReady()) return;
     const now = performance.now();
     const sinceLast = now - mirrorLastSent;
     if (sinceLast >= MIRROR_MIN_INTERVAL_MS) {
@@ -1133,6 +1167,12 @@
 
   function volPost(level) {
     volLastSent = performance.now();
+    if (usingSerial()) {
+      serialLink()
+        .send(window.NesProto.buildCtrl(window.NesProto.CTRL_VOLUME, level))
+        .catch(() => warnOnce('volume mirror: the USB link stopped answering'));
+      return;
+    }
     fetch('/api/volume', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1145,7 +1185,7 @@
   }
 
   function mirrorVolume(gain) {
-    if (!deviceIp) return;
+    if (!deviceReady()) return;
     const level = Math.max(0, Math.min(255, Math.round(DEVICE_VOLUME_BASE * gain)));
     const now = performance.now();
     const sinceLast = now - volLastSent;
@@ -1175,7 +1215,13 @@
   // and restoring the contacts alone does not un-wedge it: the console has to
   // re-fetch the reset vector, same as pressing RESET on real hardware.
   function mirrorResetNow() {
-    if (!deviceIp) return;
+    if (!deviceReady()) return;
+    if (usingSerial()) {
+      serialLink()
+        .send(window.NesProto.buildCtrl(window.NesProto.CTRL_RESET, 0))
+        .catch(() => warnOnce('reset: the USB link stopped answering'));
+      return;
+    }
     fetch('/api/reset', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1189,7 +1235,7 @@
 
   // Bypasses the throttle. For user actions that must land immediately.
   function mirrorPinsNow(mask) {
-    if (!deviceIp) return;
+    if (!deviceReady()) return;
     mirrorPending = null;
     if (mirrorTimer) {
       clearTimeout(mirrorTimer);
@@ -1217,11 +1263,30 @@
   const sdSaveName = document.getElementById('sd-save-name');
   const sdNoLoadCheck = document.getElementById('sd-noload-check');
   const sdPanel = document.getElementById('sd-panel');
-  if (deviceIp) {
-    swapDeviceRow.hidden = false;
-    sdSaveRow.hidden = false;
-    sdPanel.hidden = false;
+  // Called at load for the `?device=` path, and again when a USB link opens —
+  // the rows have to appear at whichever point a device first exists.
+  const swapNoDevice = document.getElementById('swap-no-device');
+
+  function revealDeviceRows() {
+    const ready = deviceReady();
+    // The hint and the rows are mutually exclusive: one of the two always
+    // explains what the panel can do with a device.
+    swapNoDevice.hidden = ready;
+    swapDeviceRow.hidden = !ready;
+    sdSaveRow.hidden = !ready;
+    sdPanel.hidden = !ready;
   }
+  revealDeviceRows();
+
+  // The flasher panel owns connecting (see flash.js); this only has to notice
+  // when a link appears, so the device rows and the SD listing catch up.
+  window.NesSerial?.onChange((link) => {
+    revealDeviceRows();
+    const opened = link !== null;
+    if (!opened) return;
+    refreshSdList();
+    mirrorVolume(muted ? 0 : masterVolume);
+  });
 
   // The name and "save only" options mean nothing without a save target, so
   // they follow the checkbox rather than sitting there inert.
@@ -1334,6 +1399,48 @@
     }
     swapDeviceBtn.disabled = true;
     statusEl.textContent = t('deviceSending');
+    if (usingSerial()) {
+      try {
+        const verdict = await window.NesSerial.sendRom(
+          serialLink(),
+          img,
+          { swap: noReset, save: wantsSave ? saveName : null, noLoad: wantsSave && sdNoLoadCheck.checked },
+          (sent, total) => {
+            statusEl.textContent = t('deviceSending') + ' ' + Math.round((sent / total) * 100) + '%';
+          },
+        );
+        // Same three outcomes the relay reports, read straight off the protocol
+        // instead of out of an HTTP status: refused, saved, or landed but with
+        // the card's verdict still unknown.
+        const refused = !verdict.ok && !verdict.save;
+        if (refused) {
+          statusEl.textContent = t(ROM_STATUS_KEYS[verdict.status] || 'deviceFail');
+          return;
+        }
+        if (verdict.save?.unknown) {
+          statusEl.textContent = t('sdSaveUnknown');
+          refreshSdList();
+          return;
+        }
+        const cardRefused = verdict.save && verdict.save.status !== 0;
+        if (cardRefused) {
+          statusEl.textContent = sdStatusMessage(verdict.save.status);
+          return;
+        }
+        if (wantsSave) {
+          statusEl.textContent = t('sdSaved', { name: saveName });
+          refreshSdList();
+          return;
+        }
+        statusEl.textContent = t(noReset ? 'deviceSentSwap' : 'deviceSent');
+      } catch (err) {
+        console.warn('[nes] rom send over USB failed:', err);
+        statusEl.textContent = t('deviceFail');
+      } finally {
+        swapDeviceBtn.disabled = false;
+      }
+      return;
+    }
     try {
       const res = await fetch(
         '/api/rom?host=' +
@@ -1509,9 +1616,46 @@
     return (v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)) + units[i];
   }
 
-  // POST one SD command and return its parsed body, or null once the failure has
-  // been reported. Centralised so every caller reports failures the same way.
+  // The op each /api/sd/* route stands for, so the serial transport can reach the
+  // firmware directly with the callers unchanged.
+  // The serial half of sdCommand, kept apart so the HTTP path reads exactly as it
+  // did. Reports failures through the same three branches, because the
+  // distinction that matters — an unanswered DELETE or RENAME is *undetermined*,
+  // never "failed" — is a property of the protocol and not of the transport.
+  async function sdCommandSerial(path, body) {
+    const op = SD_OPS[path];
+    const result = await window.NesSerial.sdCommand(serialLink(), op, body ?? {});
+    if (result.ok) {
+      const listing = op === SD_OPS['/api/sd/list'];
+      if (!listing) return result;
+      // Shaped like the relay's JSON so renderSdList() needs no changes.
+      return {
+        entries: result.entries,
+        total: Number(result.totalBytes),
+        free: Number(result.freeBytes),
+      };
+    }
+    if (result.unknown) {
+      sdStatusEl.textContent = t('sdSaveUnknown');
+      refreshSdList();
+      return null;
+    }
+    sdStatusEl.textContent = typeof result.status === 'number' ? sdStatusMessage(result.status) : t('sdFail');
+    return null;
+  }
+
+  const SD_OPS = {
+    '/api/sd/list': 0,
+    '/api/sd/load': 1,
+    '/api/sd/delete': 2,
+    '/api/sd/rename': 3,
+  };
+
+  // Run one SD command and return its parsed body, or null once the failure has
+  // been reported. Centralised so every caller reports failures the same way —
+  // and so the two transports differ only here.
   async function sdCommand(path, body) {
+    if (usingSerial()) return sdCommandSerial(path, body);
     const res = await fetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1745,8 +1889,8 @@
   // Push the current setting once so a device that booted at SPEAKER_VOLUME
   // picks up a slider the user had already moved in a previous session.
   mirrorReady = true;
-  if (deviceIp) {
-    console.info(`pin mirror: forwarding connector state to ${deviceIp}`);
+  if (deviceReady()) {
+    console.info(`pin mirror: forwarding connector state to ${usingSerial() ? 'USB' : deviceIp}`);
     mirrorVolume(muted ? 0 : masterVolume);
   }
 

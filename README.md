@@ -150,16 +150,34 @@ just serve       # http://localhost:8000/ — also relays /api/* to the device
 - Desktop: http://localhost:8000/
 - With a CoreS3 on the same network: http://localhost:8000/?device=stackchan-xxxxxx.local
 
+## Flashing and driving the device from a browser
+
+The published page can talk to a CoreS3 over USB with no relay process, using
+Web Serial. A **実機** button appears in the toolbar when the browser supports it,
+opening a panel that flashes the firmware and stores WiFi credentials. Once
+connected, the connector pins, master volume, RESET, ROM transfer and SD
+management all drive the real device — the same page, the same panels, with USB
+standing in for the relay.
+
+- **Chrome / Edge on the desktop only.** Safari, iOS and Android have no Web
+  Serial; the flasher says so rather than failing silently.
+- The published firmware carries **no WiFi credentials and no built-in ROM** — a
+  binary handed to everyone can carry neither — so both are supplied afterwards
+  from the page. Credentials land in NVS and survive a reboot.
+- Provisioning is accepted **over USB only**. The device answers any host on the
+  LAN, so taking credentials over WiFi would let anyone on the network re-point
+  someone else's board.
+- `just serve` is still the way to reach a board that is not plugged into this
+  machine, and is unchanged.
+
 ## Deploy (GitHub Pages)
 
-`web/` is published as the `gh-pages` branch.
+`web/` is published by `.github/workflows/pages.yml` on every push to `main` —
+it builds the WASM core and the ROM-less distribution firmware, then uploads
+`web/` (including `web/firmware/`) as the Pages artifact. No manual step.
 
-```sh
-just build-web
-git add -A && git commit -m "..."
-git push
-git subtree push --prefix web origin gh-pages
-```
+The repository's **Settings → Pages → Source** must be set to **GitHub Actions**
+for this to take effect.
 
 ## Layout
 

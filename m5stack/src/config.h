@@ -484,6 +484,62 @@ constexpr int UDP_SD_ENTRY_MAX = 4 + 1 + SD_ROM_NAME_MAX;
 static_assert(UDP_SD_LIST_HEADER + UDP_SD_ENTRY_MAX <= UDP_SD_CHUNK,
               "a LIST datagram must hold at least one entry, or the split cannot make progress");
 
+// ------------------------------------------------------- type 6: WiFi 設定
+//
+// The browser flasher's second half. A board that was just flashed from a web
+// page has no credentials — they cannot be baked into a binary that is served
+// to everyone — so they have to arrive after the fact, over the same USB cable
+// that carried the firmware.
+//
+// Request:
+//   [0..1] 'N','P'  [2] version  [3] UDP_TYPE_PROV
+//   [4..5] seq u16 LE
+//   [6]    op
+//   [7]    0
+//   [8..]  op-specific payload
+//
+// SET carries ssidLen u8 | ssid[] | passLen u8 | pass[], read with the same
+// readNameField() every other length-prefixed string in this protocol uses.
+// STATUS and APPLY carry nothing.
+constexpr uint8_t UDP_TYPE_PROV = 6;
+constexpr uint8_t UDP_PROV_OP_SET = 0;
+constexpr uint8_t UDP_PROV_OP_STATUS = 1;
+// Reconnect with whatever SET stored, so configuring WiFi does not cost a
+// reboot — the page can show the resulting IP while the user is still there.
+constexpr uint8_t UDP_PROV_OP_APPLY = 2;
+
+// Reply: 'N','W' | version | op echo | seq echo u16 LE | status | flags,
+// then for STATUS the tail described at UDP_PROV_STATUS_SIZE.
+constexpr uint8_t UDP_PROV_ACK_SIZE = 8;
+constexpr uint8_t UDP_PROV_STATUS_OK = 0;
+constexpr uint8_t UDP_PROV_STATUS_BAD_REQUEST = 1;
+// Refused because the request did not arrive over USB. Credentials are the one
+// thing this protocol will not take from the network: the device answers any
+// host on the LAN, so accepting a SET over WiFi would let a stranger point the
+// board at their own access point.
+constexpr uint8_t UDP_PROV_STATUS_NOT_SERIAL = 2;
+constexpr uint8_t UDP_PROV_STATUS_STORE_FAILED = 3;
+// STATUS tail, appended to the ACK header:
+//   [8]     connected (0/1)
+//   [9..12] IPv4 LE (0 when not connected)
+//   [13]    ssidLen u8 | ssid[]      — the stored SSID, never the passphrase
+//   ...     hostLen u8 | host[]      — the mDNS name
+constexpr uint8_t UDP_PROV_STATUS_SIZE = 13;
+// Longest values accepted for a SET. 802.11 caps an SSID at 32 bytes and a
+// WPA2 passphrase at 63; one more byte each holds the terminator.
+constexpr size_t WIFI_SSID_MAX = 33;
+constexpr size_t WIFI_PASS_MAX = 64;
+
+// ------------------------------------------------- serial (USB) transport
+//
+// The same packets as above, framed for a byte stream. See serial_link.h for
+// why COBS and why a CRC.
+constexpr uint8_t SERIAL_CRC_SIZE = 2;
+// How long the serial task sleeps when the link is idle. Long enough that an
+// idle board does not spin core 0, short enough to stay responsive while the
+// browser is streaming a ROM.
+constexpr uint32_t SERIAL_POLL_MS = 2;
+
 // 'N','P' | version | type | seq u16 LE | mask u64 LE
 constexpr uint8_t UDP_PIN_PACKET_SIZE = 14;
 // Only bits 0..59 are meaningful (pins 1..60); applyPinMask ignores the rest.

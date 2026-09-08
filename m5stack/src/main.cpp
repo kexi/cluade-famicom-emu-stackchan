@@ -19,6 +19,8 @@
 
 #include "../../core/nes.h"
 #include "config.h"
+#include "reply_sink.h"
+#include "serial_link.h"
 #include "grove_input.h"
 #include "head_touch.h"
 #include "menu.h"
@@ -39,8 +41,19 @@ static Preferences g_prefs;
 // to pushImageDMA, and the LCD DMA engine cannot read from PSRAM reliably.
 static nes::NES g_nes;
 
+// The distribution build (see platformio.ini) leaves the cartridge out: the
+// image comes from upstream with no licence, so a binary handed to everyone
+// from a web page must not carry it. Everything else about the two builds is
+// identical, and a board flashed without it waits for a ROM over USB or SD.
+#ifdef NES_NO_EMBEDDED_ROM
+static const uint8_t* const rom_start = nullptr;
+static const uint8_t* const rom_end = nullptr;
+constexpr bool HAVE_EMBEDDED_ROM = false;
+#else
 extern const uint8_t rom_start[] asm("_binary_data_game_nes_start");
 extern const uint8_t rom_end[] asm("_binary_data_game_nes_end");
+constexpr bool HAVE_EMBEDDED_ROM = true;
+#endif
 
 static std::atomic<uint8_t> g_padBits[2] = {};
 static std::atomic<uint32_t> g_lastRxMs{0};
@@ -93,7 +106,7 @@ static bool g_romSaveToSd = false;
 static char g_romSaveName[SD_ROM_NAME_MAX] = {};
 // Where to report the save's outcome, since the END ACK has already gone out by
 // the time core 1 writes the card.
-static sockaddr_in g_romSaveReplyTo = {};
+static ReplySink g_romSaveReplyTo;
 
 // What one applyRomRequest() call did, for a caller that has to react to it.
 //
@@ -121,7 +134,7 @@ static uint8_t g_sdOp = 0;
 static uint16_t g_sdSeq = 0;
 static char g_sdArgA[SD_ROM_NAME_MAX] = {};
 static char g_sdArgB[SD_ROM_NAME_MAX] = {};
-static sockaddr_in g_sdReplyTo = {};
+static ReplySink g_sdReplyTo;
 
 // The UDP socket, shared so loop() can answer directly. lwIP's sendto is
 // thread-safe, and replying from the emulation core avoids handing the snapshot
@@ -167,7 +180,7 @@ static uint32_t g_romLastRxMs = 0;   // for the stale-session takeover
 static char g_romPendingName[SD_ROM_NAME_MAX] = {};
 // The BEGIN's source, so the save outcome reaches the same peer that asked for
 // it even if some other host is also talking to the device.
-static sockaddr_in g_romPendingFrom = {};
+static ReplySink g_romPendingFrom;
 // The last session whose END was accepted, so a resent END (its ACK was lost)
 // is answered OK again instead of BUSY or NO_SESSION.
 //
@@ -205,7 +218,7 @@ static int readNameField(const uint8_t* packet, int received, int offset, char* 
     return 1 + len;
 }
 
-static void sendRomAck(int sock, const sockaddr_in& to, uint8_t op, uint16_t session, uint16_t chunk, uint8_t status) {
+static void sendRomAck(const ReplySink& to, uint8_t op, uint16_t session, uint16_t chunk, uint8_t status) {
     uint8_t ack[UDP_ROM_ACK_SIZE] = {};
     ack[0] = 'N';
     ack[1] = 'R';
@@ -220,7 +233,7 @@ static void sendRomAck(int sock, const sockaddr_in& to, uint8_t op, uint16_t ses
     // elsewhere, and always filling it keeps the layout fixed.
     ack[9] = g_romNextChunk & 0xFF;
     ack[10] = g_romNextChunk >> 8;
-    ::sendto(sock, ack, sizeof(ack), 0, (const sockaddr*)&to, sizeof(to));
+    replySend(to, ack, sizeof(ack));
 }
 
 // Validate an image the same way nes::loadRom will, so a cart that cannot
@@ -267,7 +280,7 @@ static bool ensureStagingBuffer() {
     return g_romBuf != nullptr;
 }
 
-static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* packet, int received) {
+static void handleRomPacket(const ReplySink& from, const uint8_t* packet, int received) {
     const uint16_t session = (uint16_t)(packet[4] | (packet[5] << 8));
     const uint8_t op = packet[6];
 
@@ -287,11 +300,11 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
     // ordering of the retry can succeed without this.
     const bool endOfCompleted = op == UDP_ROM_OP_END && g_romCompletedValid && session == g_romCompletedSession;
     if (endOfCompleted) {
-        sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_OK);
+        sendRomAck(from, op, session, 0, UDP_ROM_STATUS_OK);
         return;
     }
     if (applyPending || loopOwnsStaging) {
-        sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_BUSY);
+        sendRomAck(from, op, session, 0, UDP_ROM_STATUS_BUSY);
         return;
     }
 
@@ -306,17 +319,17 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
         const bool sameSession = g_romActive && session == g_romSession;
         if (sameSession) {
             g_romLastRxMs = millis();
-            sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_OK);
+            sendRomAck(from, op, session, 0, UDP_ROM_STATUS_OK);
             return;
         }
         const bool otherSessionAlive = g_romActive && (millis() - g_romLastRxMs) <= ROM_SESSION_TIMEOUT_MS;
         if (otherSessionAlive) {
-            sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_BUSY);
+            sendRomAck(from, op, session, 0, UDP_ROM_STATUS_BUSY);
             return;
         }
         const bool tooBig = total == 0 || total > ROM_MAX_SIZE;
         if (tooBig) {
-            sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_TOO_BIG);
+            sendRomAck(from, op, session, 0, UDP_ROM_STATUS_TOO_BIG);
             return;
         }
 
@@ -336,12 +349,12 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
         const bool loopWon = g_stagingBusy.load(std::memory_order_seq_cst);
         if (loopWon) {
             g_romActive.store(false, std::memory_order_seq_cst);
-            sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_BUSY);
+            sendRomAck(from, op, session, 0, UDP_ROM_STATUS_BUSY);
             return;
         }
         if (!ensureStagingBuffer()) {
             g_romActive.store(false, std::memory_order_seq_cst);
-            sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_ALLOC);
+            sendRomAck(from, op, session, 0, UDP_ROM_STATUS_ALLOC);
             return;
         }
 
@@ -365,19 +378,19 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
         g_romNextChunk = 0;
         g_romReceived = 0;
         g_romLastRxMs = millis();
-        sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_OK);
+        sendRomAck(from, op, session, 0, UDP_ROM_STATUS_OK);
         return;
     }
 
     const bool noSession = !g_romActive || session != g_romSession;
     if (noSession) {
-        sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_NO_SESSION);
+        sendRomAck(from, op, session, 0, UDP_ROM_STATUS_NO_SESSION);
         return;
     }
 
     if (op == UDP_ROM_OP_ABORT) {
         g_romActive = false;
-        sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_OK);
+        sendRomAck(from, op, session, 0, UDP_ROM_STATUS_OK);
         return;
     }
 
@@ -397,19 +410,19 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
         const bool duplicate = g_romNextChunk > 0 && chunk == (uint16_t)(g_romNextChunk - 1);
         if (duplicate) {
             g_romLastRxMs = millis();
-            sendRomAck(sock, from, op, session, chunk, UDP_ROM_STATUS_OK);
+            sendRomAck(from, op, session, chunk, UDP_ROM_STATUS_OK);
             return;
         }
         const bool outOfOrder = chunk != g_romNextChunk;
         if (outOfOrder) {
             g_romLastRxMs = millis();
-            sendRomAck(sock, from, op, session, chunk, UDP_ROM_STATUS_SEQ);
+            sendRomAck(from, op, session, chunk, UDP_ROM_STATUS_SEQ);
             return;
         }
         const bool overflows = g_romReceived + len > g_romExpectedSize;
         if (overflows) {
             g_romActive = false;
-            sendRomAck(sock, from, op, session, chunk, UDP_ROM_STATUS_SIZE_MISMATCH);
+            sendRomAck(from, op, session, chunk, UDP_ROM_STATUS_SIZE_MISMATCH);
             return;
         }
 
@@ -417,7 +430,7 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
         g_romReceived += len;
         g_romNextChunk++;
         g_romLastRxMs = millis();
-        sendRomAck(sock, from, op, session, chunk, UDP_ROM_STATUS_OK);
+        sendRomAck(from, op, session, chunk, UDP_ROM_STATUS_OK);
         return;
     }
 
@@ -425,7 +438,7 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
         const bool sizeMismatch = g_romReceived != g_romExpectedSize;
         if (sizeMismatch) {
             g_romActive = false;
-            sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_SIZE_MISMATCH);
+            sendRomAck(from, op, session, 0, UDP_ROM_STATUS_SIZE_MISMATCH);
             return;
         }
         // esp_rom_crc32_le brackets its own computation with '~' (see
@@ -436,14 +449,14 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
         const bool crcMismatch = crc != g_romExpectedCrc;
         if (crcMismatch) {
             g_romActive = false;
-            sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_CRC);
+            sendRomAck(from, op, session, 0, UDP_ROM_STATUS_CRC);
             return;
         }
         const uint8_t headerStatus = romHeaderStatus(g_romBuf, g_romReceived);
         const bool unloadable = headerStatus != UDP_ROM_STATUS_OK;
         if (unloadable) {
             g_romActive = false;
-            sendRomAck(sock, from, op, session, 0, headerStatus);
+            sendRomAck(from, op, session, 0, headerStatus);
             return;
         }
 
@@ -463,7 +476,7 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
         g_romCompletedSession = session;
         // Publishes the buffer and the plain globals above to core 1.
         g_romApplyRequested.store(true, std::memory_order_release);
-        sendRomAck(sock, from, op, session, 0, UDP_ROM_STATUS_OK);
+        sendRomAck(from, op, session, 0, UDP_ROM_STATUS_OK);
         return;
     }
 }
@@ -472,7 +485,7 @@ static void handleRomPacket(int sock, const sockaddr_in& from, const uint8_t* pa
 
 // Single-datagram reply, used by LOAD / DELETE / RENAME and by a LIST that
 // failed before it had anything to list.
-static void sendSdAck(int sock, const sockaddr_in& to, uint8_t op, uint16_t seq, SdStatus status) {
+static void sendSdAck(const ReplySink& to, uint8_t op, uint16_t seq, SdStatus status) {
     uint8_t ack[UDP_SD_ACK_SIZE] = {};
     ack[0] = 'N';
     ack[1] = 'S';
@@ -481,7 +494,7 @@ static void sendSdAck(int sock, const sockaddr_in& to, uint8_t op, uint16_t seq,
     ack[4] = seq & 0xFF;
     ack[5] = seq >> 8;
     ack[6] = (uint8_t)status;
-    ::sendto(sock, ack, sizeof(ack), 0, (const sockaddr*)&to, sizeof(to));
+    replySend(to, ack, sizeof(ack));
 }
 
 // Latch a type 5 request for the frame loop.
@@ -490,7 +503,7 @@ static void sendSdAck(int sock, const sockaddr_in& to, uint8_t op, uint16_t seq,
 // runs on core 0 where there is no way to know whether a band is in flight. The
 // only work done on this side is validating that the datagram is self-consistent
 // and copying the arguments somewhere the receive buffer's reuse cannot reach.
-static void handleSdPacket(int sock, const sockaddr_in& from, const uint8_t* packet, int received) {
+static void handleSdPacket(const ReplySink& from, const uint8_t* packet, int received) {
     const uint16_t seq = (uint16_t)(packet[4] | (packet[5] << 8));
     const uint8_t op = packet[6];
 
@@ -502,7 +515,7 @@ static void handleSdPacket(int sock, const sockaddr_in& from, const uint8_t* pac
     // whose sender is a stop-and-wait loop that has no reason to pipeline.
     const bool alreadyPending = g_sdRequested.load(std::memory_order_acquire);
     if (alreadyPending) {
-        sendSdAck(sock, from, op, seq, SdStatus::Busy);
+        sendSdAck(from, op, seq, SdStatus::Busy);
         return;
     }
 
@@ -513,7 +526,7 @@ static void handleSdPacket(int sock, const sockaddr_in& from, const uint8_t* pac
         const int consumed = readNameField(packet, received, UDP_SD_HEADER, argA, sizeof(argA));
         const bool malformed = consumed < 0 || argA[0] == '\0';
         if (malformed) {
-            sendSdAck(sock, from, op, seq, SdStatus::BadName);
+            sendSdAck(from, op, seq, SdStatus::BadName);
             return;
         }
         const bool needsSecondName = op == UDP_SD_OP_RENAME;
@@ -521,7 +534,7 @@ static void handleSdPacket(int sock, const sockaddr_in& from, const uint8_t* pac
             const int consumedB = readNameField(packet, received, UDP_SD_HEADER + consumed, argB, sizeof(argB));
             const bool malformedB = consumedB < 0 || argB[0] == '\0';
             if (malformedB) {
-                sendSdAck(sock, from, op, seq, SdStatus::BadName);
+                sendSdAck(from, op, seq, SdStatus::BadName);
                 return;
             }
         }
@@ -535,6 +548,217 @@ static void handleSdPacket(int sock, const sockaddr_in& from, const uint8_t* pac
     // Publishes the fields above to core 1, the same pairing the ROM staging
     // buffer uses.
     g_sdRequested.store(true, std::memory_order_release);
+}
+
+// ------------------------------------------------------------ provisioning
+
+// The credentials to try: whatever the browser stored in NVS, falling back to
+// the compile-time secrets.h.
+//
+// The fallback is what keeps `just flash` working exactly as before for anyone
+// building their own firmware. NVS wins because a board flashed from the web
+// page carries the example placeholders — a binary served to everyone cannot
+// have real credentials baked in, which is the whole reason type 6 exists.
+static char g_wifiSsid[WIFI_SSID_MAX] = {};
+static char g_wifiPass[WIFI_PASS_MAX] = {};
+
+// Defined further down, next to the rest of the boot sequence they belong to.
+static const char* deviceHostname();
+static bool connectWifi();
+static void loadWifiCredentials();
+
+static void sendProvAck(const ReplySink& to, uint8_t op, uint16_t seq, uint8_t status) {
+    uint8_t ack[UDP_PROV_ACK_SIZE] = {};
+    ack[0] = 'N';
+    ack[1] = 'W';
+    ack[2] = UDP_PROTOCOL_VERSION;
+    ack[3] = op;
+    ack[4] = seq & 0xFF;
+    ack[5] = seq >> 8;
+    ack[6] = status;
+    replySend(to, ack, sizeof(ack));
+}
+
+// Answer a STATUS request: what the board is connected to, and how to reach it.
+//
+// The passphrase is deliberately absent. The SSID and IP are what the page needs
+// to show "you are on this network, here is the address"; echoing the secret
+// back would put it on the wire for no purpose the caller has — it is the side
+// that just sent it.
+static void sendProvStatus(const ReplySink& to, uint16_t seq) {
+    uint8_t reply[UDP_PROV_STATUS_SIZE + 2 + WIFI_SSID_MAX + 64] = {};
+    reply[0] = 'N';
+    reply[1] = 'W';
+    reply[2] = UDP_PROTOCOL_VERSION;
+    reply[3] = UDP_PROV_OP_STATUS;
+    reply[4] = seq & 0xFF;
+    reply[5] = seq >> 8;
+    reply[6] = UDP_PROV_STATUS_OK;
+
+    const bool connected = WiFi.status() == WL_CONNECTED;
+    reply[8] = connected ? 1 : 0;
+    const uint32_t ip = connected ? (uint32_t)WiFi.localIP() : 0;
+    reply[9] = (uint8_t)(ip & 0xFF);
+    reply[10] = (uint8_t)((ip >> 8) & 0xFF);
+    reply[11] = (uint8_t)((ip >> 16) & 0xFF);
+    reply[12] = (uint8_t)((ip >> 24) & 0xFF);
+
+    size_t offset = UDP_PROV_STATUS_SIZE;
+    const size_t ssidLen = strnlen(g_wifiSsid, sizeof(g_wifiSsid) - 1);
+    reply[offset++] = (uint8_t)ssidLen;
+    memcpy(reply + offset, g_wifiSsid, ssidLen);
+    offset += ssidLen;
+
+    const char* host = deviceHostname();
+    const size_t hostLen = strnlen(host, 63);
+    reply[offset++] = (uint8_t)hostLen;
+    memcpy(reply + offset, host, hostLen);
+    offset += hostLen;
+
+    replySend(to, reply, offset);
+}
+
+// Store credentials, report status, or reconnect.
+//
+// Serial only. The device answers any host on the LAN, so honouring a SET that
+// arrived over WiFi would let anyone on the network re-point someone else's
+// board at their own access point — and the board would then be unreachable to
+// its owner. Over USB the sender is whoever is holding the cable.
+static void handleProvPacket(const ReplySink& from, const uint8_t* packet, int received) {
+    const uint16_t seq = (uint16_t)(packet[4] | (packet[5] << 8));
+    const uint8_t op = packet[6];
+
+    const bool overSerial = from.via == ReplyVia::Serial;
+    if (!overSerial) {
+        sendProvAck(from, op, seq, UDP_PROV_STATUS_NOT_SERIAL);
+        return;
+    }
+
+    if (op == UDP_PROV_OP_STATUS) {
+        sendProvStatus(from, seq);
+        return;
+    }
+
+    if (op == UDP_PROV_OP_APPLY) {
+        // Answer first: connectWifi() blocks for up to WIFI_CONNECT_TIMEOUT_MS
+        // and the caller would otherwise sit through it with no sign the request
+        // was even understood. The outcome is read back with STATUS.
+        sendProvAck(from, op, seq, UDP_PROV_STATUS_OK);
+        loadWifiCredentials();
+        g_wifiConnected = connectWifi();
+        return;
+    }
+
+    if (op == UDP_PROV_OP_SET) {
+        char ssid[WIFI_SSID_MAX] = {};
+        char pass[WIFI_PASS_MAX] = {};
+        const int consumed = readNameField(packet, received, UDP_SD_HEADER, ssid, sizeof(ssid));
+        const bool badSsid = consumed < 0 || ssid[0] == '\0';
+        if (badSsid) {
+            sendProvAck(from, op, seq, UDP_PROV_STATUS_BAD_REQUEST);
+            return;
+        }
+        // An open network is legitimate, so an empty passphrase is accepted —
+        // only a malformed field (a length that runs past the frame) is not.
+        const int consumedPass = readNameField(packet, received, UDP_SD_HEADER + consumed, pass, sizeof(pass));
+        const bool badPass = consumedPass < 0;
+        if (badPass) {
+            sendProvAck(from, op, seq, UDP_PROV_STATUS_BAD_REQUEST);
+            return;
+        }
+
+        const size_t wroteSsid = g_prefs.putString("ssid", ssid);
+        const size_t wrotePass = g_prefs.putString("pass", pass);
+        // putString returns 0 when NVS refused the write. Reported rather than
+        // assumed: silently keeping the old network while the page says "saved"
+        // is the one outcome the user cannot diagnose.
+        const bool stored = wroteSsid > 0 && (pass[0] == '\0' || wrotePass > 0);
+        if (!stored) {
+            sendProvAck(from, op, seq, UDP_PROV_STATUS_STORE_FAILED);
+            return;
+        }
+        Serial.printf("PROV: stored ssid=%s\n", ssid);
+        sendProvAck(from, op, seq, UDP_PROV_STATUS_OK);
+        return;
+    }
+
+    sendProvAck(from, op, seq, UDP_PROV_STATUS_BAD_REQUEST);
+}
+
+// Act on one validated packet, whichever transport carried it.
+//
+// Split out of udpTask so the serial link can reuse it verbatim. The magic and
+// version have already been checked by the caller; `received` is the length of
+// this message alone, which several parsers depend on (a ROM BEGIN is told from
+// its older fixed-length form by being longer, and DATA cross-checks its
+// declared length against it), so the serial side must pass the frame length
+// and not whatever else is sitting in its buffer.
+//
+// Not static: serial_link.cpp declares and calls it.
+void dispatchPacket(const ReplySink& from, const uint8_t* packet, int received) {
+    const uint8_t type = packet[3];
+    if (type == UDP_TYPE_PINS) {
+        // A pin packet is longer than the pad packet, so re-check the length
+        // rather than reading past what actually arrived.
+        const bool pinPacketShort = received < UDP_PIN_PACKET_SIZE;
+        if (pinPacketShort) return;
+        uint64_t mask = 0;
+        for (int i = 0; i < 8; i++) mask |= (uint64_t)packet[6 + i] << (i * 8);
+        // Normalise here so every later comparison against PIN_MASK_ALL_OK
+        // works regardless of what the sender left in the unused top bits.
+        g_pinMask.store(mask & PIN_MASK_VALID, std::memory_order_relaxed);
+        return;   // not controller input: leave g_lastRxMs alone
+    }
+    if (type == UDP_TYPE_DEBUG) {
+        // Only UDP can answer a debug poll: the reply is assembled on core 1
+        // from a snapshot buffer and addressed with a stored sockaddr. Serial
+        // callers get silence rather than a half-supported path, and the web UI
+        // hides the remote debug source unless it is talking over the network.
+        const bool overUdp = from.via == ReplyVia::Udp;
+        if (!overUdp) return;
+        g_debugReplyIp.store(from.peer.sin_addr.s_addr, std::memory_order_relaxed);
+        g_debugReplyPort.store(from.peer.sin_port, std::memory_order_relaxed);
+        g_debugSeq.store((uint16_t)(packet[4] | (packet[5] << 8)), std::memory_order_relaxed);
+        const bool wantWaves = packet[6] & UDP_DEBUG_FLAG_WAVES;
+        g_debugWantWaves.store(wantWaves, std::memory_order_relaxed);
+        if (wantWaves) g_debugWaveAskedMs.store(millis(), std::memory_order_relaxed);
+        g_debugRequested.store(true, std::memory_order_relaxed);
+        return;
+    }
+    if (type == UDP_TYPE_ROM) {
+        handleRomPacket(from, packet, received);
+        return;   // not controller input: leave g_lastRxMs alone
+    }
+    if (type == UDP_TYPE_SD) {
+        handleSdPacket(from, packet, received);
+        return;   // not controller input: leave g_lastRxMs alone
+    }
+    if (type == UDP_TYPE_PROV) {
+        handleProvPacket(from, packet, received);
+        return;   // not controller input: leave g_lastRxMs alone
+    }
+    if (type == UDP_TYPE_CTRL) {
+        const uint8_t cmd = packet[6];
+        // Latch rather than act here: this runs on core 0 while the emulator
+        // is mid-frame on core 1, so the work happens at a frame boundary.
+        if (cmd & UDP_CTRL_RESET) g_resetRequested.store(true, std::memory_order_relaxed);
+        if (cmd & UDP_CTRL_VOLUME) g_volume.store(packet[7], std::memory_order_relaxed);
+        if (cmd & UDP_CTRL_MENU) g_menuRequested.store(true, std::memory_order_relaxed);
+        return;
+    }
+
+    // An unrecognised type is controller state only when it arrived as a
+    // datagram: type 0 senders predate the type byte and leave it zero, so UDP
+    // has to keep treating anything unknown as a pad packet for them.
+    //
+    // The serial link must not. Its frames come off a byte stream shared with
+    // the log, and a decode that slipped would land here — where "unknown means
+    // pad" turns a framing bug into buttons held down with no error anywhere.
+    const bool legacyPadSender = from.via == ReplyVia::Udp;
+    if (!legacyPadSender) return;
+    g_padBits[0].store(packet[6], std::memory_order_relaxed);
+    g_padBits[1].store(packet[7], std::memory_order_relaxed);
+    g_lastRxMs.store(millis(), std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------- UDP task
@@ -577,51 +801,7 @@ static void udpTask(void*) {
         const bool versionOk = packet[2] == UDP_PROTOCOL_VERSION;
         if (!magicOk || !versionOk) continue;
 
-        const uint8_t type = packet[3];
-        if (type == UDP_TYPE_PINS) {
-            // A pin packet is longer than the pad packet, so re-check the length
-            // rather than reading past what actually arrived.
-            const bool pinPacketShort = received < UDP_PIN_PACKET_SIZE;
-            if (pinPacketShort) continue;
-            uint64_t mask = 0;
-            for (int i = 0; i < 8; i++) mask |= (uint64_t)packet[6 + i] << (i * 8);
-            // Normalise here so every later comparison against PIN_MASK_ALL_OK
-            // works regardless of what the sender left in the unused top bits.
-            g_pinMask.store(mask & PIN_MASK_VALID, std::memory_order_relaxed);
-            continue;   // not controller input: leave g_lastRxMs alone
-        }
-        if (type == UDP_TYPE_DEBUG) {
-            g_debugReplyIp.store(from.sin_addr.s_addr, std::memory_order_relaxed);
-            g_debugReplyPort.store(from.sin_port, std::memory_order_relaxed);
-            g_debugSeq.store((uint16_t)(packet[4] | (packet[5] << 8)), std::memory_order_relaxed);
-            const bool wantWaves = packet[6] & UDP_DEBUG_FLAG_WAVES;
-            g_debugWantWaves.store(wantWaves, std::memory_order_relaxed);
-            if (wantWaves) g_debugWaveAskedMs.store(millis(), std::memory_order_relaxed);
-            g_debugRequested.store(true, std::memory_order_relaxed);
-            continue;
-        }
-        if (type == UDP_TYPE_ROM) {
-            handleRomPacket(sock, from, packet, received);
-            continue;   // not controller input: leave g_lastRxMs alone
-        }
-        if (type == UDP_TYPE_SD) {
-            handleSdPacket(sock, from, packet, received);
-            continue;   // not controller input: leave g_lastRxMs alone
-        }
-        if (type == UDP_TYPE_CTRL) {
-            const uint8_t cmd = packet[6];
-            // Latch rather than act here: this runs on core 0 while the emulator
-            // is mid-frame on core 1, so the work happens at a frame boundary.
-            if (cmd & UDP_CTRL_RESET) g_resetRequested.store(true, std::memory_order_relaxed);
-            if (cmd & UDP_CTRL_VOLUME) g_volume.store(packet[7], std::memory_order_relaxed);
-            if (cmd & UDP_CTRL_MENU) g_menuRequested.store(true, std::memory_order_relaxed);
-            continue;
-        }
-
-        // type 0 (or a legacy sender's zero "reserved" byte): controller state.
-        g_padBits[0].store(packet[6], std::memory_order_relaxed);
-        g_padBits[1].store(packet[7], std::memory_order_relaxed);
-        g_lastRxMs.store(millis(), std::memory_order_relaxed);
+        dispatchPacket(udpSink(sock, from), packet, received);
     }
 }
 
@@ -652,10 +832,25 @@ static const char* deviceHostname() {
     return hostname;
 }
 
+static void loadWifiCredentials() {
+    const size_t ssidLen = g_prefs.getString("ssid", g_wifiSsid, sizeof(g_wifiSsid));
+    const bool haveStored = ssidLen > 0 && g_wifiSsid[0] != '\0';
+    if (haveStored) {
+        g_prefs.getString("pass", g_wifiPass, sizeof(g_wifiPass));
+        return;
+    }
+    snprintf(g_wifiSsid, sizeof(g_wifiSsid), "%s", WIFI_SSID);
+    snprintf(g_wifiPass, sizeof(g_wifiPass), "%s", WIFI_PASS);
+}
+
 static bool connectWifi() {
     M5.Display.fillScreen(TFT_BLACK);
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-    showMessage("Connecting to " WIFI_SSID "...", 8, 2);
+    // snprintf rather than the literal concatenation this used to do: the SSID
+    // is no longer known at compile time.
+    char connecting[64];
+    snprintf(connecting, sizeof(connecting), "Connecting to %s...", g_wifiSsid);
+    showMessage(connecting, 8, 2);
 
     // Before mode(), not before begin(): setHostname() only writes a static
     // buffer (WiFiGeneric.cpp:292), and mode() is what pushes it into the netif
@@ -665,13 +860,13 @@ static bool connectWifi() {
     // is unavailable.
     WiFi.setHostname(deviceHostname());
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    WiFi.begin(g_wifiSsid, g_wifiPass);
 
     const uint32_t deadline = millis() + WIFI_CONNECT_TIMEOUT_MS;
     while (WiFi.status() != WL_CONNECTED) {
         const bool timedOut = millis() > deadline;
         if (timedOut) {
-            Serial.printf("WIFI: timeout ssid=%s status=%d\n", WIFI_SSID, (int)WiFi.status());
+            Serial.printf("WIFI: timeout ssid=%s status=%d\n", g_wifiSsid, (int)WiFi.status());
             return false;
         }
         delay(200);
@@ -738,6 +933,12 @@ void setup() {
     // user has ever chosen one (see cycleVolumePreset).
     g_prefs.begin("nes", false);
     M5.Speaker.setVolume(g_prefs.getUChar("vol", SPEAKER_VOLUME));
+    loadWifiCredentials();
+
+    // Unconditional, and ahead of the WiFi attempt: a board flashed from the
+    // browser has no credentials yet, so the link that configures them has to
+    // exist before — and regardless of whether — WiFi comes up.
+    serialLinkStart();
 
     // Before WiFi: the Grove controllers work regardless of network state.
     groveInputInit();
@@ -814,9 +1015,13 @@ void setup() {
         delay(IP_DISPLAY_MS);
     }
 
-    const size_t romSize = (size_t)(rom_end - rom_start);
-    const bool romLoaded = g_nes.loadRom(rom_start, romSize);
-    if (!romLoaded) haltWithError("ROM load failed");
+    if (HAVE_EMBEDDED_ROM) {
+        const size_t romSize = (size_t)(rom_end - rom_start);
+        const bool romLoaded = g_nes.loadRom(rom_start, romSize);
+        // Still fatal when a cart was built in and would not load: that is a
+        // broken image, not a deliberate absence.
+        if (!romLoaded) haltWithError("ROM load failed");
+    }
 
     g_nes.apu.setSampleRate(AUDIO_SAMPLE_RATE);
     g_nes.powerOn();
@@ -836,6 +1041,17 @@ void setup() {
         enterMenu();
         // Left up to the picker: it draws the whole panel, and a WiFi warning in
         // the footer would land under the guide line it draws there.
+        return;
+    }
+
+    // A distribution build with an empty card has no cart at all. Say so and
+    // stay in the picker rather than starting the emulator on no mapper: the
+    // ROM arrives over USB or on the card, and both routes need the device
+    // alive and answering.
+    const bool nothingToPlay = !HAVE_EMBEDDED_ROM;
+    if (nothingToPlay) {
+        enterMenu();
+        menuShowError("Send a ROM over USB, or put one on the SD card");
         return;
     }
 
@@ -1018,6 +1234,14 @@ static bool installRom(const uint8_t* data, uint32_t size, bool wantSwap) {
     // firmware rather than run on nothing.
     const bool cartMissing = !g_nes.mapper;
     if (cartMissing) {
+        // Without a built-in image there is nothing to fall back to, so the
+        // console goes back to the picker instead of running on no mapper at
+        // all. Halting would be worse than it sounds here: the user can still
+        // send another ROM over USB, and haltWithError() takes that away.
+        if (!HAVE_EMBEDDED_ROM) {
+            g_menuRequested.store(true, std::memory_order_relaxed);
+            return ok;
+        }
         const size_t embeddedSize = (size_t)(rom_end - rom_start);
         bool restored = false;
         try {
@@ -1081,7 +1305,7 @@ static RomApplyResult applyRomRequest() {
         // A separate datagram, because the END ACK went out from the UDP task
         // the moment the CRC checked — holding that ACK until the card write
         // finished would stall the sender across a ~1-2s write.
-        const bool canReply = g_udpSock.load() >= 0;
+        const bool canReply = g_romSaveReplyTo.via != ReplyVia::None;
         if (canReply) {
             uint8_t event[UDP_ROM_SAVE_EVENT_SIZE] = {};
             event[0] = 'N';
@@ -1091,8 +1315,7 @@ static RomApplyResult applyRomRequest() {
             event[4] = g_romSession & 0xFF;
             event[5] = g_romSession >> 8;
             event[6] = (uint8_t)saveStatus;
-            ::sendto(g_udpSock.load(), event, sizeof(event), 0, (const sockaddr*)&g_romSaveReplyTo,
-                     sizeof(g_romSaveReplyTo));
+            replySend(g_romSaveReplyTo, event, sizeof(event));
         }
         Serial.printf("ROM: save '%s' -> %s\n", g_romSaveName, sdStatusText(saveStatus));
     }
@@ -1500,8 +1723,8 @@ static bool g_sdListingChanged = false;
 // The whole listing is built once and then sliced, rather than scanning the
 // card per datagram: a rescan between parts could see a different set of files
 // and produce a reply whose parts do not describe one moment in time.
-static void sendSdListing(const sockaddr_in& to, uint16_t seq) {
-    if (g_udpSock.load() < 0) return;
+static void sendSdListing(const ReplySink& to, uint16_t seq) {
+    if (to.via == ReplyVia::None) return;
 
     static SdRomEntry entries[SD_ROM_MAX_FILES];
     // Called unconditionally rather than behind sdRomMounted(): the scan now
@@ -1513,7 +1736,7 @@ static void sendSdListing(const sockaddr_in& to, uint16_t seq) {
     // creatable), so testing first would answer Ok with an empty listing for a
     // card that is no longer there.
     if (!sdRomMounted()) {
-        sendSdAck(g_udpSock.load(), to, UDP_SD_OP_LIST, seq, SdStatus::NotMounted);
+        sendSdAck(to, UDP_SD_OP_LIST, seq, SdStatus::NotMounted);
         return;
     }
     uint64_t totalBytes = 0, freeBytes = 0;
@@ -1565,7 +1788,7 @@ static void sendSdListing(const sockaddr_in& to, uint16_t seq) {
             memcpy(datagram + offset, e.name, nameLen);
             offset += nameLen;
         }
-        ::sendto(g_udpSock.load(), datagram, offset, 0, (const sockaddr*)&to, sizeof(to));
+        replySend(to, datagram, offset);
     }
     Serial.printf("SD: listed %d entries in %d part(s)\n", count, nparts);
 }
@@ -1607,7 +1830,7 @@ static void applySdRequest() {
     }
     if (listingChanged) g_sdListingChanged = true;
 
-    if (g_udpSock.load() >= 0) sendSdAck(g_udpSock.load(), g_sdReplyTo, op, seq, status);
+    sendSdAck(g_sdReplyTo, op, seq, status);
     // Cleared last, for the same reason the ROM latch is: until this store the
     // UDP task refuses further requests, which is what keeps g_sdArgA/B stable
     // for the duration of the work above.
@@ -1690,6 +1913,10 @@ static void menuLoop() {
     }
 
     if (result.action == MenuResult::Action::LaunchEmbedded) {
+        if (!HAVE_EMBEDDED_ROM) {
+            menuShowError("no built-in ROM");
+            return;
+        }
         const size_t embeddedSize = (size_t)(rom_end - rom_start);
         const bool ok = installRom(rom_start, (uint32_t)embeddedSize, false);
         if (!ok) {

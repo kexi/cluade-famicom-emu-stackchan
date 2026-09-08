@@ -114,6 +114,15 @@ fn mirrored() -> Vec<(&'static str, u64)> {
         ("UDP_SD_CHUNK", rust::SD_CHUNK as u64),
         ("SD_ROM_MAX_FILES", rust::SD_MAX_FILES as u64),
         ("ROM_SESSION_TIMEOUT_MS", rust::ROM_SESSION_TIMEOUT_MS),
+        ("UDP_TYPE_PROV", rust::TYPE_PROV as u64),
+        ("UDP_PROV_OP_SET", rust::PROV_OP_SET as u64),
+        ("UDP_PROV_OP_STATUS", rust::PROV_OP_STATUS as u64),
+        ("UDP_PROV_OP_APPLY", rust::PROV_OP_APPLY as u64),
+        ("UDP_PROV_ACK_SIZE", rust::PROV_ACK_SIZE as u64),
+        ("UDP_PROV_STATUS_SIZE", rust::PROV_STATUS_SIZE as u64),
+        ("WIFI_SSID_MAX", rust::WIFI_SSID_MAX as u64),
+        ("WIFI_PASS_MAX", rust::WIFI_PASS_MAX as u64),
+        ("SERIAL_CRC_SIZE", rust::SERIAL_CRC_SIZE as u64),
     ]
 }
 
