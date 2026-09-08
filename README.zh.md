@@ -2,7 +2,9 @@
 
 在浏览器中运行的红白机(NES / Famicom)模拟器。核心用 C++ 编写,通过 Emscripten 编译为 WebAssembly。在此之上还有一层"玩硬件"的功能——可以点击弄断的60针卡边连接器、可以倾斜以模拟卡带没插到底的卡带、以及可以探测任意引脚的示波器。
 
-**▶ 试玩: https://goroman.github.io/cluade-famicom-emu/**
+**▶ 试玩本分支: https://kexi.github.io/cluade-famicom-emu-stackchan/** — 模拟器，以及 Stack-chan 烧录 (桌面版 Chrome / Edge)
+
+**▶ 原版: https://goroman.github.io/cluade-famicom-emu/**
 
 用"打开ROM"载入你自己的 .NES 文件(iNES格式)即可启动。支持桌面端与 Android Chrome。
 

@@ -2,7 +2,9 @@
 
 Webブラウザで動くファミコン(NES)エミュレータ。コアは C++ で書き、Emscripten で WebAssembly にコンパイルしています。その上に「ハードウェアで遊ぶ」レイヤーを載せました——クリックで断線させられる60ピンのカードエッジ、傾けて半挿しを再現できるカセット、任意のピンにプローブを当てられるオシロスコープ。
 
-**▶ 遊ぶ: https://goroman.github.io/cluade-famicom-emu/**
+**▶ このフォークで遊ぶ: https://kexi.github.io/cluade-famicom-emu-stackchan/** — エミュレータと ｽﾀｯｸﾁｬﾝ の書き込み (デスクトップの Chrome / Edge)
+
+**▶ 本家: https://goroman.github.io/cluade-famicom-emu/**
 
 「ROMを開く」から手持ちの .NES ファイル(iNES形式)を読み込むと起動します。PC・Android Chrome 対応。
 

@@ -2,7 +2,9 @@
 
 A Famicom (NES) emulator that runs in the browser **and on an M5Stack CoreS3 (Stack-chan)**. Fork of [GOROman/cluade-famicom-emu](https://github.com/GOROman/cluade-famicom-emu), which adds the embedded port and lets the browser's hardware playground — the breakable 60-pin cartridge connector, the tiltable half-inserted cart — drive the physical device over WiFi.
 
-**▶ Play the original web version: https://goroman.github.io/cluade-famicom-emu/**
+**▶ Play this fork: https://kexi.github.io/cluade-famicom-emu-stackchan/** — the emulator, plus the Stack-chan flasher (Chrome/Edge on the desktop).
+
+**▶ Play the original: https://goroman.github.io/cluade-famicom-emu/**
 
 Open any .NES file (iNES format) with "Open ROM". Works on desktop and Android Chrome.
 
