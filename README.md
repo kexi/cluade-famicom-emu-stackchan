@@ -20,19 +20,14 @@ Open any .NES file (iNES format) with "Open ROM". Works on desktop and Android C
 - **The cartridge connector fault model runs on the device too.** All 60 pins can be broken at runtime; the healthy path costs a single branch, so full speed is kept until you start breaking pins.
 
 ### Browser → device mirroring
-Serve the web UI locally and add `?device=<CoreS3 mDNS name or IP>` (both are shown on the device at boot):
+Open the page and press **ｽﾀｯｸﾁｬﾝ** in the toolbar. The board is driven over USB with Web Serial — no relay process, which is what lets this work from a static host like GitHub Pages.
 
-```sh
-just serve            # serves web/ and relays /api/* to the device as UDP
-# then open http://localhost:8000/?device=stackchan-xxxxxx.local
-```
-
-The device advertises itself over mDNS as `stackchan-<last 3 bytes of its MAC>.local`, so the name survives a DHCP lease change. `dns-sd -B _nes._udp` lists every board on the LAN. See [m5stack/README.md](m5stack/README.md) for details.
+Chrome or Edge on the desktop only; Safari, iOS and Android have no Web Serial, and the button does not appear there.
 
 Now the connector panel drives both emulators at once: tilt the cart and the Stack-chan glitches with the page, blow on it 💨, re-insert (which also presses RESET — reseating alone won't un-crash a wedged CPU, exactly like the real thing), and the master volume slider sets the device speaker. Protocol details (UDP types 0/1/2) are in [m5stack/README.md](m5stack/README.md).
 
 ### Device CLI (`cli/`)
-A single Rust binary that speaks the device's UDP protocol directly, so ROM writes, swaps and launches can be driven from a script — or an AI — instead of a browser. No relay process is involved: `stackchan sd ls` talks to the board, not to `just serve`.
+A single Rust binary that speaks the device's UDP protocol directly, so ROM writes, swaps and launches can be driven from a script — or an AI — instead of a browser. `stackchan sd ls` talks to the board directly over UDP, so it reaches any device on the LAN — which the browser cannot, having no way to send UDP.
 
 ```sh
 just cli-build                                  # cli/target/release/stackchan
@@ -59,7 +54,7 @@ The whole toolchain — clang, Emscripten, PlatformIO, cargo, uv, just, lefthook
 | Device CLI (SD / ROM / debug / input) | `stackchan --help`, [cli/README.md](cli/README.md) |
 | Pro Controller → UDP | `just procon <device>` |
 | Build web (WASM) | `just build-web` |
-| Serve web + device relay | `just serve` |
+| Serve web locally | `just serve` |
 | Core syntax check (both modes) | `just check` |
 
 ## Features (web version)
@@ -107,7 +102,6 @@ Load an FCEUX **.fm2** movie with the TAS button. Playback power-cycles with the
 | Parameter | Effect |
 |-----------|--------|
 | `rom=<URL>` | Fetch and boot a .NES file from a URL (the host must allow CORS — GitHub raw does) |
-| `device=<name\|IP>` | Mirror connector faults, reset and volume to an M5Stack on the LAN — `stackchan-xxxxxx.local` or a literal IP (needs `just serve`) |
 | `debug=1` | Start with the debug panel open |
 | `pin=0` / `pin=1` | Hide / show the connector panel (shown by default) |
 | `clock=<Hz>` | Clock frequency, 1–1789773 |
@@ -146,20 +140,19 @@ Pass a different frame count when a core change needs a longer host run, for exa
 ## Run locally
 
 ```sh
-just serve       # http://localhost:8000/ — also relays /api/* to the device
+just serve       # http://localhost:8000/
 ```
 
 - Desktop: http://localhost:8000/
-- With a CoreS3 on the same network: http://localhost:8000/?device=stackchan-xxxxxx.local
 
 ## Flashing and driving the device from a browser
 
 The published page can talk to a CoreS3 over USB with no relay process, using
-Web Serial. A **実機** button appears in the toolbar when the browser supports it,
+Web Serial. A **ｽﾀｯｸﾁｬﾝ** button appears in the toolbar when the browser supports it,
 opening a panel that flashes the firmware and stores WiFi credentials. Once
 connected, the connector pins, master volume, RESET, ROM transfer and SD
 management all drive the real device — the same page, the same panels, with USB
-standing in for the relay.
+standing in for what used to be a relay process.
 
 - **Chrome / Edge on the desktop only.** Safari, iOS and Android have no Web
   Serial; the flasher says so rather than failing silently.
@@ -169,8 +162,8 @@ standing in for the relay.
 - Provisioning is accepted **over USB only**. The device answers any host on the
   LAN, so taking credentials over WiFi would let anyone on the network re-point
   someone else's board.
-- `just serve` is still the way to reach a board that is not plugged into this
-  machine, and is unchanged.
+- A board that is not plugged into this machine is reached with the `stackchan`
+  CLI, which speaks the device's UDP protocol directly — no relay either.
 
 ## Deploy (GitHub Pages)
 
@@ -192,7 +185,7 @@ core/     C++ emulator core (shared by web and M5Stack)
   nes.cpp        bus, 60-pin fault model, oscilloscope probe, WASM C API
 m5stack/  CoreS3 frontend (PlatformIO) — display DMA, speaker, UDP input, pin mirror
 cli/      Rust CLI — the UDP protocol as a single binary (SD, ROM, debug, mDNS, input)
-tools/    serve_web.py (web server + device relay)
+tools/    verify/profile helpers
 web/      frontend (index.html / main.js / i18n.js / audio-worklet.js) + WASM output
 flake.nix / justfile   reproducible toolchain and task runner
 build.sh  Emscripten build + version stamping

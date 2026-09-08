@@ -116,16 +116,18 @@ cli-clippy:
 build-web:
     ./build.sh
 
-# Web 版をローカル配信 + 端子状態を実機へ UDP 中継 (http://localhost:8000)
-# 実機に反映するには http://localhost:8000/?device=stackchan-xxxxxx.local を開く
-# (起動画面に出る IP を直接指定してもよい)
+# Web 版をローカル配信 (http://localhost:8000)
+#
+# 中継はもう無い。実機はブラウザから USB (Web Serial) で直接掴むので、
+# 配信するだけでよい。python の http.server を使うのは、静的配信に
+# 依存を足す理由が無いため
 serve port='8000':
-    uv run tools/serve_web.py --port {{port}}
+    cd web && python3 -m http.server {{port}}
 
 # 実機の SD カード内の ROM 一覧を表示 (host は CoreS3 の IP または mDNS 名)
 #
 # 先に just cli-build が要る。CLI が type 5 の分割応答を自前で組み立てるので、
-# 中継サーバー (just serve) もブラウザも要らず実機と直接話す
+# ブラウザも要らず実機と直接話す (UDP なので LAN 上のどの機体にも届く)
 sd-list host:
     cli/target/release/stackchan --host {{host}} sd ls
 

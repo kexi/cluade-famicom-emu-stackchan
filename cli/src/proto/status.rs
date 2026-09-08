@@ -3,7 +3,7 @@
 //! `SdStatus` は `m5stack/src/sd_rom.h` の enum で、メニュー・type 4 の ACK・
 //! type 5 の応答が同じ値を使う。`RomStatus` は `UDP_ROM_STATUS_*`。
 //!
-//! 表示文は `tools/serve_web.py` の `SD_STATUS_TEXT` / `ROM_STATUS_NAMES` と
+//! 表示文は `web/i18n.js` の SD_STATUS_KEYS / ROM_STATUS_KEYS と
 //! 揃えてある。ユーザーが Web UI と CLI を行き来しても同じ言葉が出るように。
 
 use std::fmt;
@@ -57,7 +57,7 @@ impl SdStatus {
     }
 
     /// 待てば解ける状態か。`Busy` だけは「答え」であって失敗ではないので、
-    /// 再試行回数を消費せずに待ち直してよい (`serve_web.py` の
+    /// 再試行回数を消費せずに待ち直してよい (`web/serial.js` の
     /// `SD_BUSY_DEADLINE_S` と同じ扱い)
     pub fn is_busy(self) -> bool {
         self == Self::Busy

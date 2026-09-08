@@ -170,7 +170,7 @@
     //
     // refreshMaster() calls this during setup, before the mirror block further
     // down has been evaluated, so route through a flag the mirror sets once it
-    // is actually ready. Calling mirrorVolume directly would touch `deviceIp`
+    // is actually ready. Calling mirrorVolume directly would touch the link
     // in its temporal dead zone and throw.
     if (mirrorReady) mirrorVolume(muted ? 0 : masterVolume);
   }
@@ -1063,43 +1063,14 @@
   // The browser cannot speak UDP, so this POSTs to the local server (see
   // tools/serve_web.py), which relays it as a type=1 packet.
   const MIRROR_MIN_INTERVAL_MS = 66;
-  const deviceIp = (() => {
-    // Query string wins over the stored value so a link can always retarget.
-    const fromQuery = new URLSearchParams(location.search).get('device');
-    if (fromQuery) {
-      try {
-        localStorage.setItem('nesDeviceIp', fromQuery);
-      } catch (e) {
-        /* private mode */
-      }
-      return fromQuery;
-    }
-    try {
-      return localStorage.getItem('nesDeviceIp') || '';
-    } catch (e) {
-      return '';
-    }
-  })();
-
-  // How this page reaches the device.
-  //
-  // Two transports, because neither covers every case. `just serve` relays over
-  // the network and is the only way to reach a board that is not plugged into
-  // this machine — but it needs a process running, which a page served from
-  // GitHub Pages cannot assume. USB needs no relay at all and works on a board
-  // with no WiFi configured, but only in Chrome/Edge on the desktop and only
-  // for the board on the end of the cable.
-  //
-  // The whole page talks through this object, so the two differ in one place
-  // rather than at each of the call sites that used to hold a fetch().
   // Held by NesSerial rather than here: the flasher panel opens the same port,
   // and a SerialPort cannot be opened twice.
   const serialLink = () => window.NesSerial?.link() ?? null;
 
-  const usingSerial = () => serialLink() !== null;
-  // Either transport counts as "there is a device": the UI rows keyed off this
-  // used to test for a hostname, which USB does not have.
-  const deviceReady = () => usingSerial() || deviceIp !== '';
+  // USB is the only way this page reaches a device, so "connected" and "ready"
+  // are the same question. The relay that used to answer it over the network is
+  // gone; see the note on the transport in serial.js.
+  const deviceReady = () => serialLink() !== null;
 
   let mirrorLastSent = 0;
   let mirrorPending = null; // newest mask held back by the throttle
@@ -1116,19 +1087,9 @@
 
   function mirrorPost(mask) {
     mirrorLastSent = performance.now();
-    if (usingSerial()) {
-      serialLink()
-        .send(window.NesProto.buildPins(mask))
-        .catch(() => warnOnce('pin mirror: the USB link stopped answering'));
-      return;
-    }
-    fetch('/api/pins', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host: deviceIp, mask: mask.toString(16).padStart(16, '0') }),
-    }).catch(() => {
-      warnOnce('pin mirror: cannot reach the relay at /api/pins — is `just serve` running?');
-    });
+    serialLink()
+      .send(window.NesProto.buildPins(mask))
+      .catch(() => warnOnce('pin mirror: the USB link stopped answering'));
   }
 
   // Throttled so a tilted cart re-rolling every frame cannot swamp the link,
@@ -1167,21 +1128,9 @@
 
   function volPost(level) {
     volLastSent = performance.now();
-    if (usingSerial()) {
-      serialLink()
-        .send(window.NesProto.buildCtrl(window.NesProto.CTRL_VOLUME, level))
-        .catch(() => warnOnce('volume mirror: the USB link stopped answering'));
-      return;
-    }
-    fetch('/api/volume', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host: deviceIp, volume: level }),
-    }).catch(() => {
-      if (mirrorWarned) return;
-      mirrorWarned = true;
-      console.warn('pin mirror: cannot reach the relay at /api/volume — is `just serve` running?');
-    });
+    serialLink()
+      .send(window.NesProto.buildCtrl(window.NesProto.CTRL_VOLUME, level))
+      .catch(() => warnOnce('volume mirror: the USB link stopped answering'));
   }
 
   function mirrorVolume(gain) {
@@ -1216,21 +1165,9 @@
   // re-fetch the reset vector, same as pressing RESET on real hardware.
   function mirrorResetNow() {
     if (!deviceReady()) return;
-    if (usingSerial()) {
-      serialLink()
-        .send(window.NesProto.buildCtrl(window.NesProto.CTRL_RESET, 0))
-        .catch(() => warnOnce('reset: the USB link stopped answering'));
-      return;
-    }
-    fetch('/api/reset', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host: deviceIp }),
-    }).catch(() => {
-      if (mirrorWarned) return;
-      mirrorWarned = true;
-      console.warn('pin mirror: cannot reach the relay at /api/reset — is `just serve` running?');
-    });
+    serialLink()
+      .send(window.NesProto.buildCtrl(window.NesProto.CTRL_RESET, 0))
+      .catch(() => warnOnce('reset: the USB link stopped answering'));
   }
 
   // Bypasses the throttle. For user actions that must land immediately.
@@ -1252,7 +1189,7 @@
   // the button can stay disabled for the whole transfer instead of guessing.
   //
   // Offered only when a device is configured — without one there is nowhere to
-  // send to. Revealed here rather than where deviceIp is resolved so the whole
+  // send to. Revealed on connect rather than at load so the whole
   // feature reads as one block.
   const DEVICE_ROM_MAX = 1024 * 1024; // matches ROM_MAX_SIZE on the device
   const swapDeviceRow = document.getElementById('swap-device-row');
@@ -1299,14 +1236,6 @@
   sdSaveCheck.addEventListener('change', syncSdSaveInputs);
   syncSdSaveInputs();
 
-  // Device verdicts, as the relay maps them onto HTTP.
-  const DEVICE_ROM_ERRORS = {
-    409: 'deviceBusy',
-    413: 'deviceTooBig',
-    422: 'deviceUnsupported',
-    504: 'deviceNoAnswer',
-  };
-
   // Transfer verdicts keyed by the device's own RomStatus, mirroring
   // ROM_STATUS_NAMES in serve_web.py. Distinct from SD_STATUS_KEYS: the two
   // enums share small integers but mean different things, so 1 is a busy
@@ -1321,54 +1250,6 @@
     8: 'deviceUnsupported',
     9: 'deviceFail',
   };
-
-  // Pick the message for a failed /api/rom/url.
-  //
-  // Three unrelated things answer on this route — the download, the pre-flight
-  // iNES check and the device itself — and the HTTP code alone cannot tell them
-  // apart: 422 covers both a non-iNES download and a header the device rejected,
-  // and 504 covers both a fetch that timed out and a device that stayed silent.
-  // So the relay tags its pre-transfer failures stage:"download", and a device
-  // verdict is the one that carries a numeric `status` (see _rom_failure vs
-  // RomDownloadError in serve_web.py).
-  function sdUrlErrorKey(httpStatus, data) {
-    const failedBeforeSending = data && data.stage === 'download';
-    if (failedBeforeSending) {
-      // Nothing went over the wire, so none of these blame the CoreS3.
-      if (httpStatus === 422) return 'sdUrlNotRom';
-      if (httpStatus === 400) return 'sdUrlBad';
-      if (httpStatus === 413) return 'deviceTooBig';
-      return 'sdUrlDownloadFail';
-    }
-    const isDeviceVerdict = data && typeof data.status === 'number';
-    if (isDeviceVerdict) return ROM_STATUS_KEYS[data.status] || 'deviceFail';
-    // Untagged and statusless: the transfer stage failed without a verdict —
-    // a silent device (504) or a relay-side send error.
-    return DEVICE_ROM_ERRORS[httpStatus] || 'sdUrlFail';
-  }
-
-  // Consume the relay's NDJSON stream, handing each complete line to `onLine`.
-  //
-  // Split here rather than accumulating the whole body: the point of asking for
-  // progress is to show it while the transfer is still running.
-  async function readNdjson(res, onLine) {
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let nl;
-      while ((nl = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (line) onLine(JSON.parse(line));
-      }
-    }
-    const tail = buf.trim();
-    if (tail) onLine(JSON.parse(tail));
-  }
 
   async function sendRomToDevice() {
     const hasCart = cartPrg && cartChr;
@@ -1399,116 +1280,41 @@
     }
     swapDeviceBtn.disabled = true;
     statusEl.textContent = t('deviceSending');
-    if (usingSerial()) {
-      try {
-        const verdict = await window.NesSerial.sendRom(
-          serialLink(),
-          img,
-          { swap: noReset, save: wantsSave ? saveName : null, noLoad: wantsSave && sdNoLoadCheck.checked },
-          (sent, total) => {
-            statusEl.textContent = t('deviceSending') + ' ' + Math.round((sent / total) * 100) + '%';
-          },
-        );
-        // Same three outcomes the relay reports, read straight off the protocol
-        // instead of out of an HTTP status: refused, saved, or landed but with
-        // the card's verdict still unknown.
-        const refused = !verdict.ok && !verdict.save;
-        if (refused) {
-          statusEl.textContent = t(ROM_STATUS_KEYS[verdict.status] || 'deviceFail');
-          return;
-        }
-        if (verdict.save?.unknown) {
-          statusEl.textContent = t('sdSaveUnknown');
-          refreshSdList();
-          return;
-        }
-        const cardRefused = verdict.save && verdict.save.status !== 0;
-        if (cardRefused) {
-          statusEl.textContent = sdStatusMessage(verdict.save.status);
-          return;
-        }
-        if (wantsSave) {
-          statusEl.textContent = t('sdSaved', { name: saveName });
-          refreshSdList();
-          return;
-        }
-        statusEl.textContent = t(noReset ? 'deviceSentSwap' : 'deviceSent');
-      } catch (err) {
-        console.warn('[nes] rom send over USB failed:', err);
-        statusEl.textContent = t('deviceFail');
-      } finally {
-        swapDeviceBtn.disabled = false;
-      }
-      return;
-    }
     try {
-      const res = await fetch(
-        '/api/rom?host=' +
-          encodeURIComponent(deviceIp) +
-          '&swap=' +
-          (noReset ? 1 : 0) +
-          '&progress=1' +
-          (wantsSave ? '&save=' + encodeURIComponent(saveName) : '') +
-          (wantsSave && sdNoLoadCheck.checked ? '&load=0' : ''),
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: img,
+      const verdict = await window.NesSerial.sendRom(
+        serialLink(),
+        img,
+        { swap: noReset, save: wantsSave ? saveName : null, noLoad: wantsSave && sdNoLoadCheck.checked },
+        (sent, total) => {
+          statusEl.textContent = t('deviceSending') + ' ' + Math.round((sent / total) * 100) + '%';
         },
       );
-      // A rejection before the stream opens (bad host, oversized body) still
-      // arrives as a plain status code, so keep the original mapping for it.
-      if (!res.ok) {
-        statusEl.textContent = t(DEVICE_ROM_ERRORS[res.status] || 'deviceFail');
+      // Same three outcomes the relay reports, read straight off the protocol
+      // instead of out of an HTTP status: refused, saved, or landed but with
+      // the card's verdict still unknown.
+      const refused = !verdict.ok && !verdict.save;
+      if (refused) {
+        statusEl.textContent = t(ROM_STATUS_KEYS[verdict.status] || 'deviceFail');
         return;
       }
-      let verdict = null;
-      await readNdjson(res, (line) => {
-        const isProgress = line.chunks > 0 && line.ok === undefined && !line.error;
-        if (isProgress) {
-          statusEl.textContent = t('deviceSending') + ' ' + Math.round((line.sent / line.chunks) * 100) + '%';
-          return;
-        }
-        verdict = line;
-      });
-      if (verdict && verdict.ok) {
-        // A successful save is worth naming: the point of the checkbox is that
-        // the ROM is now on the card, which "sent" alone would not confirm.
-        if (verdict.sd) {
-          statusEl.textContent = t('sdSaved', { name: verdict.name || saveName });
-          refreshSdList();
-          return;
-        }
-        statusEl.textContent = t(noReset ? 'deviceSentSwap' : 'deviceSent');
+      if (verdict.save?.unknown) {
+        statusEl.textContent = t('sdSaveUnknown');
+        refreshSdList();
         return;
       }
-      // The image reached the device but the card refused it. The transfer is
-      // not the thing that failed, so the message has to name the SD status
-      // rather than fall through to "failed to send".
-      if (verdict && verdict.sd) {
-        // A null status is the relay saying the save event never arrived, not
-        // that the card refused the image: the transfer did land, so the write
-        // may well have succeeded. Refresh so the listing answers what the
-        // device would not.
-        if (verdict.sd.status == null) {
-          statusEl.textContent = t('sdSaveUnknown');
-          refreshSdList();
-          return;
-        }
-        statusEl.textContent = sdStatusMessage(verdict.sd.status);
+      const cardRefused = verdict.save && verdict.save.status !== 0;
+      if (cardRefused) {
+        statusEl.textContent = sdStatusMessage(verdict.save.status);
         return;
       }
-      // No verdict means the stream died mid-transfer: the relay committed to
-      // 200 in its headers, so there is no status code left to explain it.
-      if (!verdict) {
-        statusEl.textContent = t('deviceFail');
+      if (wantsSave) {
+        statusEl.textContent = t('sdSaved', { name: saveName });
+        refreshSdList();
         return;
       }
-      statusEl.textContent = t(DEVICE_ROM_ERRORS[verdict.http] || 'deviceFail');
+      statusEl.textContent = t(noReset ? 'deviceSentSwap' : 'deviceSent');
     } catch (err) {
-      // The relay itself is unreachable — a device that merely stayed silent
-      // comes back as 504 above, not as a rejected fetch.
-      console.warn('[nes] rom send failed:', err);
+      console.warn('[nes] rom send over USB failed:', err);
       statusEl.textContent = t('deviceFail');
     } finally {
       swapDeviceBtn.disabled = false;
@@ -1616,19 +1422,21 @@
     return (v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)) + units[i];
   }
 
-  // The op each /api/sd/* route stands for, so the serial transport can reach the
-  // firmware directly with the callers unchanged.
-  // The serial half of sdCommand, kept apart so the HTTP path reads exactly as it
-  // did. Reports failures through the same three branches, because the
-  // distinction that matters — an unanswered DELETE or RENAME is *undetermined*,
-  // never "failed" — is a property of the protocol and not of the transport.
-  async function sdCommandSerial(path, body) {
-    const op = SD_OPS[path];
-    const result = await window.NesSerial.sdCommand(serialLink(), op, body ?? {});
+  // The four SD operations, matching UDP_SD_OP_* in m5stack/src/config.h.
+  const SD_OP = { list: 0, load: 1, delete: 2, rename: 3 };
+
+  // Run one SD command and return its parsed body, or null once the failure has
+  // been reported. Centralised so every caller reports failures the same way.
+  //
+  // The distinction that matters belongs to the protocol, not the transport: an
+  // unanswered DELETE or RENAME is *undetermined*, never "failed". The firmware
+  // keeps no per-seq result, so re-sending one would re-run it and report
+  // NOT_FOUND for something that had already succeeded.
+  async function sdCommand(op, args) {
+    const result = await window.NesSerial.sdCommand(serialLink(), op, args ?? {});
     if (result.ok) {
-      const listing = op === SD_OPS['/api/sd/list'];
+      const listing = op === SD_OP.list;
       if (!listing) return result;
-      // Shaped like the relay's JSON so renderSdList() needs no changes.
       return {
         entries: result.entries,
         total: Number(result.totalBytes),
@@ -1641,45 +1449,6 @@
       return null;
     }
     sdStatusEl.textContent = typeof result.status === 'number' ? sdStatusMessage(result.status) : t('sdFail');
-    return null;
-  }
-
-  const SD_OPS = {
-    '/api/sd/list': 0,
-    '/api/sd/load': 1,
-    '/api/sd/delete': 2,
-    '/api/sd/rename': 3,
-  };
-
-  // Run one SD command and return its parsed body, or null once the failure has
-  // been reported. Centralised so every caller reports failures the same way —
-  // and so the two transports differ only here.
-  async function sdCommand(path, body) {
-    if (usingSerial()) return sdCommandSerial(path, body);
-    const res = await fetch(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host: deviceIp, ...body }),
-    });
-    const data = await res.json().catch(() => null);
-    if (res.ok) return data;
-    // The relay flags an unanswered DELETE or RENAME rather than retrying it —
-    // the firmware caches no result per seq, so a retransmission would re-run
-    // the op and report NOT_FOUND or EXISTS for something that succeeded.
-    // Silence therefore means undetermined, and saying "failed" would be wrong.
-    if (data && data.unknown) {
-      sdStatusEl.textContent = t('sdSaveUnknown');
-      refreshSdList();
-      return null;
-    }
-    if (data && typeof data.error === 'string' && / too long$/.test(data.error)) {
-      // The relay refuses an over-long name with no numeric status, which would
-      // otherwise fall through to the generic sdFail and hide the one thing the
-      // user can act on.
-      sdStatusEl.textContent = t('sdNameTooLong');
-      return null;
-    }
-    sdStatusEl.textContent = data && typeof data.status === 'number' ? sdStatusMessage(data.status) : t('sdFail');
     return null;
   }
 
@@ -1730,11 +1499,11 @@
   }
 
   async function refreshSdList() {
-    if (!deviceIp || sdBusy) return;
+    if (!deviceReady() || sdBusy) return;
     setSdBusy(true);
     sdStatusEl.textContent = t('sdLoading');
     try {
-      const data = await sdCommand('/api/sd/list', {});
+      const data = await sdCommand(SD_OP.list);
       if (!data) return;
       sdFiles = data.files || [];
       renderSdList();
@@ -1756,7 +1525,7 @@
     setSdBusy(true);
     sdStatusEl.textContent = t('sdBooting', { name });
     try {
-      const ok = await sdCommand('/api/sd/load', { name });
+      const ok = await sdCommand(SD_OP.load, { name });
       if (ok) sdStatusEl.textContent = t('sdBooted', { name });
     } catch (err) {
       console.warn('[nes] sd load failed:', err);
@@ -1782,7 +1551,7 @@
     }
     setSdBusy(true);
     try {
-      const ok = await sdCommand('/api/sd/rename', { name, to });
+      const ok = await sdCommand(SD_OP.rename, { name, to });
       if (!ok) return;
       sdStatusEl.textContent = t('sdRenamed', { name: to });
     } catch (err) {
@@ -1800,7 +1569,7 @@
     if (!confirm(t('sdDeleteConfirm', { name }))) return;
     setSdBusy(true);
     try {
-      const ok = await sdCommand('/api/sd/delete', { name });
+      const ok = await sdCommand(SD_OP.delete, { name });
       if (!ok) return;
       sdStatusEl.textContent = t('sdDeleted', { name });
     } catch (err) {
@@ -1837,42 +1606,48 @@
     setSdBusy(true);
     sdStatusEl.textContent = t('sdUrlFetching');
     try {
-      const res = await fetch(
-        '/api/rom/url?host=' +
-          encodeURIComponent(deviceIp) +
-          '&url=' +
-          encodeURIComponent(url) +
-          (wantsSave ? '&save=' + encodeURIComponent(saveName) : '') +
-          (wantsSave && sdNoLoadCheck.checked ? '&load=0' : ''),
-        { method: 'POST' },
-      );
-      const data = await res.json().catch(() => null);
+      // The browser does the download. With the relay gone there is nothing else
+      // to do it, and the device has no TLS stack of its own — so this works
+      // only where the host allows cross-origin reads. A blocked host is
+      // reported as a download failure rather than a device failure.
+      const res = await fetch(url);
       if (!res.ok) {
-        sdStatusEl.textContent = t(sdUrlErrorKey(res.status, data));
+        sdStatusEl.textContent = t('sdUrlDownloadFail');
         return;
       }
-      if (data && data.sd && data.sd.status !== 0) {
-        // Same split as sendRomToDevice: `!== 0` is true for null too, and null
-        // means "no save result" rather than a refusal. The unknown case
-        // refreshes explicitly, because returning from inside the try skips the
-        // refreshSdList() at the end of the function.
-        const unknown = data.sd.status == null;
-        sdStatusEl.textContent = unknown ? t('sdSaveUnknown') : sdStatusMessage(data.sd.status);
-        if (unknown) refreshSdList();
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      const verdict = await window.NesSerial.sendRom(
+        serialLink(),
+        bytes,
+        { save: wantsSave ? saveName : null, noLoad: wantsSave && sdNoLoadCheck.checked },
+        (sent, total) => {
+          sdStatusEl.textContent = t('deviceSending') + ' ' + Math.round((sent / total) * 100) + '%';
+        },
+      );
+      const refused = !verdict.ok && !verdict.save;
+      if (refused) {
+        sdStatusEl.textContent = t(ROM_STATUS_KEYS[verdict.status] || 'deviceFail');
         return;
       }
-      sdStatusEl.textContent = wantsSave ? t('sdSaved', { name: saveName }) : t('deviceSent');
+      if (verdict.save?.unknown) {
+        sdStatusEl.textContent = t('sdSaveUnknown');
+        return;
+      }
+      const cardRefused = verdict.save && verdict.save.status !== 0;
+      sdStatusEl.textContent = cardRefused
+        ? sdStatusMessage(verdict.save.status)
+        : t('sdSaved', { name: saveName || '' });
     } catch (err) {
-      console.warn('[nes] rom url send failed:', err);
-      sdStatusEl.textContent = t('sdUrlFail');
-      return;
+      // A CORS rejection lands here, and for an arbitrary host that is the
+      // likely case.
+      console.warn('[nes] url fetch failed:', err);
+      sdStatusEl.textContent = t('sdUrlDownloadFail');
     } finally {
       setSdBusy(false);
     }
-    if (wantsSave) await refreshSdList();
+    await refreshSdList();
   }
 
-  sdRefreshBtn.addEventListener('click', refreshSdList);
   sdUrlBtn.addEventListener('click', sdSendUrl);
   sdUrlInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') sdSendUrl();
@@ -1882,7 +1657,7 @@
   // the device's own mount. Registered on the same button the panel opens from,
   // whose handler lives further up with the rest of the swap UI.
   onSwapPanelOpen = () => {
-    if (deviceIp && !sdFiles.length) refreshSdList();
+    if (deviceReady() && !sdFiles.length) refreshSdList();
   };
 
   // Everything the mirror needs is now initialised; volume changes may flow.
@@ -1890,7 +1665,7 @@
   // picks up a slider the user had already moved in a previous session.
   mirrorReady = true;
   if (deviceReady()) {
-    console.info(`pin mirror: forwarding connector state to ${usingSerial() ? 'USB' : deviceIp}`);
+    console.info('pin mirror: forwarding connector state over USB');
     mirrorVolume(muted ? 0 : masterVolume);
   }
 
@@ -2519,12 +2294,12 @@
   // there is nothing to switch to.
   const dbgSourceBox = document.getElementById('dbg-source');
   const dbgSrcNote = document.getElementById('dbg-src-note');
-  // Revealed here rather than where deviceIp is resolved: that runs earlier in
-  // the script, while this element's const is still in its temporal dead zone.
-  if (deviceIp) dbgSourceBox.hidden = false;
-  let dbgRemoteWarned = false;
-  let dbgFetchInFlight = false;
-  let dbgLastFetch = 0;
+  // Stays hidden. Reading the device's internal state needs the debug snapshot
+  // (type 3), which the firmware answers only over UDP — the reply is assembled
+  // on the emulation core and addressed with a stored socket, and there is no
+  // relay any more to carry it. The DEBUG panel therefore always shows the
+  // browser's own core; see dispatchPacket() in m5stack/src/main.cpp.
+  dbgSourceBox.hidden = true;
 
   function setDbgSource(which) {
     const remote = which === 'remote';
@@ -2538,12 +2313,6 @@
     }
   }
 
-  function selectLocalRadio() {
-    const r = dbgSourceBox.querySelector('input[value="local"]');
-    if (r) r.checked = true;
-    setDbgSource('local');
-  }
-
   dbgSourceBox.addEventListener('change', (e) => {
     if (e.target.name !== 'dbgsrc') return;
     setDbgSource(e.target.value);
@@ -2552,99 +2321,11 @@
   // Poll the device while the remote source is showing. 200ms matches the panel's
   // own refresh; a request in flight is never doubled up, because the device
   // answers on a frame boundary and a backlog would only add latency.
-  function pollRemoteDebug(now) {
-    if (dbgSource !== remoteSource || !debugOn) return;
-    if (dbgFetchInFlight || now - dbgLastFetch < 200) return;
-    dbgFetchInFlight = true;
-    dbgLastFetch = now;
-    fetch('/api/debug', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      // Ask for waves only while the scope is actually on screen: the flag is
-      // what arms the device's per-sample capture, and it disarms itself once
-      // the requests stop.
-      body: JSON.stringify({ host: deviceIp, waves: debugOn }),
-    })
-      .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error('HTTP ' + r.status))))
-      .then((buf) => {
-        const s = parseSnapshot(buf);
-        if (s) {
-          remoteSnap = s;
-          if (s.waves) waveData = s.waves;
-          dbgSrcNote.textContent = '';
-        }
-      })
-      .catch((err) => {
-        // Fall back to local rather than freeze on a stale snapshot: a panel that
-        // silently stops updating is worse than one that says why.
-        if (!dbgRemoteWarned) {
-          dbgRemoteWarned = true;
-          console.warn('debug monitor: cannot reach the device —', err.message);
-        }
-        dbgSrcNote.textContent = '× ' + err.message;
-        selectLocalRadio();
-      })
-      .finally(() => {
-        dbgFetchInFlight = false;
-      });
-  }
-
-  // ---- debug data source: the local emulator, or a Stack-chan snapshot ----
-  //
-  // The DEBUG panel reads CPU registers, APU shadow registers, work RAM and
-  // arbitrary bytes near PC. Routing all four through one object is what lets the
-  // same rendering code show either machine; the remote implementation just
-  // answers from the last snapshot instead of from WASM memory.
-  //
-  // Deliberately read-only and partial: a snapshot carries 48 bytes around PC,
-  // not the whole address space, so peek() reports -1 outside that window and the
-  // disassembler prints `??` rather than inventing bytes. Only the panels that a
-  // snapshot can actually feed are offered remotely — waveforms, CHR and WRAM
-  // editing stay local-only (see setDbgSource).
-  const SNAP_SIZE = 12 + 0x18 + 2 + 48 + 0x800;
-  const SNAP_APU = 12;
-  const SNAP_PC = SNAP_APU + 0x18;
-  const SNAP_CODE = SNAP_PC + 2;
-  const SNAP_RAM = SNAP_CODE + 48;
-
-  // Scope rows, appended only when the query asked for them: P1,P2,TRI,NOI,DMC,MIX.
-  const SNAP_WAVE = SNAP_RAM + 0x800;
-  const WAVE_W = 280;
-  const WAVE_ROWS = 6;
-
-  function parseSnapshot(buf) {
-    if (!buf || buf.byteLength < SNAP_SIZE) return null;
-    const b = new Uint8Array(buf);
-    const s = {
-      cpu: b.subarray(0, 12),
-      apu: b.subarray(SNAP_APU, SNAP_APU + 0x18),
-      pc: b[SNAP_PC] | (b[SNAP_PC + 1] << 8),
-      code: b.subarray(SNAP_CODE, SNAP_CODE + 48),
-      ram: b.subarray(SNAP_RAM, SNAP_RAM + 0x800),
-      waves: null,
-    };
-    if (buf.byteLength >= SNAP_WAVE + WAVE_W * WAVE_ROWS) {
-      // Repack into what drawWaves already consumes, so the scope needs no
-      // separate remote rendering path. The device pre-decimated to the canvas
-      // width using the same nearest-sample pick, so count === WAVE_W here and
-      // drawWaves' own x->i mapping becomes the identity.
-      const chans = [];
-      for (let r = 0; r < 5; r++) {
-        chans.push(b.subarray(SNAP_WAVE + r * WAVE_W, SNAP_WAVE + (r + 1) * WAVE_W));
-      }
-      // Expansion rows 5-7 have no device-side source; zero keeps them flat.
-      for (let r = 5; r < 8; r++) chans.push(new Uint8Array(WAVE_W));
-      // MIX arrived quantised through drawWaves' own min(1, mix*2) scaling, so
-      // undo exactly that to hand back a float the same code can rescale.
-      const mixRow = b.subarray(SNAP_WAVE + 5 * WAVE_W, SNAP_WAVE + 6 * WAVE_W);
-      const mix = new Float32Array(WAVE_W);
-      for (let i = 0; i < WAVE_W; i++) mix[i] = mixRow[i] / 255 / 2;
-      s.waves = { count: WAVE_W, chans, mix };
-    }
-    return s;
-  }
-  window.__nes = window.__nes || {};
-  window.__nes.parseSnapshot = parseSnapshot;
+  // Nothing to poll: the remote debug source is unavailable without the relay
+  // (see the note on dbgSourceBox). Kept as a no-op because the frame loop calls
+  // it unconditionally, and a name that says why reads better at the call site
+  // than a deleted line.
+  function pollRemoteDebug() {}
 
   const localSource = {
     cpuRegs: () => Module.HEAPU8.subarray(api.cpuRegs(), api.cpuRegs() + 12),
