@@ -73,9 +73,20 @@ static std::atomic<bool> g_menuRequested{false};
 // same way as the other controls so the snapshot is taken between frames, when
 // the CPU state is coherent, rather than mid-instruction from the UDP task.
 static std::atomic<bool> g_debugRequested{false};
-static std::atomic<uint32_t> g_debugReplyIp{0};
-static std::atomic<uint16_t> g_debugReplyPort{0};
-static std::atomic<uint16_t> g_debugSeq{0};
+// Where a debug snapshot goes, latched by whichever transport asked.
+//
+// Plain, not atomic, unlike the two fields it replaces: it is published by the
+// release store on g_debugRequested and read after core 1's acquire load of the
+// same flag, which is the pairing every other latched request here uses (see
+// the ROM staging buffer). The atomics were only ever standing in for that
+// ordering, one field at a time, which is precisely what a sockaddr split
+// across two of them could not give.
+static ReplySink g_debugReplyTo;
+// Echoed in every part of the reply. Plain, like g_debugReplyTo beside it and
+// for the same reason: both are published by the release store on
+// g_debugRequested and read after core 1's matching acquire. Leaving this one
+// atomic would suggest it needed ordering of its own, which it does not.
+static uint16_t g_debugSeq = 0;
 static std::atomic<bool> g_debugWantWaves{false};
 // millis() of the last wave request; the frame loop disarms capture once this
 // goes stale. 0 = never asked.
@@ -107,6 +118,9 @@ static char g_romSaveName[SD_ROM_NAME_MAX] = {};
 // Where to report the save's outcome, since the END ACK has already gone out by
 // the time core 1 writes the card.
 static ReplySink g_romSaveReplyTo;
+// The session the save event must echo. Published by the release store on
+// g_romApplyRequested, like the fields above it.
+static uint16_t g_romSaveSession = 0;
 
 // What one applyRomRequest() call did, for a caller that has to react to it.
 //
@@ -469,6 +483,13 @@ static void handleRomPacket(const ReplySink& from, const uint8_t* packet, int re
         g_romSaveToSd = (g_romPendingFlags & ROM_FLAG_SAVE_SD) != 0 && nameGiven;
         memcpy(g_romSaveName, g_romPendingName, sizeof(g_romSaveName));
         g_romSaveReplyTo = g_romPendingFrom;
+        // Latched beside the reply target, and for the same reason. The save
+        // event is emitted from core 1 after a card write that takes a second or
+        // two, and g_romSession belongs to core 0's transfer state — reading it
+        // live there would stamp the event with whatever session had started in
+        // the meantime, and the sender would discard its own answer as
+        // belonging to someone else.
+        g_romSaveSession = session;
         g_romActive = false;
         // Recorded before the ACK goes out, so even a retry that races the reply
         // finds the transfer already marked complete.
@@ -710,19 +731,20 @@ void dispatchPacket(const ReplySink& from, const uint8_t* packet, int received) 
         return;   // not controller input: leave g_lastRxMs alone
     }
     if (type == UDP_TYPE_DEBUG) {
-        // Only UDP can answer a debug poll: the reply is assembled on core 1
-        // from a snapshot buffer and addressed with a stored sockaddr. Serial
-        // callers get silence rather than a half-supported path, and the web UI
-        // hides the remote debug source unless it is talking over the network.
-        const bool overUdp = from.via == ReplyVia::Udp;
-        if (!overUdp) return;
-        g_debugReplyIp.store(from.peer.sin_addr.s_addr, std::memory_order_relaxed);
-        g_debugReplyPort.store(from.peer.sin_port, std::memory_order_relaxed);
-        g_debugSeq.store((uint16_t)(packet[4] | (packet[5] << 8)), std::memory_order_relaxed);
+        // Ignored while core 1 still owes an answer to the previous request:
+        // the reply fields below would otherwise be rewritten underneath it, and
+        // a 5Hz poller that overlaps its own request would retarget a snapshot
+        // mid-send. Dropping the extra poll is right — the next one is 200ms away.
+        const bool stillOwed = g_debugRequested.load(std::memory_order_acquire);
+        if (stillOwed) return;
+        g_debugReplyTo = from;
+        g_debugSeq = (uint16_t)(packet[4] | (packet[5] << 8));
         const bool wantWaves = packet[6] & UDP_DEBUG_FLAG_WAVES;
         g_debugWantWaves.store(wantWaves, std::memory_order_relaxed);
         if (wantWaves) g_debugWaveAskedMs.store(millis(), std::memory_order_relaxed);
-        g_debugRequested.store(true, std::memory_order_relaxed);
+        // Release, pairing with core 1's acquire: publishes g_debugReplyTo and
+        // the seq above.
+        g_debugRequested.store(true, std::memory_order_release);
         return;
     }
     if (type == UDP_TYPE_ROM) {
@@ -1312,8 +1334,8 @@ static RomApplyResult applyRomRequest() {
             event[1] = 'S';
             event[2] = UDP_PROTOCOL_VERSION;
             event[3] = UDP_TYPE_ROM;
-            event[4] = g_romSession & 0xFF;
-            event[5] = g_romSession >> 8;
+            event[4] = g_romSaveSession & 0xFF;
+            event[5] = g_romSaveSession >> 8;
             event[6] = (uint8_t)saveStatus;
             replySend(g_romSaveReplyTo, event, sizeof(event));
         }
@@ -1363,9 +1385,19 @@ static void updateWaveCapture() {
 }
 
 static void applyDebugRequest() {
-    const bool requested = g_debugRequested.exchange(false, std::memory_order_relaxed);
+    // Acquire, pairing with the release store in dispatchPacket: g_debugReplyTo
+    // and g_debugSeq are plain fields published by that store, so a relaxed load
+    // here would not guarantee this core sees them.
+    const bool requested = g_debugRequested.exchange(false, std::memory_order_acquire);
     if (!requested) return;
-    if (g_udpSock.load() < 0) return;
+    // Copied, not read through: the exchange above reopens the door for the next
+    // request, and the send loop below runs for several datagrams. Reading the
+    // global per part would let a request that lands mid-send retarget the
+    // remaining parts, splitting one snapshot across two peers — and the seq is
+    // already latched, so neither peer could assemble what it received.
+    const ReplySink replyTo = g_debugReplyTo;
+    // A request with nowhere to answer is dropped rather than sent to a stale peer.
+    if (replyTo.via == ReplyVia::None) return;
 
     // Static, not stack: ~3.8KB would be a large chunk of the Arduino loop task's
     // stack, and it is only touched here.
@@ -1375,11 +1407,9 @@ static void applyDebugRequest() {
     const bool withWaves = g_debugWantWaves.load(std::memory_order_relaxed) && g_nes.apu.waveCapture;
     const size_t total = g_nes.buildDebugSnapshot(snapshot, withWaves);
 
-    sockaddr_in to = {};
-    to.sin_family = AF_INET;
-    to.sin_addr.s_addr = g_debugReplyIp.load(std::memory_order_relaxed);
-    to.sin_port = g_debugReplyPort.load(std::memory_order_relaxed);
-    const uint16_t seq = g_debugSeq.load(std::memory_order_relaxed);
+    // Latched with the sink above, for the same reason: the parts of one reply
+    // must all carry the seq the asker sent.
+    const uint16_t seq = g_debugSeq;
 
     // Derived from the payload actually built, so a wave-bearing reply simply
     // uses more parts; the receiver reads the count out of the header.
@@ -1399,15 +1429,20 @@ static void applyDebugRequest() {
         datagram[5] = seq & 0xFF;
         datagram[6] = seq >> 8;
         memcpy(datagram + UDP_DEBUG_HEADER, snapshot + offset, len);
-        ::sendto(g_udpSock.load(), datagram, UDP_DEBUG_HEADER + len, 0, (sockaddr*)&to, sizeof(to));
+        replySend(replyTo, datagram, UDP_DEBUG_HEADER + len);
     }
 
     // Once only: at 5Hz this would otherwise bury every other serial line.
     static bool announced = false;
     if (!announced) {
         announced = true;
-        Serial.printf("DBG: snapshot to %s (%u bytes)\n", IPAddress(to.sin_addr.s_addr).toString().c_str(),
-                      (unsigned)total);
+        const bool overUdp = replyTo.via == ReplyVia::Udp;
+        if (overUdp) {
+            Serial.printf("DBG: snapshot to %s (%u bytes)\n",
+                          IPAddress(replyTo.peer.sin_addr.s_addr).toString().c_str(), (unsigned)total);
+        } else {
+            Serial.printf("DBG: snapshot over USB (%u bytes)\n", (unsigned)total);
+        }
     }
 }
 

@@ -445,6 +445,18 @@ constexpr uint8_t UDP_SD_OP_DELETE = 2;
 // overwrite an existing target (SdStatus::Exists) — the confirmation belongs in
 // the UI that has a user to ask.
 constexpr uint8_t UDP_SD_OP_RENAME = 3;
+// A fifth op must not take 4. The ROM transfer's save event shares the 'N','S'
+// magic and puts UDP_TYPE_ROM (4) in the same byte these ops occupy, which is
+// the only thing telling the two apart — a receiver waiting for one would
+// otherwise be handed the other. Start the next op at 5, or give the save event
+// a magic of its own.
+// Bumped whenever an op is added, so the assert below keeps meaning something:
+// asserting on RENAME alone would still pass on the day someone writes
+// `UDP_SD_OP_FORMAT = 4`, which is exactly the collision this guards.
+constexpr uint8_t UDP_SD_OP_MAX = UDP_SD_OP_RENAME;
+static_assert(UDP_SD_OP_MAX < UDP_TYPE_ROM,
+              "an SD op reached UDP_TYPE_ROM: the save event shares the 'NS' magic and is told "
+              "apart only by this byte. Start the next op at 5, or give the save event its own magic.");
 
 // Reply to LOAD / DELETE / RENAME, one datagram:
 //   [0..1] 'N','S'

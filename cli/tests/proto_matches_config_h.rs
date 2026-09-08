@@ -1,7 +1,7 @@
 //! プロトコル定数が `m5stack/src/config.h` と一致することを検査する。
 //!
 //! 同じ仕様の実装がこのリポジトリには 3 つある — firmware (`config.h`)、
-//! この CLI (`cli/src/proto/constants.rs`)、Python の中継 (`tools/serve_web.py`)。
+//! この CLI (`cli/src/proto/constants.rs`)、ブラウザ (`web/protocol.js`)。
 //! 正本は `config.h` で、ここはその写しが古びていないことを機械的に確かめる。
 //!
 //! **値の食い違いは静かに壊れる。** 型が合っている限りコンパイルは通り、

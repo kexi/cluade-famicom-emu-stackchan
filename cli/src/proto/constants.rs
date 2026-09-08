@@ -2,7 +2,7 @@
 //!
 //! 権威は `m5stack/src/config.h` で、ここはその写し。各定数に対応する C++ 側の
 //! 名前を書いてあるので、食い違いを疑ったときはそちらを引くこと
-//! (`tools/serve_web.py` も同じ値を別に持っており、実装は三重にある)。
+//! (`web/protocol.js` も同じ値を別に持っており、実装は三重にある)。
 
 /// `UDP_PORT`
 pub const DEFAULT_PORT: u16 = 5555;

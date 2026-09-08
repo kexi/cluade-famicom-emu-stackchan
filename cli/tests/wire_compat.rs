@@ -1,12 +1,13 @@
-//! `tools/serve_web.py` が組み立てるバイト列と一致することを確かめる。
+//! 固定したバイト列と一致することを確かめる。
 //!
-//! プロトコルの実装は `m5stack/src/config.h` (権威)、`tools/serve_web.py`、
+//! プロトコルの実装は `m5stack/src/config.h` (権威)、`web/protocol.js`、
 //! そしてこのクレートの三重にある。コード生成で 1 つにまとめるより、
 //! 「既に実機と通信できている実装」の出力そのものを固定値として置くほうが、
 //! 食い違いを直接踏める。
 //!
 //! 期待値は Python 側を実際に走らせて採取したもの。更新するときは
-//! `tools/serve_web.py` の `build_*` を叩いて hex を採り直すこと。
+//! `web/protocol.js` の `build*` を叩いて hex を採り直すこと
+//! (`tools/test_serial_frame.py` が同じ値をブラウザ側と突き合わせている)。
 
 use stackchan::proto::constants::{
     CTRL_RESET, CTRL_VOLUME, DEBUG_FLAG_WAVES, PIN_MASK_ALL_OK, button,
@@ -18,7 +19,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 #[test]
-fn pin_packets_match_serve_web() {
+fn pin_packets_match_the_pinned_bytes() {
     assert_eq!(
         hex(&pins::mask(0x0102, 0x0F)),
         "4e50010102010f00000000000000"
@@ -30,7 +31,7 @@ fn pin_packets_match_serve_web() {
 }
 
 #[test]
-fn control_packets_match_serve_web() {
+fn control_packets_match_the_pinned_bytes() {
     assert_eq!(hex(&ctrl::reset(0x0102)), "4e50010202010100");
     assert_eq!(hex(&ctrl::volume(0, 192)), "4e500102000002c0");
     // ビットの値そのものも Python 側と同じ
@@ -39,7 +40,7 @@ fn control_packets_match_serve_web() {
 }
 
 #[test]
-fn rom_packets_match_serve_web() {
+fn rom_packets_match_the_pinned_bytes() {
     let options = rom::RomOptions::default();
     assert_eq!(
         hex(&rom::begin(0x1234, b"rom", &options).unwrap()),
@@ -86,7 +87,7 @@ fn rom_packets_match_serve_web() {
 }
 
 #[test]
-fn sd_packets_match_serve_web() {
+fn sd_packets_match_the_pinned_bytes() {
     assert_eq!(hex(&sd::list(0x0102)), "4e50010502010000");
     assert_eq!(
         hex(&sd::load(1, "game.nes").unwrap()),
@@ -99,7 +100,7 @@ fn sd_packets_match_serve_web() {
 }
 
 #[test]
-fn debug_requests_match_serve_web() {
+fn debug_requests_match_the_pinned_bytes() {
     assert_eq!(
         hex(&debug::request_snapshot(0x1234, false)),
         "4e50010334120000"
