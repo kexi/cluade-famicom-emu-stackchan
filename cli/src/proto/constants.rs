@@ -180,6 +180,46 @@ pub const SD_ENTRIES_PER_PART: usize = (SD_CHUNK - SD_LIST_HEADER) / SD_ENTRY_MA
 /// LIST 応答のパート数の上限。firmware の `nparts` と同じ式
 pub const SD_MAX_PARTS: usize = SD_MAX_FILES.div_ceil(SD_ENTRIES_PER_PART);
 
+// ------------------------------------------------------- type 6: WiFi 設定
+//
+// ブラウザのフラッシャが焼いた直後に使う。公開バイナリに認証情報は焼けない
+// ので、焼いた後で USB 越しに送る。
+//
+// この CLI は type 6 を送らない — 定数だけを持つのは、正本 (`config.h`) との
+// 突き合わせをこのファイル 1 か所に保つため (モジュール冒頭の方針と同じ)。
+// firmware は USB シリアル以外からの type 6 を拒否するので、UDP を喋る
+// この CLI から送っても NOT_SERIAL が返るだけになる
+
+/// `UDP_TYPE_PROV`
+pub const TYPE_PROV: u8 = 6;
+
+/// `UDP_PROV_OP_SET`
+pub const PROV_OP_SET: u8 = 0;
+/// `UDP_PROV_OP_STATUS`
+pub const PROV_OP_STATUS: u8 = 1;
+/// `UDP_PROV_OP_APPLY`
+pub const PROV_OP_APPLY: u8 = 2;
+
+/// `UDP_PROV_ACK_SIZE`
+pub const PROV_ACK_SIZE: usize = 8;
+/// 応答の magic (`'N','W'`)
+pub const PROV_ACK_MAGIC: [u8; 2] = *b"NW";
+/// `UDP_PROV_STATUS_SIZE`
+pub const PROV_STATUS_SIZE: usize = 13;
+
+/// `WIFI_SSID_MAX` — 802.11 の SSID 32 バイト + 終端
+pub const WIFI_SSID_MAX: usize = 33;
+/// `WIFI_PASS_MAX` — WPA2 のパスフレーズ 63 バイト + 終端
+pub const WIFI_PASS_MAX: usize = 64;
+
+// ------------------------------------------------- シリアル (USB) 経路
+//
+// 同じパケットをバイトストリームに載せるための枠。COBS を選んだ理由は
+// `m5stack/src/serial_link.h` にある
+
+/// `SERIAL_CRC_SIZE` — フレーム末尾の CRC-16
+pub const SERIAL_CRC_SIZE: usize = 2;
+
 #[cfg(test)]
 mod tests {
     use super::*;
