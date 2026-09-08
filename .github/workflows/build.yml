@@ -40,6 +40,19 @@ jobs:
       - run: nix develop --command just lint-js
       - run: nix develop --command just cli-clippy
 
+  # シリアル経路のフレーミング (COBS / CRC-16) が実装間で一致するか。
+  # 実機がないと試せない箇所なので、ホストで突き合わせておく
+  test-serial-frame:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - run: nix develop --command just test-serial-frame
+
   # 実機操作 CLI (cli/) のテスト
   cli-test:
     runs-on: ubuntu-latest
@@ -94,3 +107,6 @@ jobs:
       - run: nix develop --command just secrets # ダミーの WiFi 設定 (ビルドに必要)
       - run: nix develop --command just fetch-rom # 埋め込み ROM (board_build.embed_files)
       - run: nix develop --command just build
+      # 配布ビルド。Pages が配るのはこちらなので、通常ビルドだけが通る状態で
+      # main に入ると、気づくのは配備が落ちたときになる
+      - run: nix develop --command just build-dist

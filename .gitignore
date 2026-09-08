@@ -1,6 +1,9 @@
 # 依存・ビルド生成物 (web/nes.{js,wasm} はビルド環境なしで配信するため意図的にコミット)
 node_modules/
 dist/
+# ブラウザフラッシャが配るファームウェア。CI が pages.yml のビルドから集めるので
+# コミットしない (nes.wasm と違い 1.1MB あり、毎ビルドで中身が変わる)
+web/firmware/
 m5stack/.pio/
 m5stack/compile_commands.json
 # cargo は成果物を作業ツリーに置くしかない (verify のように mktemp へ逃がせない)

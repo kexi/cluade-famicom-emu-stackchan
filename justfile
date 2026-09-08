@@ -14,6 +14,7 @@ dev frames='120':
     @just check
     @just cli-test
     @just test-ppu-flag
+    @just test-serial-frame
     @just verify {{frames}}
     @just build-web
 
@@ -26,6 +27,10 @@ build:
 # ビルドして実機へ書き込み (ポートは自動検出、指定も可: just flash /dev/cu.usbmodem1101)
 flash port='':
     cd m5stack && pio run -e m5stack-cores3 -t upload {{ if port == '' { '' } else { '--upload-port ' + port } }}
+
+# 配布ビルド (埋め込み ROM なし。GitHub Pages のフラッシャが配るのはこれ)
+build-dist:
+    cd m5stack && pio run -e m5stack-cores3-dist
 
 # 計測ビルド (NES_PROFILE 入り。毎秒 apu=/ppu=/cpu= の内訳ログを出す)
 build-profile:
@@ -125,6 +130,10 @@ sd-list host:
     cli/target/release/stackchan --host {{host}} sd ls
 
 # -------------------------------------------------------------------- 検証
+
+# シリアル経路のフレーミング検査 (COBS / CRC-16 が 3 実装で一致するか)
+test-serial-frame:
+    uv run tools/test_serial_frame.py
 
 # コアの構文チェック (Web / 組み込み両モード)
 check:

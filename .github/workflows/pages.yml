@@ -1,0 +1,84 @@
+# web/ を GitHub Pages に配り、ブラウザから実機を焼けるようにする。
+#
+# build.yml と分けてあるのは権限のため。あちらはトップレベル permissions: {} で
+# 全ジョブを封じ、必要な分だけ個別に開ける方針で書かれている。Pages への配備は
+# pages: write と id-token: write を要るので、同じファイルに混ぜると「何も
+# 持たない」という宣言の意味が薄れる。
+#
+# 配るファームウェアは m5stack-cores3-dist — 埋め込み ROM を外したビルド。
+# 理由は platformio.ini に書いてある。
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+# 同時に 2 つ配ろうとすると後勝ちが不定になる。走行中のものは走り切らせる
+# (途中で殺すと Pages が中途半端な成果物のまま残りうる)
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.platformio
+          key: platformio-${{ runner.os }}-${{ hashFiles('m5stack/platformio.ini') }}
+
+      # コミット済みの nes.js/nes.wasm をそのまま配らずビルドし直すのは、
+      # build.sh が index.html の ?v= を打ち直すため。手元でのビルドを忘れた
+      # まま main に入っても、配られる版番号は必ず新しくなる
+      - run: nix develop --command just build-web
+
+      # ダミーの secrets.h。実行時に NVS が勝つので、焼いたあとブラウザから
+      # 設定すればこの値は使われない (main.cpp の loadWifiCredentials)
+      - run: nix develop --command just secrets
+      - run: nix develop --command just build-dist
+
+      # フラッシャが読む 4 つのイメージを web/ の下に集める。offset は
+      # web/flash.js が持っている (PlatformIO の platformio-build.py と同じ値)
+      - name: Collect firmware images
+        run: |
+          set -euo pipefail
+          out=web/firmware
+          mkdir -p "$out"
+          build=m5stack/.pio/build/m5stack-cores3-dist
+          cp "$build/bootloader.bin" "$out/"
+          cp "$build/partitions.bin" "$out/"
+          cp "$build/firmware.bin" "$out/"
+          # boot_app0 は framework が配るもので、ビルド成果物ではない。
+          # 版が上がるとパスが変わりうるので、固定せず探す
+          boot_app0=$(find ~/.platformio/packages/framework-arduinoespressif32/tools/partitions \
+            -name boot_app0.bin -print -quit)
+          test -n "$boot_app0"
+          cp "$boot_app0" "$out/"
+          ls -l "$out"
+
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
+        with:
+          path: web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

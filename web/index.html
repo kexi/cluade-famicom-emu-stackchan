@@ -513,7 +513,8 @@
     font-size: 12px;
     padding: 6px 8px;
   }
-  #swap-url-btn {
+  #swap-url-btn,
+  #usb-connect-btn {
     background: var(--fc-red);
     color: var(--fc-cream);
     border: none;
@@ -525,10 +526,17 @@
     box-shadow: 0 2px 0 var(--fc-red-dark);
     white-space: nowrap;
   }
-  #swap-url-btn:active { transform: translateY(2px); box-shadow: none; }
+  #swap-url-btn:active,
+  #usb-connect-btn:active { transform: translateY(2px); box-shadow: none; }
+  #usb-connect-btn:disabled { opacity: .5; cursor: default; }
   /* only shown when a device is configured (?device=<ip>) */
   #swap-device-row { display: flex; gap: 6px; align-items: center; margin-bottom: 12px; }
   #swap-device-row[hidden] { display: none; }
+  /* Same display:flex / [hidden] pairing as the rows above — the attribute alone
+     loses to the flex rule. */
+  #usb-row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+  #usb-row[hidden] { display: none; }
+  #usb-status { color: #8a93a0; font-size: 12px; }
   #swap-device-label {
     flex: 1 1 0;
     display: flex;
@@ -1098,6 +1106,13 @@
     <input type="text" id="swap-url" placeholder="https://.../game.nes" spellcheck="false">
     <button id="swap-url-btn">URLから読込</button>
   </div>
+  <!-- USB. Shown only when Web Serial exists and no ?device= was given: with a
+       relay configured the network path is already the answer, and offering both
+       would beg a question the user has no reason to care about. -->
+  <div id="usb-row" hidden>
+    <button id="usb-connect-btn">実機をUSBで繋ぐ</button>
+    <span id="usb-status"></span>
+  </div>
   <div id="swap-device-row" hidden>
     <label id="swap-device-label"><input type="checkbox" id="swap-device-noreset"><span id="lbl-swap-noreset">リセットせず差し替え</span></label>
     <button id="swap-device-btn">実機に送る</button>
@@ -1139,6 +1154,8 @@ PRGとCHRを別のカセットから組み合わせた「ニコイチカセッ�
 <script>window.NES_VER='1785324359';</script>
 <script src="i18n.js?v=1785324359"></script>
 <script src="smb-ram.js?v=1785324359"></script>
+<script src="protocol.js?v=1785324359"></script>
+<script src="serial.js?v=1785324359"></script>
 <script src="nes.js?v=1785324359"></script>
 <script src="main.js?v=1785324359"></script>
 </body>
