@@ -615,6 +615,22 @@ constexpr uint32_t JOY_REPROBE_MS = 1000;
 // red one — verified on hardware with the unit on PORT.C.
 // pin1 = red -> NES A, pin2 = blue -> NES B (see grove_input.cpp).
 
+// ------------------------------------------------------------------- faces
+// M5Stack Faces 3 Bottom Board + Gamepad Panel v3.0。パネルの STM32 が 8 個の
+// ボタンを走査し、1 バイトのビットマスクとして返す。NES のパッドと同じ
+// 8 ボタン構成なので、Grove の入力と違って十字 + A/B/SELECT/START が全部揃う。
+//
+// アドレス・レジスタ・型番は Faces3 ベース共通 (M5Stack 公式 M5Faces ライブラリ
+// の M5FacesBase.hpp より)。0x08 にはゲームパッド以外にキーボードや電卓の
+// パネルも載りうるため、MODEL_ID を読んで型番を確かめてから使う。
+constexpr uint8_t FACES_I2C_ADDR = 0x08;
+constexpr uint8_t FACES_REG_KEY = 0x00;   // 押下ビットマスク (active-low)
+constexpr uint8_t FACES_REG_MODEL_ID = 0xD0;   // 型番
+constexpr uint8_t FACES_MODEL_GAMEPAD3 = 0x03;
+// 内部 I2C は head_touch (Si12T) やスピーカーの AW88298 と同居する。本家も
+// 既定は 100kHz で、ここだけ上げる理由が無い。
+constexpr uint32_t FACES_I2C_FREQ = 100000;
+
 // -------------------------------------------------------------- head touch
 // M5Stack 公式 StackChan の頭頂部タッチセンサー (Si12T)。3 ゾーンを前後に
 // 2 回なぞる (なでなで) とゲーム中でも ROM 選択メニューに戻る。

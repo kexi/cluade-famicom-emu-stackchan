@@ -16,7 +16,7 @@ Open any .NES file (iNES format) with "Open ROM". Works on desktop and Android C
 - The same C++ core, compiled with `-DNES_EMBEDDED`: CPU-ahead batched execution with catch-up at register accesses, a per-scanline PPU renderer, and a 256-entry CPU dispatch table with the hottest opcodes in IRAM. **Bit-exact against the web core's dot-accurate renderer** (verified frame-by-frame on host), currently ~33 fps on the 240 MHz ESP32-S3.
 - 256×240 RGB565 pushed to the LCD by DMA, fully overlapped with emulation; adaptive display divisor trades refresh rate for emulation speed.
 - Audio through the built-in speaker with a ring buffer; playback rate follows the measured frame rate so it stays continuous instead of underrunning.
-- Controller input over UDP — `stackchan input procon` streams a Nintendo Switch Pro Controller from your PC, `stackchan input keys` plays from the keyboard, and `stackchan input send A B START` scripts presses.
+- Controller input over UDP — `stackchan input procon` streams a Nintendo Switch Pro Controller from your PC, `stackchan input keys` plays from the keyboard, and `stackchan input send A B START` scripts presses. Locally, a **Faces 3 Gamepad Panel** gives the full 8-button NES layout with nothing else attached, and Grove Joystick / Dual Button units work too — all OR'd with the UDP pad.
 - **The cartridge connector fault model runs on the device too.** All 60 pins can be broken at runtime; the healthy path costs a single branch, so full speed is kept until you start breaking pins.
 
 ### Browser → device mirroring
