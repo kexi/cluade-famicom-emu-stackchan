@@ -11,6 +11,7 @@
 #include <atomic>
 
 #include "config.h"
+#include "faces_input.h"
 #include "grove_input.h"
 
 // Joystick2 register map (m5stack/M5Unit-JoyStick2).
@@ -127,6 +128,13 @@ static void groveTask(void*) {
     for (;;) {
         uint8_t bits = 0;
 
+        // Faces のゲームパッドも同じ周期でここから読む。専用タスクを立てない
+        // のは、これが 1 バイトの I2C 読みひとつで、周期も優先度もこのタスクに
+        // 求めるものと同じだから — バスは内部 I2C で別だが、「フレームループを
+        // 止めずに入力を集める」という役割は Grove と変わらない。
+        facesInputPoll();
+        bits |= facesInputBits();
+
         // Dual Button Unit: every port the joystick is not on. A held button
         // shorts its line to GND. With no joystick found yet all ports are
         // read — a plugged-but-undetected joystick just idles both lines high,
@@ -176,6 +184,10 @@ static void groveTask(void*) {
 }
 
 void groveInputInit() {
+    // Grove の探索より先に、内部 I2C 側の Faces パネルを見る。バスが別なので
+    // 順序に依存は無いが、パネルが刺さっていれば以降のログの読み口になる。
+    facesInputInit();
+
     for (int port = 0; port < GROVE_PORT_COUNT; port++) portToGpio(port);
 
     // One full sweep up front so a stick plugged in before boot is live from
