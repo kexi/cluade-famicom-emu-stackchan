@@ -24,6 +24,11 @@ static constexpr uint8_t FACES_TO_NES[8] = {
 
 static std::atomic<uint8_t> g_facesBits{0};
 static bool g_present = false;
+// パネルが最後に返したバイト。KEY レジスタはイベントが無いあいだ「最後に
+// 送ったバイト」をそのまま返し続ける (実測: 型番を読んだ直後は 0x03、I2C
+// アドレスを読んだ直後は 0x08 が KEY として返る)。パネルはキーの変化ごとに
+// 1 フレームだけ出すので、前回と同じバイトは新しい情報を持たない。
+static uint8_t g_lastByte = 0xFF;
 
 uint8_t facesInputBits() { return g_facesBits.load(std::memory_order_relaxed); }
 
@@ -55,8 +60,22 @@ bool facesInputInit() {
         return false;
     }
 
+    // ファーム版を記録 (0xFE)。残骸の出方が版で違う可能性があるので、報告に
+    // 添えられるようログに残す。読めなくても動作には関係ない。
+    uint8_t fw = 0;
+    const bool fwOk = M5.In_I2C.readRegister(FACES_I2C_ADDR, FACES_REG_FW_VERSION, &fw, 1, FACES_I2C_FREQ);
+
+    // 送信バッファの残骸を取り込んでおく。KEY はイベントが無いあいだ「最後に
+    // 送ったバイト」を返し続けるので (facesInputPoll() 参照)、直前に読んだ
+    // レジスタの値がそのまま返ってくる。以前はこれをボタン状態として
+    // 通していたため、0x03 (型番) が「LEFT+RIGHT+A+B+SELECT+START 同時押し」
+    // に化けて起動直後のメニューで先頭 ROM が勝手に選ばれていた。ここで 1 回
+    // 読んで g_lastByte に据えれば、以降の同じ値はポーリング側で捨てられる。
+    uint8_t stale = 0;
+    if (M5.In_I2C.readRegister(FACES_I2C_ADDR, FACES_REG_KEY, &stale, 1, FACES_I2C_FREQ)) g_lastByte = stale;
+
     g_present = true;
-    Serial.println("FACES: gamepad panel v3.0");
+    Serial.printf("FACES: gamepad panel v3.0 fw=%s%02X\n", fwOk ? "" : "?", fw);
     return true;
 }
 
@@ -71,6 +90,15 @@ void facesInputPoll() {
         // 抜き差しされないので、Grove のような「見失ったら探索に戻る」経路は要らない。
         return;
     }
+
+    // KEY はレベルではなくイベント。パネルはボタン状態が変わるたびに「その時点の
+    // 全ボタン状態」を 1 フレーム出し、次の変化までは送信バッファに残った
+    // 最後のバイトを返し続ける (実測、fw 03: 型番を読んだ直後は 0x03 が KEY と
+    // して返る)。前回と同じバイトは新しい情報を持たないので捨てる。押しっぱなし
+    // は、押した瞬間のフレームで立てたビットが離すフレーム (0xFF) まで残ること
+    // で表現されるので、ここで捨てても押下が抜けることはない。
+    if (raw == g_lastByte) return;
+    g_lastByte = raw;
 
     // INT ピンを使わない盲ポーリングでは、パネルの V03/V04 ファームが送信
     // バッファに残った 0x00 をそのまま返すことがある (本家 M5Faces_Gamepad3
