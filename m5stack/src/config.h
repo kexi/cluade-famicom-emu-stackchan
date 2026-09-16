@@ -626,6 +626,7 @@ constexpr uint32_t JOY_REPROBE_MS = 1000;
 constexpr uint8_t FACES_I2C_ADDR = 0x08;
 constexpr uint8_t FACES_REG_KEY = 0x00;   // 押下ビットマスク (active-low)
 constexpr uint8_t FACES_REG_MODEL_ID = 0xD0;   // 型番
+constexpr uint8_t FACES_REG_FW_VERSION = 0xFE;   // パネルのファーム版 (読み取り専用)
 constexpr uint8_t FACES_MODEL_GAMEPAD3 = 0x03;
 // 内部 I2C は head_touch (Si12T) やスピーカーの AW88298 と同居する。本家も
 // 既定は 100kHz で、ここだけ上げる理由が無い。
