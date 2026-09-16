@@ -128,11 +128,13 @@ static void groveTask(void*) {
     for (;;) {
         uint8_t bits = 0;
 
-        // Faces のゲームパッドも同じ周期でここから読む。専用タスクを立てない
-        // のは、これが 1 バイトの I2C 読みひとつで、周期も優先度もこのタスクに
-        // 求めるものと同じだから — バスは内部 I2C で別だが、「フレームループを
-        // 止めずに入力を集める」という役割は Grove と変わらない。
-        facesInputPoll();
+        // Faces のゲームパッドの押下状態も合成する。ただし I2C を読むのは
+        // ここではない: パネルは内部 I2C に居て、そのバスは core 1 の
+        // フレームループが M5.update() (タッチパネル) と head_touch で使う。
+        // 同じ lgfx の I2C コンテキストを 2 つのタスクから叩くと、ロックの
+        // 授受が食い違って xQueueGenericSend のアサートで落ちる (実測: 起動
+        // 20 秒ほどでリセット) ので、内部 I2C の読みは core 1 に集約し、
+        // ここは atomic に置かれた結果を拾うだけにする。
         bits |= facesInputBits();
 
         // Dual Button Unit: every port the joystick is not on. A held button

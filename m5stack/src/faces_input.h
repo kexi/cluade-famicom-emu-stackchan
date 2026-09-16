@@ -18,10 +18,13 @@ bool facesInputInit();
 // Faces パネルが検出済みかどうか。ポーリングを回す価値があるかの判定用。
 bool facesInputPresent();
 
-// パネルを 1 回読み、内部の押下状態を更新する。I2C を触るので core 0 の
-// Grove タスクから呼ぶこと (フレームループから呼んではいけない)。
+// パネルを 1 回読み、内部の押下状態を更新する。内部 I2C を触るので、同じ
+// バスを使う M5.update() / head_touch と同じ core 1 のループから呼ぶこと
+// (Game なら applyInput()、Menu なら menuLoop())。core 0 の Grove タスクから
+// 呼ぶと lgfx の I2C ロックが 2 タスク間で食い違い、アサートで落ちる。
+// 1 バイトを 100kHz で読むだけなので ~0.3ms、フレーム予算には乗らない。
 void facesInputPoll();
 
 // 直近のポーリングで押されていたボタン (NES_BTN_* レイアウト)。
-// facesInputPoll() と別スレッドから読んでも安全。
+// facesInputPoll() と別スレッド (core 0 の Grove タスク) から読んでも安全。
 uint8_t facesInputBits();

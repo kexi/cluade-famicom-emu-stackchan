@@ -21,6 +21,7 @@
 #include "config.h"
 #include "reply_sink.h"
 #include "serial_link.h"
+#include "faces_input.h"
 #include "grove_input.h"
 #include "head_touch.h"
 #include "menu.h"
@@ -1146,6 +1147,10 @@ static void applyInput() {
     const bool udpStale = sinceRx > INPUT_TIMEOUT_MS;
     const uint8_t udp0 = udpStale ? 0 : g_padBits[0].load(std::memory_order_relaxed);
     const uint8_t udp1 = udpStale ? 0 : g_padBits[1].load(std::memory_order_relaxed);
+    // Faces パネルの I2C 読みはここ (core 1)。内部 I2C は M5.update() の
+    // タッチパネルと applyHeadTouch() も使うので、同じタスクに揃えておく
+    // (faces_input.h 参照)。groveInputBits() が拾うのはこの結果。
+    facesInputPoll();
     g_nes.pad[0].setButtons(udp0 | groveInputBits() | touchButtonBits());
     g_nes.pad[1].setButtons(udp1);
     // パッドのビットには寄与しない (撫でるのはメニューを開く操作であって
@@ -1888,6 +1893,8 @@ static void menuLoop() {
     const uint32_t sinceRx = millis() - g_lastRxMs.load(std::memory_order_relaxed);
     const bool udpStale = sinceRx > INPUT_TIMEOUT_MS;
     const uint8_t udpBits = udpStale ? 0 : g_padBits[0].load(std::memory_order_relaxed);
+    // ゲーム中と同じく、Faces の I2C 読みはこのループ (core 1) で行う。
+    facesInputPoll();
     uint8_t nav = udpBits | groveInputBits();
     if (M5.BtnB.isPressed()) nav |= NES_BTN_START;
 
